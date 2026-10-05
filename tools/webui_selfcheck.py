@@ -32,12 +32,14 @@ HANDLERS_PY = PLUGIN_DIR / "web_api" / "handlers.py"
 NEW_FILES = (
     "core/webui_data.py",
     "core/webui_settings.py",
+    "core/webui_portrait.py",
     "web_api/__init__.py",
     "web_api/_web.py",
     "web_api/routes.py",
     "web_api/handlers.py",
     "test/test_webui_data.py",
     "test/test_webui_settings.py",
+    "test/test_webui_portrait.py",
     "pages/diary/index.html",
     "pages/diary/app.js",
     "pages/diary/ui.js",
@@ -49,9 +51,11 @@ NEW_FILES = (
     "pages/diary/views/affinity.js",
     "pages/diary/views/proactive.js",
     "pages/diary/views/settings.js",
+    "pages/diary/views/data.js",
 )
 
 failures: list[str] = []
+notes: list[str] = []
 checked = 0
 
 
@@ -99,6 +103,73 @@ def frontend_endpoints() -> dict[str, str]:
     for key, value in re.findall(r"(\w+)\s*:\s*\"([^\"]+)\"", match.group(1)):
         endpoints[key] = value
     return endpoints
+
+
+CALL_RE = re.compile(
+    r"\bapi(?:Get|Post|Upload)\(\s*"
+    r"(?:ENDPOINTS\.(\w+)|([\"'])([^\"']*)\2|([A-Za-z_$][\w$]*))"
+)
+"""真实调用点。**关键：``apiGet/apiPost/apiUpload`` 的第一个参数是 ENDPOINTS 表的「键」，
+不是路径**——``apiGet("diaryList")`` 经 ``app.js`` 的包装函数解析成
+``ENDPOINTS["diaryList"]`` = ``"diary/list"``；写成路径反而会取到 ``undefined``。
+三种形态：``ENDPOINTS.<键>`` / 字符串字面量（键）/ 其它表达式（动态，静态判不了）。
+``app.js`` 里 ``async function apiGet(key, …)`` 是**定义**不是调用点，按前缀排除。"""
+
+
+def frontend_calls(
+    endpoints: dict[str, str],
+) -> tuple[dict[str, list[str]], list[tuple[str, str]], list[tuple[str, str]]]:
+    """扫 ``pages/diary/**/*.js`` 的调用点，返回 ``(resolved, unknown, dynamic)``。
+
+    - ``resolved``：``{endpoint 值: [文件名…]}`` —— 参数确实是表里的键，真接上了；
+    - ``unknown``：``[(参数名, 文件名)…]`` —— 参数既不是表的键 ⇒ 运行时
+      ``ENDPOINTS[参数]`` 是 ``undefined``，**这是真 bug**（记一笔：10-06 该函数的
+      第一版把字面量当路径查，于是把 ``apiGet("diaryList")`` 这类**正确**写法报成
+      "表里没登记"，还反过来给出会把页面改坏的"修法"——模型搞错，规则全错）；
+    - ``dynamic``：``[(文件名, 片段)…]`` —— 参数是变量 / 表达式，静态判不了
+      （如 ``notebook.js`` 的 ``mutate(key, id)`` 转发），只报不判。
+    """
+    resolved: dict[str, list[str]] = {}
+    unknown: list[tuple[str, str]] = []
+    dynamic: list[tuple[str, str]] = []
+    for path in sorted(PAGE_DIR.rglob("*.js")):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for match in CALL_RE.finditer(source):
+            if source[max(0, match.start() - 9) : match.start()].endswith("function "):
+                continue  # 包装函数的定义，不是调用点
+            named, _quote, literal, ident = match.groups()
+            name = named if named is not None else literal
+            if name is None:
+                dynamic.append((path.name, ident or ""))
+            elif name in endpoints:
+                resolved.setdefault(endpoints[name], []).append(path.name)
+            else:
+                unknown.append((str(name), path.name))
+    return resolved, unknown, dynamic
+
+
+def referenced_keys(endpoints: dict[str, str]) -> set[str]:
+    """在 **``app.js`` 之外**的页面代码里被引用到的表键。
+
+    排除 ``app.js`` 是必须的：``ENDPOINTS`` 表本身就住在那里，拿它当"被引用"等于自证，
+    "往表里加一行假装接上了"就又骗过去了。视图里出现键名（``apiGet("notebook")`` /
+    ``mutate("notebookComplete", …)``）才算真有人用。
+    """
+    found: set[str] = set()
+    for path in sorted(PAGE_DIR.rglob("*.js")):
+        if path.name == "app.js":
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for key in endpoints:
+            if key not in found and re.search(rf"\b{re.escape(key)}\b", source):
+                found.add(key)
+    return found
 
 
 def handler_names() -> set[str]:
@@ -167,6 +238,26 @@ def main() -> int:
     if len(endpoints) != len(front):
         failures.append("前端 ENDPOINTS 表里有重复的 endpoint 值")
 
+    # 4b. 调用点对账（§四 03:20 裁定 #4；10-06 修正：参数是**表键**不是路径）
+    calls, unknown_calls, dynamic_calls = frontend_calls(endpoints)
+    for name, where in sorted(set(unknown_calls)):
+        failures.append(
+            f"调用点用了不在 ENDPOINTS 表里的名字：{name}（{where}）——"
+            "apiGet / apiPost / apiUpload 的参数是**表的键**，写成别的会取到 undefined"
+        )
+    referenced = referenced_keys(endpoints)
+    for key, value in sorted(endpoints.items()):
+        check(key in referenced, f"表项没有任何引用：{key}（endpoint {value}）")
+    if dynamic_calls:
+        notes.append(
+            "动态调用点（静态判不了，只报不判）："
+            + "、".join(f"{name}:{snippet}" for name, snippet in sorted(set(dynamic_calls)))
+        )
+    notes.append(
+        f"调用点对账：表 {len(endpoints)} 项，静态解析到 {len(calls)} 个 endpoint、"
+        f"被引用 {len(referenced)} 个键、未知名字 {len(set(unknown_calls))} 个。"
+    )
+
     # 6. handler 名对得上
     names = handler_names()
     for endpoint, spec in routes.items():
@@ -225,6 +316,8 @@ def report() -> int:
         print("✗ WebUI 自检没过：")
         for item in failures:
             print(f"  - {item}")
+        for item in notes:
+            print(f"  · {item}")
         print(f"共 {checked} 项检查，{len(failures)} 项不过。")
         return 1
     print(f"✓ WebUI 自检全过：{checked} 项检查。")
@@ -232,6 +325,8 @@ def report() -> int:
     print("  · 资源全部相对、齐全、无 CDN、无 ../")
     print("  · core/ 零 astrbot import；web_api 只碰 api.web")
     print("  · 新文件 UTF-8 无 BOM + 纯 LF")
+    for item in notes:
+        print(f"  · {item}")
     return 0
 
 
