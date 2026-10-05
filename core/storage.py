@@ -47,6 +47,7 @@ PROACTIVE_LOG_FILE = "proactive-log.jsonl"
 NAMES_FILE = "names.json"
 DIARY_NUDGE_FILE = "diary-nudge.json"
 TRASH_DIR = "diary-trash"
+PORTRAITS_DIR = "portraits"
 
 JSON_FILES = (
     NOTEBOOK_FILE,
@@ -121,6 +122,10 @@ class Layout:
     def trash_dir(self) -> Path:
         return self.base_dir / TRASH_DIR
 
+    @property
+    def portraits(self) -> Path:
+        return self.base_dir / PORTRAITS_DIR
+
     def files(self) -> tuple[Path, ...]:
         """全部数据文件（不含目录）。"""
         return (
@@ -137,9 +142,10 @@ class Layout:
         )
 
     def ensure(self) -> Layout:
-        """建好目录（含回收站）。返回自身，便于链式调用。"""
+        """建好目录（含回收站与立绘目录）。返回自身，便于链式调用。"""
         ensure_dir(self.base_dir)
         ensure_dir(self.trash_dir)
+        ensure_dir(self.portraits)
         return self
 
 

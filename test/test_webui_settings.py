@@ -24,6 +24,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
 for _path in (_HERE, _HERE.parent):
@@ -361,6 +362,7 @@ class TestSettingsHandlers(TmpDirCase):
 
         async def apply_settings(updated, *, applied=None):
             self.applied.append(updated)
+            self.deps.settings = settings_mod.load_settings(updated)  # 模拟热生效
             return {"ok": True, "applied": list(applied or []), "warnings": [], "reloaded": False, "backup": "b.json"}
 
         self.config = DictConfig(self.raw)
@@ -655,6 +657,233 @@ class TestApplySettingsAdapter(TmpDirCase):
             self.assertIn(key, result)
         self.assertIsInstance(result["warnings"], list)
         self.assertEqual(result["applied"], ["proactive.patrol_minutes"])
+
+
+# ---- 第 5.2 步对齐：sections 树 / 逐项 coerce / reset / schema 自检 ---------------
+
+
+class TestSectionsTree(unittest.TestCase):
+    def test_real_schema_fully_covered(self) -> None:
+        """当前 schema：4 个大类、11 个分组（= 顶层键），组内 keys 与 fields 对得上。"""
+        payload = webui_settings.sections_payload(SCHEMA)
+        self.assertEqual([s["key"] for s in payload["sections"]], ["basic", "content", "proactive", "outbound"])
+        self.assertEqual([g["name"] for g in payload["groups"]], [name for name, _ in webui_settings.CONFIG_GROUPS])
+        self.assertEqual(len(payload["groups"]), len(SCHEMA), "分组数 = schema 顶层键数")
+        _, fields = webui_settings.describe_schema(SCHEMA)
+        self.assertEqual(
+            sorted(key for group in payload["groups"] for key in group["keys"]),
+            sorted(str(field["path"]) for field in fields),
+            "组内 keys 就是全部叶子的点分路径",
+        )
+        # 大类归属落进 payload：每个 section 只带真实存在的组名
+        for section in payload["sections"]:
+            for name in section["groups"]:
+                self.assertIn(name, {g["name"] for g in payload["groups"]})
+
+    def test_bad_group_reference_is_narrowed_and_reported(self) -> None:
+        payload = webui_settings.sections_payload(SCHEMA)
+        # 常量表没有动 → sections 引用的组名都真实存在；构造一个引用不存在组名的表来测收窄
+        original = webui_settings.CONFIG_SECTIONS
+        patched = (
+            {"key": "x", "label": "幽灵", "description": "", "groups": ("不存在的组", "diary")},
+        )
+        with mock.patch.object(webui_settings, "CONFIG_SECTIONS", patched):
+            narrowed = webui_settings.sections_payload(SCHEMA)
+            self.assertEqual(narrowed["sections"][0]["groups"], ["diary"], "不存在的组名被静默收窄")
+            problems = webui_settings.section_coverage_problems(SCHEMA)
+            self.assertTrue(any("不存在的分组" in item for item in problems))
+            self.assertTrue(any("没有归属任何大类" in item for item in problems),
+                            "只声明一个幽灵大类时，其余分组全部失去归属")
+
+    def test_group_in_two_sections_is_reported(self) -> None:
+        original = webui_settings.CONFIG_SECTIONS
+        patched = (
+            {"key": "a", "label": "甲", "description": "", "groups": ("diary",)},
+            {"key": "b", "label": "乙", "description": "", "groups": ("diary",)},
+        )
+        with mock.patch.object(webui_settings, "CONFIG_SECTIONS", patched):
+            problems = webui_settings.section_coverage_problems(SCHEMA)
+        self.assertTrue(any("同时属于" in item for item in problems))
+
+
+class TestSchemaAlignment(unittest.TestCase):
+    def test_current_schema_is_aligned(self) -> None:
+        """当前仓库的 schema 与 core.settings 默认值表必须是对齐的（自检基线）。"""
+        self.assertEqual(webui_settings.verify_schema_alignment(SCHEMA), [])
+        self.assertEqual(webui_settings.verify_schema_alignment(webui_settings.load_schema_file()), [])
+
+    def test_int_without_range_is_reported(self) -> None:
+        """int 项没有 INT_LIMITS 取值范围也要报（两边键都对得上、只是缺范围）。"""
+        saved = settings_mod.INT_LIMITS.pop("diary.max_chars")
+        try:
+            problems = webui_settings.verify_schema_alignment(SCHEMA)
+        finally:
+            settings_mod.INT_LIMITS["diary.max_chars"] = saved
+        self.assertTrue(any("diary.max_chars" in item and "INT_LIMITS" in item for item in problems))
+
+    def test_extra_and_missing_keys_are_reported(self) -> None:
+        schema = {
+            "enabled": {"type": "bool", "default": True},
+            "ghost": {"type": "string", "default": ""},  # 代码没有
+        }
+        problems = webui_settings.verify_schema_alignment(schema)
+        self.assertTrue(any("ghost" in item and "schema 有而" in item for item in problems))
+        self.assertTrue(any("love_peers" in item for item in problems), "代码有而 schema 缺")
+
+    def test_group_shape_mismatch_is_reported(self) -> None:
+        schema = {"notebook": {"type": "string", "default": ""}}  # 代码侧是映射
+        problems = webui_settings.verify_schema_alignment(schema)
+        self.assertTrue(any("分组对不上" in item for item in problems))
+
+    def test_section_coverage_is_part_of_alignment(self) -> None:
+        original = webui_settings.CONFIG_SECTIONS
+        with mock.patch.object(webui_settings, "CONFIG_SECTIONS", original + (
+            {"key": "x", "label": "悬空", "description": "", "groups": ("time_zone",)},
+        )):
+            problems = webui_settings.verify_schema_alignment(SCHEMA)
+        self.assertTrue(any("悬空" in item for item in problems))
+
+
+class TestCoerceValue(unittest.TestCase):
+    def field(self, kind, **extra):
+        return {"path": "x.y", "type": kind, "description": "测试项", **extra}
+
+    def test_bool_accepts_only_real_bool(self) -> None:
+        value, error = webui_settings.coerce_value(self.field("bool"), True)
+        self.assertIs(value, True)
+        self.assertIsNone(error)
+        _, error = webui_settings.coerce_value(self.field("bool"), "true")
+        self.assertIn("值类型不对", error)
+
+    def test_int_rejects_bool_disguise_and_strings(self) -> None:
+        value, error = webui_settings.coerce_value(self.field("int"), 30)
+        self.assertEqual(value, 30)
+        self.assertIsNone(error)
+        _, error = webui_settings.coerce_value(self.field("int"), True)
+        self.assertIn("值类型不对", error, "bool 冒充 int 必须拒（黑盒判例）")
+        _, error = webui_settings.coerce_value(self.field("int"), "30")
+        self.assertIn("值类型不对", error)
+
+    def test_string_list_dict(self) -> None:
+        for kind, good, bad in (
+            ("string", "UTC", 5),
+            ("list", ["a", "b"], ["a", 1]),
+            ("dict", {"a": "1"}, {"a": 1}),
+        ):
+            value, error = webui_settings.coerce_value(self.field(kind), good)
+            self.assertIsNone(error, kind)
+            _, error = webui_settings.coerce_value(self.field(kind), bad)
+            self.assertIn("值类型不对", error, kind)
+
+    def test_unknown_kind_is_rejected(self) -> None:
+        _, error = webui_settings.coerce_value(self.field("secret"), "x")
+        self.assertIn("不支持写入", error)
+
+
+class TestReviewChanges(unittest.TestCase):
+    def fields(self):
+        _, fields = webui_settings.describe_schema(SCHEMA)
+        return fields
+
+    def test_collects_all_errors_per_field(self) -> None:
+        clean, errors = webui_settings.review_changes(
+            self.fields(),
+            {"diary.nope": 1, "diary.max_chars": "很多", "data_dir": "/tmp/x", "timezone": "UTC"},
+        )
+        self.assertEqual([e["path"] for e in errors], ["diary.nope", "diary.max_chars", "data_dir"])
+        self.assertIn("未知", errors[0]["error"])
+        self.assertIn("值类型不对", errors[1]["error"])
+        self.assertIn("只能看不能改", errors[2]["error"])
+        self.assertEqual(clean, {"timezone": "UTC"}, "合法项照常产出（是否放行由调用方决定）")
+
+    def test_non_mapping_changes_is_one_error(self) -> None:
+        clean, errors = webui_settings.review_changes(self.fields(), "x")
+        self.assertEqual(clean, {})
+        self.assertEqual(len(errors), 1)
+
+
+class TestSettingsResetAndErrors(TestSettingsHandlers):
+    """handler 层：POST settings 的逐字段错误清单 + POST settings/reset。"""
+
+    def test_route_table_has_reset(self) -> None:
+        reset_routes = [spec for spec in self.routes.ROUTES if spec[0] == "settings/reset"]
+        self.assertEqual([spec[2] for spec in reset_routes], [("POST",)])
+        self.assertEqual([spec[1] for spec in reset_routes], ["settings_reset"])
+        self.assertEqual(len(self.routes.ROUTES), 16, "11 条既有 + settings/reset + 立绘 4 条")
+
+    def test_get_carries_sections_and_problems(self) -> None:
+        data = self.data_of(self.call("settings_get"))
+        self.assertIn("sections", data)
+        self.assertIn("problems", data)
+        self.assertEqual(data["problems"], [], "当前 schema 与代码是对齐的")
+        self.assertEqual(len(data["sections"]["sections"]), 4)
+
+    def test_post_mixed_errors_are_listed_per_field(self) -> None:
+        response = self.call(
+            "settings_post",
+            body={"changes": {"diary.nope": 1, "diary.max_chars": "很多", "data_dir": "/tmp/x"}},
+        )
+        self.assertEqual(response["status"], 400)
+        errors = response["extra"].get("errors") or []
+        self.assertEqual([e["path"] for e in errors], ["diary.nope", "diary.max_chars", "data_dir"])
+        self.assertEqual(self.applied, [], "逐字段报错时同样一个字节都不写")
+
+    def test_post_load_settings_rejection_is_per_field_too(self) -> None:
+        response = self.call("settings_post", body={"changes": {"proactive.patrol_minutes": 999}})
+        self.assertEqual(response["status"], 400)
+        errors = response["extra"].get("errors") or []
+        self.assertEqual(errors[0]["path"], "proactive.patrol_minutes")
+        self.assertEqual(self.applied, [])
+
+    def test_post_ok_response_carries_changed(self) -> None:
+        data = self.data_of(self.call("settings_post", body={"changes": {"diary.max_chars": 3000}}))
+        self.assertEqual(data["changed"], data["applied"])
+        self.assertEqual(data["errors"], [])
+
+    def test_reset_restores_defaults(self) -> None:
+        self.data_of(self.call("settings_post", body={"changes": {"diary.max_chars": 5000}}))
+        self.applied.clear()
+        data = self.data_of(self.call("settings_reset"))
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["changed"], ["diary.max_chars"])
+        self.assertEqual(self.applied[-1]["diary"]["max_chars"], 1200, "reset 真的回默认")
+        after = self.data_of(self.call("settings_get"))
+        self.assertEqual(after["values"]["diary"]["max_chars"], 1200)
+
+    def test_reset_noop_when_already_default(self) -> None:
+        data = self.data_of(self.call("settings_reset"))
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["changed"], [])
+        self.assertEqual(self.applied, [], "本来就是默认值：不落盘、不备份、不调适配器")
+
+    def test_reset_never_touches_read_only_fields(self) -> None:
+        self.raw["data_dir"] = "D:/somewhere"
+        self.deps.settings = settings_mod.load_settings(self.raw)
+        data = self.data_of(self.call("settings_reset"))
+        self.assertTrue(data["ok"])
+        self.assertNotIn("data_dir", data["changed"], "只读项永不进 reset")
+        self.assertNotIn("data_dir", self.applied[-1] if self.applied else {})
+
+    def test_reset_did_change_items_get_listed(self) -> None:
+        self.data_of(self.call("settings_post", body={"changes": {"timezone": "UTC", "notebook.fact_limit": 10}}))
+        self.applied.clear()
+        data = self.data_of(self.call("settings_reset"))
+        self.assertEqual(sorted(data["changed"]), ["notebook.fact_limit", "timezone"])
+        self.assertEqual(self.applied[-1]["timezone"], "Asia/Shanghai")
+
+
+class TestStartupSelfCheck(TestApplySettingsAdapter):
+    """启动自检：``initialize`` 跑一次对齐检查，问题写日志（这里只验不炸 + 数据对）。"""
+
+    def test_initialize_runs_alignment_check(self) -> None:
+        self.run_async(self.plugin.initialize())  # 不炸即过；自检对当前 schema 应该是安静的
+        with mock.patch.object(
+            webui_settings,
+            "load_schema_file",
+            return_value={"ghost": {"type": "string", "default": ""}},
+        ):
+            problems = webui_settings.verify_schema_alignment(webui_settings.load_schema_file())
+        self.assertTrue(any("ghost" in item for item in problems))
 
 
 if __name__ == "__main__":

@@ -34,8 +34,13 @@ ROUTES: tuple[RouteSpec, ...] = (
     ("affinity", "affinity", ("GET",), "熟悉度榜、档位与当前 love_peers（只显示）"),
     ("history", "history", ("GET",), "情绪曲线数据点（来自 state_history.jsonl）"),
     ("proactive", "proactive", ("GET",), "主动消息计数与发送记录"),
-    ("settings", "settings_get", ("GET",), "设置页：schema 驱动的字段表、当前值与默认值"),
-    ("settings", "settings_post", ("POST",), "保存设置（校验 → 备份 → 落盘 → 热生效）"),
+    ("settings", "settings_get", ("GET",), "设置页：schema 驱动的字段表、大类树、当前值与默认值"),
+    ("settings", "settings_post", ("POST",), "保存设置（逐项校验 → 备份 → 落盘 → 热生效）"),
+    ("settings/reset", "settings_reset", ("POST",), "恢复默认设置（默认值只从 schema 取，先备份再落盘）"),
+    ("portrait", "portrait_get", ("GET",), "立绘：当前图（含 data_url）与元数据列表；?id= 取单张"),
+    ("portrait/upload", "portrait_upload", ("POST",), "上传立绘（multipart 字段 file；按魔数收 png/jpeg/webp/gif，单张 ≤8 MB，≤20 张）"),
+    ("portrait/select", "portrait_select", ("POST",), "切换当前立绘（响应带新的 current 含 data_url）"),
+    ("portrait/delete", "portrait_delete", ("POST",), "删除一张立绘（连文件一起删；删 current 落到剩余第一张）"),
 )
 
 ENDPOINTS: tuple[str, ...] = tuple(spec[0] for spec in ROUTES)

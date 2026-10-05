@@ -22,10 +22,12 @@ from typing import Any, Callable
 
 try:  # 包内上下文（AstrBot 加载插件 / 测试用 plugin_under_test 别名加载）
     from ..core import webui_data
+    from ..core import webui_portrait
     from ..core import webui_settings
     from ..core.diary import format as fmt
 except ImportError:  # 顶层上下文（离线单测直接把插件目录放进 sys.path）
     from core import webui_data  # type: ignore[no-redef]
+    from core import webui_portrait  # type: ignore[no-redef]
     from core import webui_settings  # type: ignore[no-redef]
     from core.diary import format as fmt  # type: ignore[no-redef]
 
@@ -55,6 +57,11 @@ def build_handlers(deps: Any) -> dict[str, Callable[..., Any]]:
         "proactive": _make_proactive(deps),
         "settings_get": _make_settings_get(deps),
         "settings_post": _make_settings_post(deps),
+        "settings_reset": _make_settings_reset(deps),
+        "portrait_get": _make_portrait_get(deps),
+        "portrait_upload": _make_portrait_upload(deps),
+        "portrait_select": _make_portrait_select(deps),
+        "portrait_delete": _make_portrait_delete(deps),
     }
 
 
@@ -194,6 +201,7 @@ def _make_settings_get(deps: Any) -> Callable[..., Any]:
         return json_response(
             {
                 "ok": True,
+                "sections": webui_settings.sections_payload(schema),
                 "groups": groups,
                 "fields": fields,
                 "values": webui_settings.values_from_settings(deps.settings, schema),
@@ -201,6 +209,7 @@ def _make_settings_get(deps: Any) -> Callable[..., Any]:
                 "warnings": list(deps.settings.warnings),
                 "editable_paths": webui_settings.editable_paths(fields),
                 "notices": [webui_settings.READ_ONLY_ENABLED_NOTE],
+                "problems": webui_settings.verify_schema_alignment(schema),
             }
         )
 
@@ -218,9 +227,21 @@ def _make_settings_post(deps: Any) -> Callable[..., Any]:
 
         schema = _plugin_schema(deps)
         _, fields = webui_settings.describe_schema(schema)
+
+        # 逐项 coerce：**收集全部**错误（每个坏字段都能在自己位置看到原因），整单拒绝
+        clean, errors = webui_settings.review_changes(fields, changes)
+        if errors:
+            first = errors[0]["error"]
+            return error_response(
+                f"{first}（共 {len(errors)} 项没通过检查，什么都没改）",
+                400,
+                endpoint="settings",
+                errors=errors,
+            )
+
         base = _raw_config(deps)
-        updated, problem, applied = webui_settings.plan_changes(base, changes, fields)
-        if updated is None:
+        updated, problem, applied = webui_settings.plan_changes(base, clean, fields)
+        if updated is None:  # 防御：review 之后不该发生（结构异常仍兜住）
             return error_response(problem, 400, endpoint="settings")
 
         # 唯一的校验准绳：load_settings 多报 warning 就整单拒绝，一个字节都不写。
@@ -232,15 +253,74 @@ def _make_settings_post(deps: Any) -> Callable[..., Any]:
                 + "（值已按规则回落/夹紧，请改成合法值）",
                 400,
                 endpoint="settings",
+                errors=webui_settings.warning_paths(fresh),
                 problems=fresh,
             )
 
         result = await deps.apply_settings(updated, applied=applied)
         result.setdefault("warnings", list(resolved.warnings))
+        result.setdefault("errors", [])
+        result["changed"] = list(result.get("applied") or [])
         if not result.get("ok"):
             return json_response(result)  # 备份/落盘失败：业务结果 200 + {ok, error}
         if "enabled" in applied and not resolved.enabled:
             result.setdefault("notices", []).append(webui_settings.READ_ONLY_ENABLED_NOTE)
+        return json_response(result)
+
+    return handler
+
+
+def _make_settings_reset(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        schema = _plugin_schema(deps)
+        _, fields = webui_settings.describe_schema(schema)
+        editable = set(webui_settings.editable_paths(fields))
+        current = webui_settings.flatten_values(
+            webui_settings.values_from_settings(deps.settings, schema)
+        )
+        defaults = webui_settings.defaults_by_path(fields)
+        # 默认值**只从 schema 取**；只回可编辑且真的变了的项（data_dir 永不进 reset）
+        changes = {
+            path: default
+            for path, default in defaults.items()
+            if path in editable and path in current and current[path] != default
+        }
+        if not changes:
+            return json_response(
+                {
+                    "ok": True,
+                    "changed": [],
+                    "errors": [],
+                    "warnings": list(deps.settings.warnings),
+                    "reloaded": False,
+                    "backup": "",
+                    "notices": ["所有配置本来就是默认值，什么都没改。"],
+                }
+            )
+
+        base = _raw_config(deps)
+        updated, problem, applied = webui_settings.plan_changes(base, changes, fields)
+        if updated is None:
+            return error_response(problem, 400, endpoint="settings/reset")
+
+        resolved, fresh = webui_settings.verify_settings(base, updated)
+        if resolved is None:
+            return error_response(
+                "恢复默认没通过校验，什么都没改：" + "；".join(fresh),
+                400,
+                endpoint="settings/reset",
+                errors=webui_settings.warning_paths(fresh),
+                problems=fresh,
+            )
+
+        result = await deps.apply_settings(updated, applied=applied)
+        result.setdefault("warnings", list(resolved.warnings))
+        result.setdefault("errors", [])
+        result["changed"] = list(result.get("applied") or [])
+        if result.get("ok"):
+            result.setdefault("notices", []).append(
+                f"已把 {len(result['changed'])} 项恢复为默认值（默认值只来自 _conf_schema.json）。"
+            )
         return json_response(result)
 
     return handler
@@ -274,6 +354,95 @@ def _plugin_schema(deps: Any) -> dict[str, Any]:
         logger.warning("[webui] 读不到配置 schema：%s", error)
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+# ---- 立绘（第 5.3 步）----------------------------------------------------------
+#
+# 依旧薄壳：判定（魔数 / 大小 / 数量 / 净化）与落盘纪律全在 ``core/webui_portrait.py``。
+# 这里只做两件宿主相关的事——``content_length`` 预检 + ``request.files()`` 取文件，
+# 以及 ``save`` 的同步 / 异步兼容垫（在 core 的 ``read_upload`` 里，鸭子类型不 import astrbot）。
+
+
+def _make_portrait_get(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        portrait_id = _query_str(request, "id", "")
+        try:
+            result = await deps.portraits.snapshot(only_id=portrait_id or None)
+        except webui_portrait.PortraitError as error:
+            return error_response(str(error), 400, endpoint="portrait")
+        return json_response(result)
+
+    return handler
+
+
+def _make_portrait_upload(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        # 两层保险之一：先看 content_length——超大 body 直接 400，不读进内存
+        length = getattr(request, "content_length", None)
+        if isinstance(length, int) and length > webui_portrait.MAX_UPLOAD_BODY_BYTES:
+            return error_response("上传体积超过上限（单张 8 MB）。", 400, endpoint="portrait/upload")
+        # 两层保险之二：能设框架层的 max_content_length 就设（宿主不一定有这属性）
+        try:
+            request.max_content_length = webui_portrait.MAX_UPLOAD_BODY_BYTES
+        except (AttributeError, RuntimeError):
+            pass
+
+        try:
+            files = await request.files()
+        except Exception as error:  # noqa: BLE001 - multipart 解析失败不冒 500
+            logger.warning("[webui] portrait/upload 解析 multipart 失败：%s", error)
+            return error_response("上传内容解析失败，请重试。", 400, endpoint="portrait/upload")
+        upload = files.get("file") if files else None
+        if upload is None:
+            return error_response("缺少上传文件字段 file。", 400, endpoint="portrait/upload")
+
+        data = await webui_portrait.read_upload(upload, deps.portraits.base)
+        try:
+            result = await deps.portraits.upload(
+                data,
+                getattr(upload, "filename", ""),
+                now=deps._now(),
+            )
+        except webui_portrait.PortraitError as error:
+            return error_response(str(error), 400, endpoint="portrait/upload")
+        return json_response(result)
+
+    return handler
+
+
+def _portrait_body_action(deps: Any, *, endpoint: str, action: Any) -> Callable[..., Any]:
+    """``select`` / ``delete`` 共用的壳：body ``{"id": ...}`` → core → 200 / 400。"""
+
+    async def handler() -> Any:
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400, endpoint=endpoint)
+        portrait_id = str(body.get("id") or "").strip()
+        if not portrait_id:
+            return error_response("缺少参数 id", 400, endpoint=endpoint)
+        try:
+            result = await action(deps.portraits, portrait_id)
+        except webui_portrait.PortraitError as error:
+            return error_response(str(error), 400, endpoint=endpoint)
+        return json_response(result)
+
+    return handler
+
+
+def _make_portrait_select(deps: Any) -> Callable[..., Any]:
+    return _portrait_body_action(
+        deps,
+        endpoint="portrait/select",
+        action=lambda store, portrait_id: store.select(portrait_id),
+    )
+
+
+def _make_portrait_delete(deps: Any) -> Callable[..., Any]:
+    return _portrait_body_action(
+        deps,
+        endpoint="portrait/delete",
+        action=lambda store, portrait_id: store.delete(portrait_id),
+    )
 
 
 # ---- 统一包装 ----------------------------------------------------------------

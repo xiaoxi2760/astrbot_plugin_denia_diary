@@ -11,11 +11,12 @@ AstrBot 陪伴系统插件（**分步实施中**）。内核零 AstrBot 依赖�
 | 2 | 小本本（两类条目 + 上限 + 注入 + 可见性） | ✅ 已完成（真机已验） |
 | 3 | 状态系统（情绪 / 作息 / 熟悉度） | ✅ 已完成 |
 | 4 | 主动消息（七触发器 + 闸门 + 两段式 + 暗号） | ✅ 已完成 |
-| 5 | WebUI 观察面板（Dashboard 插件页，五 tab） | ✅ 已完成（离线全验，真机未验） |
+| 5 | WebUI 观察面板（Dashboard 插件页，五 tab） | ✅ 已完成（真机已验：页面 + 6 个接口全 200） |
 | 5.1 | 出站文本清洗（表情包标记不再漏给用户） | ✅ 已完成 |
-| 5.2 | 全部配置项搬进 WebUI 设置页（schema 驱动、改完即生效） | ✅ 已完成（离线全验，真机未验） |
+| 5.2 | 全部配置项搬进 WebUI 设置页（schema 驱动、改完即生效） | ✅ 已完成（真机已验设置读写；**只差 `settings/reset` 前端接线**） |
+| 5.3 | 立绘上传（用户自上传 + 单图展示 / 切换） | ✅ 后端已完成并**真机已验 22/22**（真 multipart / 真 `save` / 落盘 / 拒绝路径） |
 
-当前 **512 项单测全绿**（既有 452 + 第 5.2 步新增 60）。WebUI 面板由插件侧提供（`web_api/` + `pages/diary/`）：
+当前 **596 项单测全绿**（第 5.2 步 60 + 「后端对齐」47 + 「立绘后端」30 + 「宿主契约」7）。WebUI 面板由插件侧提供（`web_api/` + `pages/diary/`）：
 **读走 store 层、不走门面**（面板是主人视角，不受聊天可见性规则约束），
 写只走 store 的原子写方法。数据面在 `core/webui_data.py`（纯函数、可离线单测），
 设置页的数据面在 `core/webui_settings.py`（schema 递归展开 + 以 `load_settings` 的 warnings 为准绳）。
@@ -205,14 +206,41 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `affinity` | GET | 榜 + `love_peers`（只显示） |
 | `history` | GET | 情绪曲线数据点；`?days=` 默认 30，上限 365 |
 | `proactive` | GET | 主动消息计数 + 发送记录；`?limit=` |
-| `settings` | GET | 设置页字段表：`groups` / `fields` / `values` / `defaults` / `warnings` / `editable_paths` |
-| `settings` | POST | `{"changes": {"diary.max_chars": 3000}}`（点分路径 → 新值） |
+| `settings` | GET | 设置页字段表：`sections`（大类树）/ `groups` / `fields` / `values` / `defaults` / `warnings` / `editable_paths` / `problems`（schema 对齐自检） |
+| `settings` | POST | `{"changes": {"diary.max_chars": 3000}}`（点分路径 → 新值）；错误**逐字段**返回在 `errors` |
+| `settings/reset` | POST | 恢复默认设置（无 body；默认值**只从 schema 取**；返回 `changed` 列表，先备份再落盘） |
+| `portrait` | GET | 立绘：`current`（含 `data_url`，无图 null）+ `items`（只有元数据）；`?id=` 取单张（含 `data_url`） |
+| `portrait/upload` | POST | multipart 字段名固定 `file`；按**魔数**收 png/jpeg/webp/gif，单张 ≤8 MB、总数 ≤20 张 |
+| `portrait/select` | POST | `{"id": ...}` 切换当前立绘（响应带新的 `current` 含 `data_url`） |
+| `portrait/delete` | POST | `{"id": ...}` 删除一张（连文件；删 current 落到剩余第一张，全删完 null） |
 
 **错误约定（写死，别一处 200 一处 500）**：
 
 - **业务结果一律 HTTP 200 + `{ok, error}`**——id 不存在、已重复完成都属此类，契约就是这么写的；
 - **只有请求形状不对**（缺 `id`、body 不是 JSON 对象）才用 `error_response` + **400**；
 - 后端抛异常由 `logged_handler` 统一吃掉 → `error_response` + 500，**不让异常冒出去**，同时记 `request.username` 做审计。
+
+**真机信封（4.28.1 实测，前端照这个读）**：
+
+| | body |
+| :--- | :--- |
+| 成功 | `{"ok":true,…}` —— **裸载荷**，没有外层 `data` |
+| 失败 | `{"status":"error","message":"…","data":{"endpoint":"…","errors":[…],"problems":[…]}}` + **HTTP 400** |
+
+两条别踩：
+
+1. **一律经 `web_api/_web.py` 的 `error_response`，别直接调宿主的**。宿主签名很窄
+   （`error_response(message, *, status_code=400, data=None, headers=None)`，`status_code`
+   关键字限定、不接任意 kwarg），历史上 21 处 `error_response(msg, 400, endpoint=…)` 在真机上
+   全 `TypeError` → 连 `logged_handler` 的兜底 500 一起炸穿 → **所有错误路径全是 500**，而离线
+   单测全绿（离线桩比真机宽）。归一层的内部签名是
+   `error_response(message, status_code=400, *, errors=None, problems=None, endpoint="", headers=None)`，
+   附加信息统一进信封的 `data`。**回归测试在 `test/test_web_api_contract.py`**（照真机签名造
+   假宿主 + 静态核对调用点形状）。
+2. **400 信封里的 `data` 到不了 iframe**——官方 bridge 的失败只透出一个字符串
+   （`plugin_page_bridge.js` `pending.reject(new Error(message.error))`）。所以 toast 用
+   `error.message` 没问题；**服务端的逐项错误想在前端"就地显示"，只能走「200 + `{ok:false, errors:[…]}`」
+   的业务结果**，别指望 400 的 `data`。
 
 ### 兼容与降级
 
@@ -224,7 +252,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE=1; $env:PYTHONUTF8=1
-py -m unittest discover -s test -t .      # 415 项
+py -m unittest discover -s test -t .      # 596 项
 py tools/webui_selfcheck.py                # 静态对账 + 资源/编码体检
 ```
 
@@ -282,6 +310,34 @@ WebUI 第 6 个 tab「设置」：**全部配置项**都在这里改，改完立
 备份失败**就整单放弃**（备份是安全网，备份不下来时"这次没改成"好过"配置写坏"）；
 落盘失败回落到内存旧值并回报错误。写操作全程 `try/except` + `logged_handler`，记 `request.username` 审计。
 
+## 立绘上传（第 5.3 步）
+
+首页立绘支持**用户自己上传**（前端单图槽 + 切换 / 上传 / 删除）。存储在数据目录
+`portraits/`，**文件名服务端生成** `p_<12 位 hex>.<ext>`——用户原始文件名只作展示
+来源且存净化版（去目录、去危险字符、限长 60），路径穿越无从谈起。同目录
+`index.json` 记 `{"current", "items"}`（每项 `{id, name, mime, bytes, created_at}`）。
+
+**接口**（见路由表）：
+- `GET portrait` → `current`（含 `data_url`，可直接塞 `<img src>`）+ `items`（只有元数据——
+  单张 8 MB 的 base64 不允许乘以张数塞进一个响应）；一张都没有是 200 + `{"current": null, "items": []}`；
+- `GET portrait?id=` → 单张含 `data_url`；`POST portrait/select` 响应直接带新的 `current`（含
+  `data_url`），前端切换不必再发一次请求；`POST portrait/delete` 连文件一起删。
+
+**安全与校验（官方"不要信任 Page 传来的路径、文件名、格式或数值范围"）**：
+- 格式按**魔数**判定（PNG / JPEG / GIF87a|89a / RIFF+WEBP），`content_type` 一概不信，扩展名由魔数定；
+- 单张 ≤ **8 MB**、总数 ≤ **20 张**、请求体 `content_length` **预检**（超大直接 400 不读进内存），
+  能设 `request.max_content_length` 就设（宿主没有这属性就 try/except 兜住）；
+- 违规 → **400 且一个字节不落盘**。
+
+**落盘纪律**：`index.json` 走 `storage.atomic_write_text` + `KeyedLocks`；**先落图再写
+index**，写 index 失败**回滚删图**；删除连文件一起删；`GET` 时"index 有、盘上没文件"的
+条目跳过并顺手清 index（自愈，current 被清就落到剩余第一张）。
+
+**宿主兼容**（契约 §四 03:20 裁定 #6，照 meme_manager 的垫）：`PluginUploadFile.save`
+在不同 AstrBot 版本上同步 / 异步不一样——`inspect.iscoroutinefunction` 为真就 `await`，
+否则 `await asyncio.to_thread(save, path)`；走「save 到临时文件再读字节」，不赌 `read()`
+的兼容面。上传对象以鸭子类型进 core（`core/` 依旧零 astrbot import）。
+
 ### 只读项
 
 - **`data_dir` 只显示不可改**：改它＝搬走全部日记与本子，Layout 在插件启动期就建好了。
@@ -289,6 +345,46 @@ WebUI 第 6 个 tab「设置」：**全部配置项**都在这里改，改完立
 - **`enabled`（总开关）允许改**，但响应里会带回提示：关掉后日记、小本本、状态、主动消息全部不可用（数据保留）。
 - `love_peers` 与 `name_preference` **都能改**（用户明确要求全部配置项进面板）；
   这**推翻了任务书 §2 裁定 2 的「`love_peers` 只显示」**。
+
+### 大类 → 分组 → 配置项（对齐参考实现）
+
+`GET settings` 的 `sections` 是一棵**展示树**：大类（`基础 / 内容 / 主动消息 / 出站`）→
+分组（`_conf_schema.json` 的 11 个顶层键）→ 组内叶子的点分路径。归属写在
+`core/webui_settings.py` 的一张常量表里（`CONFIG_GROUPS` 声明分组与展示顺序、
+`CONFIG_SECTIONS` 声明大类），**前端只按树渲染，不写死分组**；归属写错/漏分组由
+`verify_schema_alignment` 报出来，不影响存储契约。
+
+### schema 对齐自检
+
+`verify_schema_alignment(schema) -> [problems]`：`_conf_schema.json` 与
+`core/settings.py` 默认值表**双向**核对——顶层键集合、组内键集合、`dict` 叶子与
+分组的形状、`int` 项有没有 `INT_LIMITS` 取值范围、大类归属是否覆盖/越界。
+`initialize()` 启动时跑一次，有就**逐条写 warning 日志**；`GET settings` 的
+`problems` 数组原样带出（显示是前端的事，后端只出数据）。AstrBot 会剔除
+schema 里不存在的键，两边不一致时用户保存的值会在重载时静默丢失——这就是自检必须存在的原因。
+
+### 逐项 coerce 与错误清单
+
+`POST settings` 的校验分两层，错误**逐字段**返回（`errors: [{"path", "error"}]`）：
+
+1. **类型对齐**（`coerce_value(field, raw) -> (value, error)`，`review_changes` 逐项
+   收集**全部**错误）：未知路径 / 只读项 / 类型不符——严格度与旧实现一致
+   （bool 冒充 int、字符串冒充 bool 在这里就拒）；取值范围**不在这层查**
+   （那是 `load_settings` 的活，两层各写一半规则必然漂移）。有任何错误 →
+   **400 + `errors` 逐字段 + 一个字节不写**（整单拒绝的硬约束不变，但每个坏
+   字段都能在自己的位置看到原因，不再是一个笼统的 message）。
+2. **唯一准绳**（`verify_settings`）：`load_settings` 前后各跑一次，新增 warning
+   → 400 + `errors`（`path` 从 warning 文案开头的字段路径提取，整体性的挂空 path）
+   + `problems` 原样。
+
+合法响应在既有 `applied` 之外加了一个别名 `changed`（与 `applied` 同值，对齐参考命名）。
+
+### 恢复默认（`POST settings/reset`，无 body）
+
+默认值**只从 schema 取**（`defaults_by_path`），只回**可编辑且真的变了**的项
+（`data_dir` 永不进 reset）；无变化 → `{ok, changed: []}` 且**不落盘、不备份**；
+有变化 → 走与保存完全相同的链（逐项校验 → 备份 → 落盘 → 热生效 → 重建巡检 job），
+返回 `changed` 列表（就是 `applied`）。
 
 ### 错误口径
 

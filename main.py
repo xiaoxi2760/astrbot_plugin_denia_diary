@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from .core import compose
 from .core import outbound as outbound_mod
 from .core import settings as settings_mod
 from .core import storage
+from .core import webui_portrait
 from .core import webui_settings
 from .core.diary import format as fmt
 from .core.diary.api import Diary
@@ -51,6 +53,20 @@ from .web_api import register_all
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "astrbot_plugin_denia_diary"
+
+
+def _plugin_version() -> str:
+    """插件版本：**唯一来源是 `metadata.yaml`**（别在代码里再写一份，两处维护必然漂移）。
+
+    注册发生在 import 期，所以这里就地读一次；读不到就回 `0.0.0`（加载不能因为读文件失败而挂掉）。
+    """
+    try:
+        text = (Path(__file__).resolve().parent / "metadata.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return "0.0.0"
+    found = re.search(r"^version:\s*[\"']?([^\s\"']+)", text, re.MULTILINE)
+    return found.group(1) if found else "0.0.0"
+
 PROMPT_PRIORITY = 5
 """``on_llm_request`` 的优先级（越大越先跑；AstrBot 默认 0）。
 
@@ -67,7 +83,7 @@ ACTIVE_JOB_NAME = f"{PLUGIN_NAME}#proactive-wake"
     PLUGIN_NAME,
     "50841",
     "给她一本自己的纯文本日记、一个小本本，和情绪 / 作息 / 熟悉度，她会主动找你说话",
-    "0.6.0",
+    _plugin_version(),
 )
 class DeniaDiary(Star):
     """陪伴系统插件。第 1 步日记 + 第 2 步小本本 + 第 3 步状态系统 + 第 4 步主动消息 + 第 5 步 WebUI 面板。"""
@@ -112,6 +128,7 @@ class DeniaDiary(Star):
             state=self.state,
             affinity=self.affinity,
         )
+        self.portraits = webui_portrait.PortraitStore(layout=self.layout, locks=self.locks)
         logger.info("[%s] 数据目录：%s", PLUGIN_NAME, self.layout.base_dir)
         for message in self.settings.warnings:
             logger.warning("[%s] 配置降级：%s", PLUGIN_NAME, message)
@@ -121,6 +138,11 @@ class DeniaDiary(Star):
     async def initialize(self) -> None:
         """插件加载后调用：重建主动消息的巡检 job（basic handler 只在内存注册表）。"""
         self.layout.ensure()
+        # schema 对齐自检（第 5.2 步对齐）：_conf_schema.json 与 core.settings 默认值表
+        # 的键集合 / 分组 / 大类归属双向核对——AstrBot 会剔除 schema 里不存在的键，
+        # 两边不一致时用户保存的值会在重载时静默丢失，必须启动就喊出来。
+        for problem in webui_settings.verify_schema_alignment(webui_settings.load_schema_file()):
+            logger.warning("[%s] schema 对齐自检：%s", PLUGIN_NAME, problem)
         register_all(self.context, PLUGIN_NAME, self)  # WebUI 面板路由（无 register_web_api 则静默跳过）
         await self._setup_proactive_job()
 
