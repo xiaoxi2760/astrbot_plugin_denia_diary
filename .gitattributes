@@ -1,0 +1,4 @@
+# 全仓统一 LF：Windows 上默认的 core.autocrlf=true 会把 LF 转成 CRLF，
+# 而本项目的静态自检（tools/webui_selfcheck.py）硬性要求「新文件 UTF-8 无 BOM + 纯 LF」——
+# 不钉死的话，别人 clone 下来自检会直接红。
+* text=auto eol=lf

@@ -1,0 +1,11 @@
+name: astrbot_plugin_denia_diary
+display_name: 达妮娅的陪伴系统
+desc: |
+  给她一本自己的纯文本日记，外加小本本、状态（情绪 / 作息 / 熟悉度）与主动消息。
+  数据全部落在可读的文件里（日记是纯文本），内核零第三方依赖，可离线测试。
+  分步实施中：当前完成第 5 步（WebUI 观察面板）、第 5.1 步（出站文本清洗）
+  与第 5.2 步（全部配置项搬进 WebUI 设置页，改完即生效）。
+author: "50841"
+version: 0.6.0
+astrbot_version: ">=4.24"
+# repo: https://github.com/<你>/astrbot_plugin_denia_diary   # 待填

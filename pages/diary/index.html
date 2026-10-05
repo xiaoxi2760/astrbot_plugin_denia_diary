@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="sakura">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>达妮娅的日记 · 观察面板</title>
+<!-- 相对路径 + 版本 query：Dashboard 会重写资源引用，query 免得浏览器缓存住旧 CSS（任务书 §10 建议） -->
+<link rel="stylesheet" href="./style.css?v=0.6.0" />
+</head>
+<body>
+<div id="guard" class="guard" hidden>
+  <div class="guard-card">
+    <div class="guard-title">请从插件详情页打开本页面</div>
+    <p class="guard-text">
+      这个页面需要 AstrBot Dashboard 的插件页运行环境（受限 iframe + 注入的 bridge）。
+      直接用 <code>file://</code> 打开、或者 bridge 没就绪，都拿不到数据。
+    </p>
+    <p class="guard-text">路径：Dashboard → 插件管理 → astrbot_plugin_denia_diary → 插件页。</p>
+  </div>
+</div>
+
+<div id="app" class="app" hidden>
+  <aside class="nav">
+    <div class="brand">达妮娅的日记</div>
+    <div class="brand-sub">观察面板</div>
+    <nav class="tabs" id="tabs"></nav>
+    <div class="nav-foot">
+      <label class="foot-label" for="theme-picker">外观</label>
+      <select id="theme-picker" class="who-picker" title="外观预设（记在这台设备上）"></select>
+      <label class="foot-label" for="who-picker">对谁</label>
+      <select id="who-picker" class="who-picker" title="面板按人组织，不按会话"></select>
+      <div class="who-hint" id="who-hint">对谁</div>
+    </div>
+  </aside>
+
+  <main class="stage">
+    <header class="stage-head">
+      <h1 class="stage-title" id="stage-title">总览</h1>
+      <div class="stage-tools">
+        <span class="stage-note" id="stage-note"></span>
+        <button class="btn" id="refresh" type="button">刷新</button>
+      </div>
+    </header>
+    <section class="stage-body" id="stage-body"></section>
+  </main>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<!-- 预览桩：只在 file:// 或 ?preview=1 时安装假 bridge，正式 iframe 里什么也不做（§0#11/12 的红线不被破坏） -->
+<script src="./preview-bridge.js?v=0.6.0"></script>
+<script src="./ui.js?v=0.6.0"></script>
+<script src="./app.js?v=0.6.0"></script>
+<script src="./views/overview.js?v=0.6.0"></script>
+<script src="./views/diary.js?v=0.6.0"></script>
+<script src="./views/notebook.js?v=0.6.0"></script>
+<script src="./views/affinity.js?v=0.6.0"></script>
+<script src="./views/proactive.js?v=0.6.0"></script>
+<script src="./views/settings.js?v=0.6.0"></script>
+</body>
+</html>

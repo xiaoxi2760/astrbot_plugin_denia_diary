@@ -1,0 +1,17 @@
+# __pycache__ / 缓存目录
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 测试临时目录（测试脚本自带，不用系统 TEMP）
+test/.tmp/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 运行时数据（正常在 data/plugin_data/，放这里也不该进仓库）
+data/
+
+# 构建产物（打包 zip 是发布时现生成的，不进版本库）
+*.zip
