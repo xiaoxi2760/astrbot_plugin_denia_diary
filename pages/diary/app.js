@@ -32,6 +32,7 @@
     { key: "notebook", title: "小本本", note: "事实与约定" },
     { key: "affinity", title: "熟悉度", note: "榜与档位" },
     { key: "proactive", title: "曲线与主动", note: "情绪曲线 + 主动消息" },
+    { key: "data", title: "数据", note: "坐标 · 数据文件" },
     { key: "settings", title: "设置", note: "全部配置项，改完即生效" },
   ];
 
@@ -117,6 +118,7 @@
       notebook: global.createNotebookView,
       affinity: global.createAffinityView,
       proactive: global.createProactiveView,
+      data: global.createDataView,
       settings: global.createSettingsView,
     };
     return makers[key] || null;

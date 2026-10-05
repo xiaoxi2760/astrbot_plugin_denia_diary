@@ -662,3 +662,15 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
   .set-row--dirty, .set-row--bad { margin-left: -9px; padding-left: 8px; }
   .set-count { margin-left: 0; }
 }
+
+/* ===== 数据 tab（第 5.4 步）· 追加区 ===== */
+/* 两块并排，窄了自动堆成一列。只用既有 token，布局跟外面一致。
+   阈值取 260px 而不是 300px：Dashboard 的插件页是受限 iframe，常被拉窄，
+   300px 时两栏要 612px 内容宽，实际 iframe 往往够不着，就永远退化成单列。 */
+.data-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  align-items: start;
+}
+.data-grid .card { margin-bottom: 0; }

@@ -6,6 +6,6 @@ desc: |
   分步实施中：当前完成第 5 步（WebUI 观察面板）、第 5.1 步（出站文本清洗）
   与第 5.2 步（全部配置项搬进 WebUI 设置页，改完即生效）。
 author: "50841"
-version: 0.6.0
+version: 0.6.1
 astrbot_version: ">=4.24"
 # repo: https://github.com/<你>/astrbot_plugin_denia_diary   # 待填
