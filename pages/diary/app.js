@@ -24,6 +24,7 @@
     history: "history",
     proactive: "proactive",
     settings: "settings",
+    settingsReset: "settings/reset",
     portrait: "portrait",
     portraitUpload: "portrait/upload",
     portraitSelect: "portrait/select",

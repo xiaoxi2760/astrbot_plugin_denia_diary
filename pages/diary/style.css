@@ -759,3 +759,36 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
   font-size: 12px;
   cursor: pointer;
 }
+
+/* ===== 危险区：一键恢复全部默认（第 5.4 步）· 追加区 ===== */
+/* 跟上面普通表单明显分开：红框 + 淡红底 + 标题栏，一眼能认出"这块别乱点"。
+   放在表单最末尾，跟着滚动走完所有配置项才看得到。 */
+.danger-zone {
+  margin: 26px 0 8px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius);
+  background: var(--card);   /* color-mix 不被支持时的兜底，别整块透明掉 */
+  background: color-mix(in srgb, var(--err) 7%, var(--card));
+}
+.danger-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--err);
+  letter-spacing: .04em;
+  margin-bottom: 6px;
+}
+.danger-text {
+  font-size: 12px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+.danger-text strong { color: var(--err); }
+.set-reset-btn { border-color: var(--err); color: var(--err); }
+/* 两步确认的第二态：点了第一次之后的样子，4 秒没点第二次就自动还原 */
+.set-reset-btn.is-danger {
+  background: var(--err);
+  border-color: var(--err);
+  color: #fff;
+  font-weight: 600;
+}

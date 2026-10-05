@@ -37,6 +37,8 @@
     var query = "";          /* 搜索词 */
     var onlyDirty = false;   /* 只看改动 */
     var els = {};            /* 常驻节点引用，省得每次重画都去 getElementById */
+    var resetArmed = false;  /* 危险区「再点一次」的确认态 */
+    var resetTimer = null;
 
     function clone(value) {
       return JSON.parse(JSON.stringify(value === undefined ? null : value));
@@ -323,6 +325,7 @@
 
     function render() {
       var UI = ctx.UI;
+      disarmReset();          /* 重画前先解除确认态：旧按钮马上被丢弃，别让 armed 状态漏到新按钮上 */
       UI.clear(holder);
       controls = {};
       groups = {};
@@ -381,6 +384,25 @@
         });
         holder.appendChild(noteBox);
       }
+
+      /* ---- 危险区：一键恢复全部默认（立即生效）----
+         **跟上面那个「恢复默认值」按钮不是一回事**，别混淆：
+           上面那个 = fillDefaults()，只把表单填成默认值，**不落盘**，还能反悔；
+           这里这个 = POST settings/reset，**直接落盘 + 热生效 + 重建巡检 job**，撤不回来。 */
+      els.reset = UI.h("button", {
+        class: "btn btn-sm set-reset-btn", type: "button",
+        text: "一键恢复全部默认（立即生效）", onclick: resetAll,
+      });
+      holder.appendChild(UI.h("div", { class: "danger-zone" }, [
+        UI.h("div", { class: "danger-title", text: "危险操作" }),
+        UI.h("div", { class: "danger-text sub" }, [
+          "把插件的全部配置项恢复成出厂默认值，",
+          UI.h("strong", { text: "立即生效" }),
+          "：会落盘、热重载配置并重建巡检 job。想先看看默认值长什么样，"
+            + "请用上面的「恢复默认值」——那个只填表单，不写盘。",
+        ]),
+        els.reset,
+      ]));
 
       paint();
     }
@@ -533,6 +555,60 @@
         + "（与已保存值不同的有 " + st.dirtyPaths.length + " 项）。", false);
     }
 
+    /* ---- 危险区：一键恢复全部默认（立即生效）---- */
+
+    /* 解除两步确认：把按钮文案和颜色还原，并把 4 秒自动还原的定时器清掉。
+       凡是「发完请求」「重画」「卸载」都必须走它，否则按钮会停在红色等着下一次误点。 */
+    function disarmReset() {
+      resetArmed = false;
+      if (resetTimer) { global.clearTimeout(resetTimer); resetTimer = null; }
+      if (els.reset) {
+        els.reset.textContent = "一键恢复全部默认（立即生效）";
+        els.reset.classList.remove("is-danger");
+      }
+    }
+
+    async function resetAll() {
+      /* 第一步只武装，不发请求。**绝对不能用 window.confirm**——
+         Dashboard 插件页是受限 iframe，sandbox 没有 allow-modals，会被直接拦掉。 */
+      if (!resetArmed) {
+        resetArmed = true;
+        els.reset.textContent = "确定恢复？再点一次";
+        els.reset.classList.add("is-danger");
+        resetTimer = global.setTimeout(disarmReset, 4000);
+        say("这一步会立刻落盘并热生效，不是一般的「填表单」。再点一次确认。", false);
+        return;
+      }
+      disarmReset();
+
+      say("正在恢复默认值…", false);
+      var result = null;
+      try {
+        result = await ctx.apiPost("settingsReset", {});
+      } catch (error) {
+        say("恢复失败：" + String((error && error.message) || error), true);
+        return;
+      }
+      if (!result || result.ok === false) {
+        say("没恢复：" + String((result && (result.error || result.message)) || "未知原因"), true);
+        return;
+      }
+
+      var changed = (result.changed || []).length;
+      var parts = [changed ? ("已恢复 " + changed + " 项为默认值")
+        : "所有配置本来就是默认值，什么都没改"];
+      if (result.backup) parts.push("旧配置已备份为 " + result.backup);
+      if (result.reloaded) parts.push("配置已热生效");
+      (result.notices || []).forEach(function (item) { parts.push(String(item)); });
+      (result.warnings || []).forEach(function (item) { parts.push("注意：" + item); });
+
+      ctx.UI.toast(changed ? "已恢复默认值" : "没有可恢复的项");
+      /* 重拉：后端 apply_settings 换的是**已保存**的值，表单还停在旧值上，
+         不重拉的话用户看到的和真生效的对不上。 */
+      await refresh();
+      say(parts.join("　·　"), false);
+    }
+
     /* 点分路径 → defaults 里的值（{"diary":{"max_chars":1}} 取 "diary.max_chars"） */
     function defaultAt(path) {
       var parts = String(path).split(".");
@@ -589,7 +665,7 @@
     return {
       mount: function (target) { holder = target; },
       refresh: refresh,
-      unmount: function () { holder = null; },
+      unmount: function () { disarmReset(); holder = null; },
     };
   };
 })(window);

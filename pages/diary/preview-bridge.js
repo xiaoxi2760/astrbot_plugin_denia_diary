@@ -167,6 +167,22 @@
   /* 立绘桩：内存仓库，够点切换 / 上传 / 删除走通整条链路。
      用 SVG data_url 而不是真 jpg——file:// 下 fetch 本地文件会被拦，
      内联 SVG 不依赖任何外部读取。（真机走的是接口回的 data_url，同一条路。） */
+  /* 嵌套 → 点分路径（settings/reset 桩要算「哪些项真的变了」） */
+  function flattenValues(value, prefix, out) {
+    out = out || {};
+    prefix = prefix || "";
+    Object.keys(value || {}).forEach(function (key) {
+      var item = value[key];
+      var path = prefix ? prefix + "." + key : key;
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        flattenValues(item, path, out);
+      } else {
+        out[path] = item;
+      }
+    });
+    return out;
+  }
+
   function stubPortrait(label, w, h, fill) {
     var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">' +
       '<rect width="' + w + '" height="' + h + '" fill="' + fill + '"/>' +
@@ -221,6 +237,27 @@
           ok: true, applied: Object.keys(changes), warnings: [], reloaded: false,
           backup: "config_backup_20261006-010203.json",
           notices: ["（预览桩：这里没有真的落盘）"],
+        });
+      }
+      if (endpoint === "settings/reset") {
+        /* 桩也**真的**把 values 换回 defaults：这样「两步确认 → 落盘 → 重拉设置」
+           这条链在预览里能看见表单真的变了，才算走通，而不是只弹个假响应。 */
+        var flatNow = flattenValues(FAKE.settings.values);
+        var flatDef = flattenValues(FAKE.settings.defaults);
+        var changed = Object.keys(flatDef).filter(function (k) {
+          return JSON.stringify(flatNow[k]) !== JSON.stringify(flatDef[k]);
+        });
+        FAKE.settings.values = JSON.parse(JSON.stringify(FAKE.settings.defaults));
+        return Promise.resolve({
+          ok: true,
+          changed: changed,
+          errors: [],
+          warnings: [],
+          reloaded: changed.length > 0,
+          backup: changed.length ? "astrbot_config.json.bak-20261006-023311" : "",
+          notices: [changed.length
+            ? "（预览桩）已把 " + changed.length + " 项恢复为默认值（默认值只来自 _conf_schema.json）。"
+            : "所有配置本来就是默认值，什么都没改。"],
         });
       }
       return Promise.reject(new Error("预览桩没有这个 endpoint：" + endpoint));
