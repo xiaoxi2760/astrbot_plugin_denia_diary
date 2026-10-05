@@ -500,3 +500,165 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
   .set-input, .set-area { min-width: 0; width: 100%; }
   .set-bar { position: static; }
 }
+
+/* ===== 设置页（第 5.3 步 · 前端增强）· 追加区 ===== */
+/* 折叠 / 搜索 / 改动高亮 / problems 黄条。仍然只复用上面的 token，
+   所以换外观预设时这段一行都不用动；上面原有样式与布局也一条没改。 */
+
+/* 顶部固定区：保存条 + 黄条一起钉住，滚动时不会各跑各的。
+   上面 .set-bar 自带 position:sticky，这里在新的固定容器里改回 static，
+   否则两层 sticky 会打架（内层会盖住外层的黄条）。 */
+.set-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.set-sticky .set-bar { position: static; margin-bottom: 0; }
+
+.set-dirty { font-size: 12px; color: var(--fg-faint); }
+.set-dirty.is-dirty { color: var(--accent); font-weight: 600; }
+
+.set-actions { display: flex; gap: 8px; }
+.btn-primary {
+  border-color: var(--accent-line);
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.btn-primary:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+
+/* problems 黄条：黄色系一律走 --warn，不写死颜色，换预设自动跟着变。
+   底色混合比例给到 18%：sakura 这类暖色预设下 12% 会被粉底吃掉，看着像普通卡片。 */
+.set-problems {
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  background: color-mix(in srgb, var(--warn) 18%, var(--card));
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 12.5px;
+  color: var(--fg);
+  box-shadow: var(--shadow);
+}
+.set-problems-line + .set-problems-line { margin-top: 7px; padding-top: 7px; border-top: 1px dashed color-mix(in srgb, var(--warn) 38%, transparent); }
+.set-problems-line b { color: color-mix(in srgb, var(--warn) 78%, var(--fg)); }
+.set-jump-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.set-jump {
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 9%, var(--card));
+  color: var(--err);
+}
+.set-jump:hover { border-color: var(--err); background: color-mix(in srgb, var(--err) 16%, var(--card)); }
+.set-warn-list { display: block; margin-top: 3px; }
+.set-warn-item { color: var(--fg-dim); }
+
+/* 工具条：搜索 + 只看改动 + 计数 */
+.set-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.set-search {
+  flex: 1 1 240px;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 14px;
+}
+.set-search::placeholder { color: var(--fg-faint); }
+.set-search:focus { outline: 2px solid var(--accent-line); border-color: var(--accent); }
+.set-only { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-dim); cursor: pointer; white-space: nowrap; }
+.set-count { font-size: 12px; margin-left: auto; white-space: nowrap; }
+
+.set-result { margin-bottom: 10px; min-height: 1em; }
+.set-notice { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+
+/* 折叠分组：原生 <details>，键盘可达、不用自己管状态机 */
+.set-group { padding: 0; overflow: hidden; }
+.set-group > summary.set-sum {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  user-select: none;
+}
+.set-group > summary.set-sum::-webkit-details-marker { display: none; }
+.set-group > summary.set-sum:hover { background: var(--card-hi); }
+.set-group > summary.set-sum:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.set-caret { color: var(--fg-faint); transition: transform .16s ease; flex: 0 0 auto; font-size: 11px; }
+.set-group[open] > .set-sum .set-caret { transform: rotate(90deg); }
+.set-sum-title { flex: 1 1 auto; min-width: 0; }
+.set-group-hint { padding: 0 16px 8px 34px; margin-top: -4px; }
+.set-body { padding: 2px 16px 12px; }
+
+/* 折叠时"这一组改了几项"的徽标——没有它，组一收起就看不见里面动过 */
+.set-badge {
+  flex: 0 0 auto;
+  min-width: 18px;
+  text-align: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 行：头部（名称 + 已改角标 + 改回）/ 控件 / 说明 / 错误 */
+.set-row { align-items: flex-start; padding: 11px 0; }
+.set-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.set-label { font-weight: 600; }
+.set-chip {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  color: var(--accent);
+  font-size: 10.5px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+.set-revert { padding: 1px 8px; font-size: 11px; }
+.set-range { font-size: 11.5px; }
+.set-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 5px 0 3px; }
+.set-err {
+  font-size: 12px;
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 9%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--err) 32%, transparent);
+  border-radius: 8px;
+  padding: 4px 9px;
+  margin-top: 6px;
+}
+
+/* 改动高亮：左侧一条色 + 底色微染。只用 --accent，五个预设都跟着变 */
+.set-row--dirty { border-left: 3px solid var(--accent); padding-left: 10px; margin-left: -13px; background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.set-row--bad { border-left: 3px solid var(--err); padding-left: 10px; margin-left: -13px; }
+
+@media (max-width: 720px) {
+  .set-sticky { position: static; }
+  .set-body { padding: 2px 12px 10px; }
+  .set-group > summary.set-sum { padding: 11px 12px; }
+  .set-row--dirty, .set-row--bad { margin-left: -9px; padding-left: 8px; }
+  .set-count { margin-left: 0; }
+}
