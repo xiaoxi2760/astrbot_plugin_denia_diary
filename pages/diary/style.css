@@ -674,3 +674,88 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
   align-items: start;
 }
 .data-grid .card { margin-bottom: 0; }
+
+/* ===== 首页立绘（单图 + 侧边切换）· 追加区 ===== */
+/* 一次只亮一张，右边竖着放计数和按钮。
+   图**故意不给框指定宽高比**，只限 max-height：横图按高度缩就自然占宽、
+   竖图按高度缩就自然占窄，两种比例都不用被压变形。底部对齐让图底和按钮列齐平。
+   flex-wrap 让窄 iframe 下按钮换行到图下面，不挤爆。全程只用既有 token，
+   五套外观预设会自动跟着变色。 */
+.portrait-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+  margin: 0 0 16px;
+}
+.portrait {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.portrait img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: clamp(150px, 32vh, 300px);
+  object-fit: contain;
+}
+/* 空态兜底：默认图一直在，理论上到不了，但别让它塌成一条线 */
+.portrait.is-empty {
+  min-width: 200px;
+  min-height: 120px;
+  border-style: dashed;
+}
+/* 图没找到：给个虚线框 + alt 文字，别在总览开天窗 */
+.portrait img.is-missing {
+  min-width: 200px;
+  min-height: 120px;
+  border: 1px dashed var(--line);
+}
+.portrait-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 2px;
+}
+.portrait-count {
+  min-height: 1em;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.portrait-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* 删除的二次确认态：受限 iframe 没有 allow-modals，window.confirm 会被拦掉，
+   只能让按钮自己变成「真删？」，点第二次才真动手 */
+.portrait-actions .btn.is-danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+/* 上传用的 file input 本身当成按钮看：只把系统那个"选择文件"按钮染成 .btn 的样子，
+   旁边留出文件名，用户看得见自己选中了什么。 */
+.portrait-file {
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg-dim);
+  max-width: 190px;
+}
+.portrait-file::file-selector-button {
+  padding: 5px 13px;
+  margin-right: 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}

@@ -41,6 +41,34 @@
         <button class="btn" id="refresh" type="button">刷新</button>
       </div>
     </header>
+
+    <!-- 立绘区。一次只展示一张，右边一个切换按钮 + 上传 / 删除。
+         两条图源互斥显示：
+         1) 下面两张 **打包进来的默认图**——必须是静态节点，AstrBot 才会在服务端
+            重写相对路径并补 asset_token（JS 里 img.src = "./assets/…" 拿不到 token，
+            真机会 403）。用户没上传过时它们就是全部内容。
+         2) #portrait-img —— 用户上传后由接口回的 data_url 走这个槽位，
+            data URL 不经过服务端重写，所以可以安全地由 JS 设 src。 -->
+    <div id="portraits" class="portrait-strip">
+      <figure class="portrait" id="portrait-frame">
+        <img class="portrait-default" src="./assets/denia-sakura.jpg" alt="樱花树下的达妮娅">
+        <img class="portrait-default" src="./assets/denia-full.jpg" alt="达妮娅全身立绘" hidden>
+        <img id="portrait-img" alt="" hidden>
+      </figure>
+      <div class="portrait-side">
+        <div class="portrait-count" id="portrait-count"></div>
+        <div class="portrait-actions">
+          <button class="btn" id="portrait-switch" type="button">切换</button>
+          <button class="btn" id="portrait-delete" type="button">删这张</button>
+          <!-- 直接用可见的 file input（而不是 <label for> + hidden input）：
+               隐藏元素在可访问性树和自动化里都是死的，这里要能被点也要能被测。 -->
+          <input id="portrait-file" class="portrait-file" type="file"
+                 accept="image/png,image/jpeg,image/webp,image/gif"
+                 title="上传一张立绘（png / jpg / webp / gif，8 MB 以内）">
+        </div>
+      </div>
+    </div>
+
     <section class="stage-body" id="stage-body"></section>
   </main>
 </div>

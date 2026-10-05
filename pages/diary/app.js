@@ -24,6 +24,10 @@
     history: "history",
     proactive: "proactive",
     settings: "settings",
+    portrait: "portrait",
+    portraitUpload: "portrait/upload",
+    portraitSelect: "portrait/select",
+    portraitDelete: "portrait/delete",
   };
 
   var TABS = [
@@ -59,6 +63,20 @@
       return await b.apiPost(ENDPOINTS[key], body || {});
     } catch (error) {
       throw new Error(String((error && error.message) || error || "请求失败"));
+    }
+  }
+
+  /* 立绘上传。官方 bridge 的 upload() 只发一个文件、字段名固定 file，
+     所以这里只能传单个 File；多图靠多次调用。宿主没给 upload 就明说，
+     不要静默失败让用户以为传上去了。 */
+  async function apiUpload(key, file) {
+    var b = bridge();
+    if (!b) throw new Error("没有 bridge");
+    if (typeof b.upload !== "function") throw new Error("这个运行环境不支持上传");
+    try {
+      return await b.upload(ENDPOINTS[key], file);
+    } catch (error) {
+      throw new Error(String((error && error.message) || error || "上传失败"));
     }
   }
 
@@ -131,6 +149,10 @@
     var note = document.getElementById("stage-note");
     if (!make || !body) return;
     state.current = key;
+    /* 立绘只在总览出现（它是 index.html 里的静态节点，见那里的注释）。
+       stage-body 每次都被 UI.clear 清空，所以它必须待在 body 外面。 */
+    var portraits = document.getElementById("portraits");
+    if (portraits) portraits.hidden = key !== "overview";
     var tab = TABS.filter(function (item) { return item.key === key; })[0] || {};
     if (title) title.textContent = tab.title || key;
     if (note) note.textContent = tab.note || "";
@@ -167,7 +189,18 @@
     });
   }
 
-  /* ---- 启动 ---- */
+  /* 立绘挂了就地变成一个虚线占位，不能在总览开天窗。
+   绑在 document 的**捕获**阶段：img 的 error 不冒泡，且图片可能在我们绑定
+   之前就已经加载失败，捕获阶段两种情况都接得住。
+   类加在 img 自己身上——它的父节点是整个 frame，加在父节点上会把所有图一起藏掉。 */
+document.addEventListener("error", function (event) {
+  var target = event.target;
+  if (target && target.tagName === "IMG" && target.closest && target.closest("#portraits")) {
+    target.classList.add("is-missing");
+  }
+}, true);
+
+/* ---- 启动 ---- */
   function showGuard() {
     document.getElementById("guard").hidden = false;
     document.getElementById("app").hidden = true;
@@ -186,6 +219,7 @@
       UI: UI,
       apiGet: apiGet,
       apiPost: apiPost,
+      apiUpload: apiUpload,
       state: state,
       who: function () { return state.who; },
       setWho: function (value) {

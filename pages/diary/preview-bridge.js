@@ -164,14 +164,54 @@
     },
   };
 
+  /* 立绘桩：内存仓库，够点切换 / 上传 / 删除走通整条链路。
+     用 SVG data_url 而不是真 jpg——file:// 下 fetch 本地文件会被拦，
+     内联 SVG 不依赖任何外部读取。（真机走的是接口回的 data_url，同一条路。） */
+  function stubPortrait(label, w, h, fill) {
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">' +
+      '<rect width="' + w + '" height="' + h + '" fill="' + fill + '"/>' +
+      '<text x="50%" y="50%" font-size="26" text-anchor="middle" fill="#8b7480">' + label + "</text></svg>";
+    return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  }
+
+  var portraitStore = {
+    current: "p_preview1",
+    items: [
+      { id: "p_preview1", name: "预览图一.svg", mime: "image/svg+xml", bytes: 512,
+        created_at: "2026-10-06T01:00:00", data_url: stubPortrait("预览立绘 1（横）", 480, 300, "#f7dee7") },
+      { id: "p_preview2", name: "预览图二.svg", mime: "image/svg+xml", bytes: 512,
+        created_at: "2026-10-06T01:05:00", data_url: stubPortrait("预览立绘 2（竖）", 300, 480, "#e8f2ef") },
+    ],
+  };
+
+  function copyPortrait() {
+    return JSON.parse(JSON.stringify(portraitStore));
+  }
+
   global.AstrBotPluginPage = {
     ready: function () { return Promise.resolve(); },
     apiGet: function (endpoint, params) {
+      if (endpoint === "portrait") return Promise.resolve(copyPortrait());
       var data = FAKE[endpoint];
       if (!data) return Promise.reject(new Error("预览桩没有这个 endpoint：" + endpoint));
       return Promise.resolve(JSON.parse(JSON.stringify(data)));
     },
     apiPost: function (endpoint, body) {
+      if (endpoint === "portrait/select") {
+        var want = body && body.id;
+        var hit = portraitStore.items.some(function (x) { return x.id === want; });
+        if (!hit) return Promise.reject(new Error("没有这张："));
+        portraitStore.current = want;
+        return Promise.resolve({ ok: true, current: want });
+      }
+      if (endpoint === "portrait/delete") {
+        var gone = body && body.id;
+        portraitStore.items = portraitStore.items.filter(function (x) { return x.id !== gone; });
+        if (portraitStore.current === gone) {
+          portraitStore.current = portraitStore.items.length ? portraitStore.items[0].id : null;
+        }
+        return Promise.resolve({ ok: true });
+      }
       if (endpoint === "notebook/complete" || endpoint === "notebook/delete") {
         return Promise.resolve({ ok: true, kind: "promise", id: (body && body.id) || "", text: "（预览桩）" });
       }
@@ -184,6 +224,34 @@
         });
       }
       return Promise.reject(new Error("预览桩没有这个 endpoint：" + endpoint));
+    },
+    /* 上传桩：真读文件、转 data_url、塞进仓库，这样上传链路能离线跑通。
+     字段名固定 file、只发一个文件——与官方 bridge.upload 的约定一致。 */
+    upload: function (endpoint, file) {
+      if (endpoint !== "portrait/upload") {
+        return Promise.reject(new Error("预览桩不支持上传到 " + endpoint));
+      }
+      if (!file) return Promise.reject(new Error("没拿到文件"));
+      if (file.size > 8 * 1024 * 1024) return Promise.reject(new Error("太大了（桩上限 8 MB）"));
+      return new Promise(function (resolve, reject) {
+        var reader = new FileReader();
+        reader.onerror = function () { reject(new Error("读不了这个文件")); };
+        reader.onload = function () {
+          var id = "p_preview" + (portraitStore.items.length + 1) + "_" + Date.now();
+          var item = {
+            id: id,
+            name: file.name || "上传图片",
+            mime: file.type || "image/jpeg",
+            bytes: file.size,
+            created_at: new Date().toISOString(),
+            data_url: String(reader.result || ""),
+          };
+          portraitStore.items = portraitStore.items.concat([item]);
+          portraitStore.current = id;
+          resolve({ ok: true, id: id, item: item });
+        };
+        reader.readAsDataURL(file);
+      });
     },
     onContext: function (cb) { try { cb && cb({ theme: "dark" }); } catch (e) { /* 预览桩忽略 */ } },
     getContext: function () { return { theme: "dark" }; },
