@@ -325,14 +325,17 @@ class DeniaDiary(Star):
     async def _send_signal(self, umo: str, char: str) -> None:
         """直发心情暗号（复核 #2）：``send_message`` 返回 ``True`` 才算真的发出去了；
         未初始化会 raise、平台没找到会返回 False——两种失败都**不写** ``last_sent_at``
-        （发失败绝不能污染互动轨迹）。"""
+        （发失败绝不能污染互动轨迹），也**不写暗号冷却**（第 11 步：冷却记在
+        ``confirm_sent`` 里，只有真送达才落——一次没送达不该换她 3 天不能用暗号）。"""
         try:
             sent = await StarTools.send_message(umo, MessageChain(chain=[Plain(char)]))
         except Exception as error:  # noqa: BLE001
-            logger.warning("[%s] 暗号直发异常（不写 last_sent_at）：%s", PLUGIN_NAME, error)
+            logger.warning("[%s] 暗号直发异常（不写 last_sent_at、不烧冷却，下次巡检还会再试）：%s",
+                           PLUGIN_NAME, error)
             return
         if sent is not True:
-            logger.warning("[%s] 暗号直发未送达（不写 last_sent_at）→ %s", PLUGIN_NAME, umo)
+            logger.warning("[%s] 暗号直发未送达（不写 last_sent_at、不烧冷却，下次巡检还会再试）→ %s",
+                           PLUGIN_NAME, umo)
             return
         await self.proactive.confirm_sent(umo, now=self._now())
         logger.info("[%s] 暗号已发出 → %s", PLUGIN_NAME, umo)

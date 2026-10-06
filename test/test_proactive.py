@@ -766,13 +766,43 @@ class PatrolTest(TriggerCase):
         self.assertIsNone(run(stack.proactive.patrol(now=SUN)), "常规内容配额满照挡（只有暗号穿透）")
 
     def test_signal_deducts_signal_fields(self) -> None:
+        """第 11 步改判：决策时**只预留**（配额 / slots_today / last_slot），
+        暗号的冷却字段要等**真的发出去了**（`confirm_sent`）才写。
+
+        改之前 `signal_date` / `signal_last_at` 记在 `_commit`：发送失败不回滚，
+        于是"一次没送达 = 她 3 天不能再用暗号"，而她本人和用户都不知道为什么。
+        """
         stack = self.make({"love_peers": ["10001"]})
         self.signal_ready(stack, now=SUN)
         run(stack.proactive.patrol(now=SUN))
         entry = read_proactive(stack)["sessions"]["aiocqhttp:FriendMessage:10001"]
-        self.assertEqual(entry["signal_date"], SUN.date().isoformat())
         self.assertEqual(entry["last_slot"], "signal")
+        self.assertNotIn("signal_date", entry, "还没发出去，冷却一个字都不能写")
+        self.assertNotIn("signal_last_at", entry, "还没发出去，冷却一个字都不能写")
         self.assertNotIn("last_sent_at", entry, "直发也要等确认点才写时间戳")
+
+        # 确认送达 → 冷却与每日一次这时候才落下去
+        run(stack.proactive.confirm_sent("aiocqhttp:FriendMessage:10001", now=SUN))
+        entry = read_proactive(stack)["sessions"]["aiocqhttp:FriendMessage:10001"]
+        self.assertEqual(entry["signal_date"], SUN.date().isoformat())
+        self.assertEqual(entry["signal_last_at"], SUN.isoformat(timespec="seconds"))
+        self.assertEqual(entry["last_sent_at"], SUN.isoformat(timespec="seconds"))
+
+    def test_signal_send_failure_does_not_burn_cooldown(self) -> None:
+        """第 11 步回归（这条就是那个 bug）：发失败 = 没调 `confirm_sent`，
+        下一次巡检必须还能再发——冷却**不能**被烧掉。"""
+        stack = self.make({"love_peers": ["10001"]})
+        self.signal_ready(stack, now=SUN)
+        first = run(stack.proactive.patrol(now=SUN))
+        self.assertIsNotNone(first, "第一次决策先出来")
+        # 模拟"平台没送达"：拿到决策但不确认。minutes 之间也足够越过最小间隔。
+        again = run(stack.proactive.patrol(now=SUN + timedelta(minutes=10)))
+        self.assertIsNotNone(again, "上次没送达 → 这次还得能发（冷却没被烧）")
+        self.assertEqual(again["kind"], "direct")
+        # 真送达之后才该被拦住
+        run(stack.proactive.confirm_sent("aiocqhttp:FriendMessage:10001", now=SUN + timedelta(minutes=10)))
+        blocked = run(stack.proactive.patrol(now=SUN + timedelta(minutes=20)))
+        self.assertIsNone(blocked, "送达之后：今天已发过 + 冷却中，必须拦住")
 
     def test_signal_not_sent_to_non_contact(self) -> None:
         stack = make_stack(self.root, {"love_peers": ["10001"]})  # 没记过 contact

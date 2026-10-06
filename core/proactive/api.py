@@ -207,24 +207,32 @@ class Proactive:
         「主动消息记录」的唯一数据源，**只在确认发出后**追加；slot / fragment 取
         决策时的暂存，重启丢失就取 ``last_slot``（fragment 记空串——行还在，
         "她什么时候找过谁"不丢）。
+
+        **暗号的冷却也在这一步写**（第 11 步改）：``signal_date``（每日一次）与
+        ``signal_last_at``（独立冷却）都记在**真的发出去之后**。改之前它们记在
+        ``_commit``（决策时）—— 发送失败不回滚，于是"一次没送达 = 她 3 天不能再用暗号"。
         """
         if not umo:
             return False
         moment = now or datetime.now(self.settings.zone())
         pending = self._pending_log.pop(str(umo), None)
+        # slot 先算出来：下面"要不要补记暗号冷却"和发送记录都要它。
+        slot = str((pending or {}).get("slot") or "") or str(
+            gate.entry_of(self.store.read(), umo).get("last_slot") or ""
+        )
 
         def update(doc: dict[str, Any]) -> dict[str, Any]:
             sessions = dict(doc.get("sessions") or {})
             entry = dict(sessions.get(umo) or {})
             entry["last_sent_at"] = moment.isoformat(timespec="seconds")
+            if slot == "signal":
+                entry["signal_date"] = moment.date().isoformat()
+                entry["signal_last_at"] = moment.isoformat(timespec="seconds")
             sessions[umo] = entry
             doc["sessions"] = sessions
             return doc
 
         await self.store.update(update)
-        slot = str((pending or {}).get("slot") or "") or str(
-            gate.entry_of(self.store.read(), umo).get("last_slot") or ""
-        )
         fragment = str((pending or {}).get("fragment") or "")
         await self.store.append_log(
             [
@@ -325,7 +333,8 @@ class Proactive:
     async def _commit(
         self, decision: dict[str, Any], cfg: dict[str, Any], moment: datetime
     ) -> bool:
-        """两段式第一步：扣配额（决策时），**不写** ``last_sent_at``。
+        """两段式第一步：扣配额（决策时），**不写** ``last_sent_at``，
+        也**不写**暗号的 ``signal_date`` / ``signal_last_at``（第 11 步改，见 ``confirm_sent``）。
 
         锁内复核配额（防巡检重叠），返回是否真的扣成了。**暗号跳过配额复核**
         （验收裁定：穿透配额，与"破免打扰"同理）——但 `today_count` 照常自增
@@ -353,9 +362,11 @@ class Proactive:
             slots = {day: value for day, value in slots.items() if day == today}
             slots[today] = today_slots
             entry["slots_today"] = slots
-            if slot == "signal":
-                entry["signal_date"] = today
-                entry["signal_last_at"] = moment.isoformat(timespec="seconds")
+            # ⚠️ 暗号的 `signal_date` / `signal_last_at` **不在这里写**（第 11 步改）：
+            # 这一层是"预留"，只负责防重复（配额 / slots_today / last_slot）。
+            # 冷却不是防重复的手段，它是**送出过**的记账 —— 放到 confirm_sent 里，
+            # 真发出去了才写。否则一次发送失败（平台没送达）会白烧 3 天冷却，
+            # 而她本人和用户都不知道为什么。
             sessions[umo] = entry
             doc["sessions"] = sessions
             return doc

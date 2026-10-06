@@ -205,7 +205,9 @@ astrbot_plugin_denia_diary/
 2. **闸门（该不该说）**：**先闸门后内容**——免打扰是全局闸（常规内容整个静默），配额 / 最小间隔是会话闸（先算出"今天还能对谁说话"，触发器只对这些会话取料，巡检 15min 一天 96 次不白翻日记原文）；然后按优先级逐个问触发器，**一 tick 至多放行一条**。三条硬约束：免打扰时段（`is_late_night`）、私聊每日 2 条 / 群聊每日 1 条、同会话最小间隔 2 小时。**群聊克制**：除约定跟进 / 纪念日外，其余触发器只在私聊出（纪念日的内容源 `facts_for` 本就只在私聊可见，实际能进群的只有约定跟进）。
 3. **出站（怎么说）**：默认**唤醒她本人**——`add_active_job(payload={"session": umo, "note": …}, run_once=True)`；`note` = `compose_prompt` 的完整注入（人格一致，不另写渲染器）+ ≤100 字上下文包（`【类目】指令 素材：原文片段`，压掉换行——note 经宿主 `json.dumps` 进 system prompt，预算按转义后算）。**直发只用于心情暗号**：整条消息就是那个字符（默认 `。`，可配 `signal_char`），`StarTools.send_message` 返回 `True` 才算发出（平台没找到 / 异常都不写 `last_sent_at`）。
 
-**两段式 `last_sent_at`**：决策时只扣 `today_count` / `last_slot` / `slots_today` / 暗号两键；`last_sent_at` 等**真的发出去**才写——唤醒路径的确认点是 `on_using_llm_tool`（她真调了 `send_message_to_user` 且事件带 `cron_job` extra），直发路径是 `send_message` 返回 `True`。中间失败 = 配额白吃一次，换轨迹永不替她说"她找过你了"。日志里"已派发"与"已发出"分开记。
+**两段式 `last_sent_at`**：决策时只扣 `today_count` / `last_slot` / `slots_today`；`last_sent_at` 等**真的发出去**才写——唤醒路径的确认点是 `on_using_llm_tool`（她真调了 `send_message_to_user` 且事件带 `cron_job` extra），直发路径是 `send_message` 返回 `True`。中间失败 = 配额白吃一次，换轨迹永不替她说"她找过你了"。日志里"已派发"与"已发出"分开记。
+
+**暗号的冷却也在确认点才写**（第 11 步改）：`signal_date`（每日一次）与 `signal_last_at`（3 天独立冷却）原先记在 `_commit`（决策时），发送失败不回滚 —— 结果"一次没送达 = 她 3 天不能再用暗号"，而她本人和用户都不知道为什么。现在两个键挪进 `confirm_sent`，只有真送达才落；发失败时下一次巡检会**再试**（每 `patrol_minutes` 一次，直到送出或她缓过来为止），`today_count` 照常每一步都自增（配额按"决策"计，这是刻意的——见下）。
 
 **心情暗号四道闸**（决策 #16：破免打扰，稀有性由四道闸保证）：① 只发 `love_peers` 名单内的**私聊**（没记录过 contact = 不知道往哪发，不发）；② 当下 valence 落最低档——判**衰减后**坐标（`snapshot`），阈值常量 **-0.7（待调）**：自报 -2 后约 4.5h、-1 后约 1.5h 内判中，语义是"她**现在**还在难受"；从没给过坐标的期间不触发；③ 独立冷却 3 天；④ 每天最多一次。
 
@@ -681,7 +683,7 @@ schema 里不存在的键，两边不一致时用户保存的值会在重载时�
 | 同日防重 | 同一 tick 第二次巡检不再发同 slot（`slots_today`） |
 | 互动轨迹待回窗口 | last_sent 1h 前未回复 → `她今天刚主动找过你…`；20h 前 → `…你还没回她` |
 | 三不发 | `subsystems.proactive=False` / 免打扰覆盖全天 / 配额扣满 2/2 → 三种都 `None` |
-| 心情暗号 | valence=-2 自报 → `direct` 决策（`char="。"`）；直发失败（实例无平台，`StarTools` 未初始化）**不写** `last_sent_at` |
+| 心情暗号 | valence=-2 自报 → `direct` 决策（`char="。"`）；直发失败（实例无平台，`StarTools` 未初始化）**不写** `last_sent_at`、**也不烧冷却**（第 11 步），下次巡检还会再试 |
 | 注入预算 | 仍 ≤400（回归） |
 
 ## 存储契约（第 0 步冻结）
