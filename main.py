@@ -35,6 +35,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 from .core import compose
 from .core import outbound as outbound_mod
+from .core import scope
 from .core import settings as settings_mod
 from .core import storage
 from .core import webui_portrait
@@ -341,6 +342,20 @@ class DeniaDiary(Star):
     def _session(self, event: AstrMessageEvent) -> Session:
         return Session.from_event(event)
 
+    def _scope_denied_reason(self, session: Session) -> str:
+        """启用范围判定（第 7 步）：范围外回**人话原因**，空串＝放行。
+
+        判定只住在 ``core.scope.allows``（档位 → owner/private/all）；面板与 WebUI
+        接口不走这里——主人视角永远可用。
+        """
+        allowed, reason = scope.allows(
+            str(dict(self.settings.scope).get("mode") or ""),
+            is_private=session.is_private,
+            person_id=session.person_id(),
+            love_peers=list(self.settings.love_peers),
+        )
+        return "" if allowed else reason
+
     def _now(self) -> datetime:
         return datetime.now(self.settings.zone())
 
@@ -373,6 +388,10 @@ Args:
             arousal(string): 可选，这篇日记的激活度打分：-2 到 2 的整数（精力充沛为正、疲惫低落为负）。
         """
         session = self._session(event)
+        denied = self._scope_denied_reason(session)
+        if denied:
+            # 范围外整轮不介入（第 7 步）：不写日记、不观察情绪——配置改回范围内即可恢复
+            return f"这个会话不在启用范围内，我不在这里记。({denied})"
         result = await self.diary.write_async(
             session, text=text, mood=mood, date=date, now=self._now()
         )
@@ -522,7 +541,7 @@ Args:
         about: str = "",
         due: str = "",
     ) -> str:
-        """往小本本上记一条。**只记两类**：promise ＝ 约定（你答应 TA 的事、约好了要一起做什么、打算为 TA 做什么，可以带期限）；fact ＝ 关于对方的重要事实（生日、喜好、工作、身体、在意的日子、TA 特意交代过的事）。私聊群聊都能记，不填 about 就是记给眼前这个人。
+        """往小本本上记一条。**只记两类**：promise ＝ 约定（你答应 TA 的事、约好了要一起做什么、打算为 TA 做什么，可以带期限）；fact ＝ 关于对方的重要事实（生日、喜好、工作、身体、在意的日子、TA 特意交代过的事）。能不能记看启用范围（默认只在私聊），不填 about 就是记给眼前这个人。
 
 ⚠️ 只记重要的：**日常闲聊、情绪、玩笑，一律不记** —— 本子就那么大，每人每类有条数上限。满了我会告诉你"本子满了"，那就先 note_forget 删掉几条旧的，或把几条并成一条再记（合并 ＝ 删旧 + 写一条新的）。
 
@@ -532,8 +551,12 @@ Args:
             about(string): 关于谁（对方的用户 id）。不填 ＝ 眼前这个人。
             due(string): 只在记约定时用：期限（YYYY-MM-DD），没有就空着。
         """
+        session = self._session(event)
+        denied = self._scope_denied_reason(session)
+        if denied:
+            return f"这个会话不在启用范围内，我不在这里记。({denied})"
         result = await self.notebook.note_add(
-            self._session(event), kind=kind, text=text, about=about, due_at=due, now=self._now()
+            session, kind=kind, text=text, about=about, due_at=due, now=self._now()
         )
         if not result.get("ok"):
             return f"没记成：{result.get('error') or '未知原因'}"
@@ -636,8 +659,12 @@ Args:
             valence(string): 可选，愉悦度打分：-2 到 2 的整数，开心为正、难受为负；不填＝不动坐标。
             arousal(string): 可选，激活度打分：-2 到 2 的整数，精力充沛为正、疲惫低落为负；不填＝不动坐标。
         """
+        session = self._session(event)
+        denied = self._scope_denied_reason(session)
+        if denied:
+            return f"这个会话不在启用范围内，我不在这里记。({denied})"
         result = await self.state.observe(
-            self._session(event),
+            session,
             word=word,
             valence=_parse_coord(valence),
             arousal=_parse_coord(arousal),
@@ -666,6 +693,9 @@ Args:
         if req is None:
             return
         session = self._session(event)
+        if self._scope_denied_reason(session):
+            return  # 范围外整轮不介入（第 7 步）：不注入、不计数、不记录——否则熟悉度与
+            # 联系人表会替她"记住"一个她根本不该工作的会话
         await self.affinity.touch(
             session, kind="private" if session.is_private else "mention", now=self._now()
         )
