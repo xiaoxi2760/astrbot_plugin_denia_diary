@@ -19,6 +19,16 @@ from .store import DiaryStore
 
 DISABLED = "日记功能已关闭"
 ALL_TEXT_LIMIT = 20000
+EARLY_HOURS_END = 6
+"""凌晨到几点为止算「新的一天刚开头」——**只决定那句话怎么写，不碰任何日期归属**。
+
+用户 2026-10-06 裁定（D8 走"只改措辞"）:00:00~05:59 之间日历已经翻页，但人的这一天还
+没开始（默认作息表第一段就是 `06:00|刚醒`），这时候说"今天还没写"读起来像在怪她一整天
+没动笔。所以这一段的措辞换成"新的一天刚开头，还没写"。
+
+⚠️ **没有引入"逻辑日"**：`day_of` / `slots_today` / 配额 / 熟悉度衰减一律照旧按日历日算，
+这里一个字节都不影响——改的只是给人看（准确说是给她看）的那句话。
+"""
 _TAIL_MAX = 200
 _SEARCH_MAX = 50
 _SCOPE_NOTE_SCOPE = ("group", "private")
@@ -345,7 +355,16 @@ class Diary:
         earlier = [e for e in self.entries() if e.date != today]
         previous = earlier[-1] if earlier else None
 
-        line = f"【日记】{today}：{'今天已写 ' + str(len(mine)) + ' 段' if mine else '今天还没写'}"
+        # D8（用户裁定"只改措辞"）：凌晨那句别说成"今天还没写"——那读起来像在怪她
+        # 一整天没动笔，可这时候她的一天还没开始（作息行还在说"该睡了"）。
+        # 只影响措辞，日期归属照旧（见 EARLY_HOURS_END）。
+        if mine:
+            status = "今天已写 " + str(len(mine)) + " 段"
+        elif moment.hour < EARLY_HOURS_END:
+            status = "新的一天刚开头，还没写"
+        else:
+            status = "今天还没写"
+        line = f"【日记】{today}：{status}"
         if previous is not None:
             first = " ".join(previous.text.split())[:40]
             line += f"；上一条是 {previous.date}「{first}…」"

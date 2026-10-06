@@ -401,6 +401,22 @@ class DiaryApiTest(TmpDirCase):
         self.assertIn("今天已写 1 段", line)
         self.assertIn("想再补两句", line)
 
+    def test_prompt_line_early_hours_does_not_blame(self) -> None:
+        """D8 回归（用户裁定"只改措辞"）：00:00~05:59 日历已经翻页、但她的一天还没开始，
+        这时候不能说"今天还没写"（读起来像在怪她一整天没动笔），要说"新的一天刚开头"。
+
+        这一改**只动措辞**：日期归属 / `day_of` / 配额一律照旧按日历日算，一个字节没变。
+        """
+        empty = make_diary(self.root)
+        for hour, expected in ((0, "新的一天刚开头"), (3, "新的一天刚开头"),
+                               (5, "新的一天刚开头"), (6, "今天还没写"),
+                               (12, "今天还没写"), (21, "今天还没写")):
+            moment = NOW.replace(hour=hour, minute=30)
+            line = empty.prompt_line(group_session(), now=moment)
+            self.assertIn(expected, line, f"{hour}:30 的措辞不对：{line.splitlines()[0]}")
+            if hour < 6:
+                self.assertNotIn("今天还没写", line, f"{hour}:30 不该出现「今天还没写」")
+
     def test_prompt_line_shows_previous_entry(self) -> None:
         diary = make_diary(self.root)
         yesterday = datetime(2026, 10, 3, 21, 0, tzinfo=TZ)

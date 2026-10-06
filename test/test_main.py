@@ -21,7 +21,7 @@ PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import TmpDirCase  # noqa: E402
+from support import NOW, TmpDirCase  # noqa: E402
 
 SUPPORTED_TYPES = {"string", "number", "boolean", "object", "array"}
 MODULE_NAME = "plugin_under_test.main"
@@ -533,6 +533,10 @@ class PromptInjectionTest(PluginCase):
     def test_injection_appends_diary_line_to_system_prompt(self) -> None:
         async def scenario():
             plugin = self.make_plugin()
+            # ⚠️ 必须钉死时钟：这句状态词**凌晨和白天不一样**（D8：00:00~05:59 是
+            # "新的一天刚开头，还没写"）。以前这条走真挂钟，跑在凌晨就会红——
+            # 和"23:30~06:30 必红"那条是同一类坑。
+            plugin._now = lambda: NOW
             event = _FakeEvent()
             req = sys.modules["astrbot.api.provider"].ProviderRequest()
             req.system_prompt = "你是她。"
