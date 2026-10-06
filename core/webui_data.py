@@ -21,6 +21,7 @@ payload 顶层键是**冻结**的（任务书 §2.1），只加不改：验收�
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,8 @@ DEFAULT_HISTORY_DAYS = 30
 HISTORY_DAYS_MIN = 1
 HISTORY_DAYS_MAX = 365
 DEFAULT_AFFINITY_LIMIT = 50
+MAX_CALENDAR_DAYS = 730
+"""日历清单的回传上限（约两年）：一本日记写了五年也不能回几十万条，只保留最近的。"""
 
 
 # ---- 总览：她此刻 -------------------------------------------------------------
@@ -62,6 +65,10 @@ def status_payload(
     snapshot = State(settings=settings, layout=layout, store=state_store).snapshot(now=moment)
     proactive = proactive_store.read()
     sessions = proactive_store.sessions(proactive)
+    try:
+        contacts = proactive_store.contacts()
+    except Exception:  # noqa: BLE001 - 坏表不能带累面板
+        contacts = {}
     today = moment.date().isoformat()
     total = 0
     for session in sessions.values():
@@ -76,8 +83,9 @@ def status_payload(
         "version": str(version or ""),
         "now": moment.isoformat(timespec="seconds"),
         "who": str(who or ""),
-        "who_name": display_name(settings, who),
+        "who_name": display_name(settings, who, contacts=contacts),
         "who_options": who_options(settings=settings, proactive_store=proactive_store),
+        "scope_mode": _scope_mode(settings),
         "subsystems": {name: bool(settings.subsystem(name)) for name in settings_mod.SUBSYSTEMS},
         "mood": dict(snapshot.get("mood") or {}),
         "rhythm": dict(snapshot.get("rhythm") or {}),
@@ -105,19 +113,97 @@ def file_report(layout: storage.Layout) -> dict[str, dict[str, Any]]:
     return report
 
 
-def display_name(settings: settings_mod.Settings, person_id: str) -> str:
-    """``person_id`` → 昵称。走 ``name_preference`` 映射（裁定 §1.3#3 的两个选项之一）。
+def raw_name(
+    settings: settings_mod.Settings,
+    person_id: str,
+    contacts: Mapping[str, Any] | None = None,
+) -> str:
+    """昵称本体（不带数字）：``name_preference`` → ``contacts[person]["name"]`` → 空。
 
-    没配就回落到 id 本身——面板按"人"组织，一个都不认识时至少还有可选项。
+    与 ``Session.label()`` 的既有序对齐（偏好 → 事件昵称 → id），面板与注入里
+    不会出现两种叫法。``contacts`` 是 ``proactive.json`` 的联系人子表。
     """
     key = str(person_id or "").strip()
     if not key:
         return ""
     preference = dict(getattr(settings, "name_preference", {}) or {})
-    return str(preference.get(key) or key)
+    name = str(preference.get(key) or "").strip()
+    if not name and isinstance(contacts, Mapping):
+        entry = contacts.get(key)
+        if isinstance(entry, Mapping):
+            name = str(entry.get("name") or "").strip()
+    return name
 
 
-def who_options(*, settings: settings_mod.Settings, proactive_store: Any) -> list[dict[str, str]]:
+def display_name(
+    settings: settings_mod.Settings,
+    person_id: str,
+    contacts: Mapping[str, Any] | None = None,
+) -> str:
+    """「对谁」的显示串（第 8 步）：**名字(数字)**，让下拉里不再是裸 id。
+
+    - 名字来源：``name_preference[person]`` → ``contacts[person]["name"]`` → 空（同 ``raw_name``）；
+    - 显示串：有名字且名字 ≠ id → ``名字(id)``；否则就是 id 本身——
+      **绝不出现** ``1411638634(1411638634)`` 这种重复；
+    - **不传 ``contacts`` 退回旧行为**（只认 ``name_preference``，不加数字后缀）——
+      既有调用（熟悉度榜等没有联系人表的视图）一个都不破坏。
+    """
+    key = str(person_id or "").strip()
+    if not key:
+        return ""
+    if contacts is None:
+        preference = dict(getattr(settings, "name_preference", {}) or {})
+        return str(preference.get(key) or key)
+    name = raw_name(settings, key, contacts)
+    if name and name != key:
+        return f"{name}({key})"
+    return key
+
+
+def _scope_mode(settings: settings_mod.Settings) -> str:
+    """当前启用范围档位（第 7 步的 ``scope.mode``，给前端显示"当前启用范围：只主人"）。"""
+    return str(dict(settings.scope).get("mode") or "")
+
+
+def _out_of_scope(
+    mode: str, person_id: str, peers: set[str]
+) -> bool:
+    """当前档下她**不会**在这个人的会话里工作吗——只做标注，**一个候选都不删**
+    （面板是主人视角、永远可用，第 7 步裁定）。按任务书口径：只有 ``owner`` 档
+    会产生档位外的人；``private`` / ``all`` 档下候选都算档位内。"""
+    if mode == "owner":
+        return person_id not in peers
+    return False
+
+
+def _option_items(
+    settings: settings_mod.Settings,
+    candidates: list[str],
+    contacts: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """候选 → 带标注的下拉项：``{id, name, label, is_owner, out_of_scope}``。
+
+    ``id`` 恒为 person_id 本身（前端按 id 去重，改了会炸）；``owner`` 档把主人
+    置顶（稳定排序，其余保持原序）；三档候选**数量相同**，只有标注不同。
+    """
+    mode = _scope_mode(settings)
+    peers = {str(peer) for peer in settings.love_peers}
+    items = [
+        {
+            "id": key,
+            "name": raw_name(settings, key, contacts),
+            "label": display_name(settings, key, contacts),
+            "is_owner": key in peers,
+            "out_of_scope": _out_of_scope(mode, key, peers),
+        }
+        for key in candidates
+    ]
+    if mode == "owner":
+        items.sort(key=lambda item: 0 if item["is_owner"] else 1)
+    return items
+
+
+def who_options(*, settings: settings_mod.Settings, proactive_store: Any) -> list[dict[str, Any]]:
     """顶栏"对谁"下拉的候选（裁定 §1.3#3）。
 
     候选 = ``proactive.contacts`` ∪ ``_conf_schema.love_peers``（**兜底保证至少一项**）。
@@ -125,6 +211,10 @@ def who_options(*, settings: settings_mod.Settings, proactive_store: Any) -> lis
     这是 ``/status`` 用的**轻量初始候选**——它不收 ``notebook_store``，好让
     ``status_payload`` 的签名保持最小；小本本里的候选由 ``notebook_payload``
     带出的 ``who_options``（``who_options_full``）补齐，前端合并两者。
+
+    第 8 步：每项 ``{id, name, label, is_owner, out_of_scope}``——``label`` 是
+    "名字(数字)" 显示串，``is_owner`` / ``out_of_scope`` 跟着 ``scope.mode`` 标注
+    （只标注不删候选，三档数量相同）。
     """
     candidates: list[str] = []
 
@@ -141,7 +231,7 @@ def who_options(*, settings: settings_mod.Settings, proactive_store: Any) -> lis
         contacts = {}
     for person_id in contacts:
         add(person_id)
-    return [{"id": key, "name": display_name(settings, key)} for key in candidates]
+    return _option_items(settings, candidates, contacts)
 
 
 def who_options_full(
@@ -149,8 +239,13 @@ def who_options_full(
     settings: settings_mod.Settings,
     notebook_store: Any = None,
     proactive_store: Any = None,
-) -> list[dict[str, str]]:
-    """完整候选集（小本本的键也要算进来）。前端顶栏用这个。"""
+) -> list[dict[str, Any]]:
+    """完整候选集（小本本的键也要算进来）。前端顶栏用这个。
+
+    标注规则同 ``who_options``（第 8 步）：``label`` = "名字(数字)"，owner 档主人
+    置顶、档位外的人只标注不删。没给 ``proactive_store`` 时拿不到联系人昵称，
+    ``name`` 回落 ``name_preference``，``label`` 同样成立。
+    """
     candidates: list[str] = []
 
     def add(value: object) -> None:
@@ -158,10 +253,15 @@ def who_options_full(
         if text and text not in candidates:
             candidates.append(text)
 
+    contacts: Mapping[str, Any] = {}
     for person_id in settings.love_peers:
         add(person_id)
     if proactive_store is not None:
-        for person_id in proactive_store.contacts():
+        try:
+            contacts = proactive_store.contacts()
+        except Exception:  # noqa: BLE001 - 坏表不能带累面板
+            contacts = {}
+        for person_id in contacts:
             add(person_id)
     if notebook_store is not None:
         doc = notebook_store.read()
@@ -170,18 +270,24 @@ def who_options_full(
         for promise in list(doc.get("promises") or []):
             if isinstance(promise, dict):
                 add(promise.get("about"))
-    return [{"id": key, "name": display_name(settings, key)} for key in candidates]
+    return _option_items(settings, candidates, contacts)
 
 
 # ---- 日记（只读）--------------------------------------------------------------
 
 
 def diary_list_payload(*, diary_store: Any, now: datetime | None = None) -> dict[str, Any]:
-    """两本日记的概览。``love_collapsed`` 恒 ``true``（决策 #18：恋爱日记默认收起）。"""
+    """两本日记的概览。``love_collapsed`` 恒 ``true``（决策 #18：恋爱日记默认收起）。
+
+    每本另带一份**每日清单** ``days``（第 6.1 步）：前端日历照着画，不用自己再
+    解析正文。``first_date`` 一律取**截断后** ``days[0]`` 的日期——截断时单独
+    重算"最早一天"就会和 ``days`` 对不上，前端会跳进空月份。
+    """
     books: list[dict[str, Any]] = []
     for book in fmt.BOOKS:
         path = diary_store.path(book)
         entries = fmt.parse_entries(diary_store.read(book), book)
+        days, truncated = _calendar_days(entries)
         books.append(
             {
                 "book": book,
@@ -191,9 +297,37 @@ def diary_list_payload(*, diary_store: Any, now: datetime | None = None) -> dict
                 "chars": sum(len(entry.text) for entry in entries),
                 "updated_at": _mtime_iso(path),
                 "latest_date": entries[-1].date if entries else "",
+                "days": days,
+                "first_date": days[0]["date"] if days else "",
+                "days_truncated": truncated,
             }
         )
     return {"ok": True, "books": books, "love_collapsed": True}
+
+
+def _calendar_days(entries: list[Any]) -> tuple[list[dict[str, Any]], bool]:
+    """条目 → ``{date, count, chars}`` 每日一项，按 ``date`` 升序。
+
+    同一天多条聚合成一项（``count`` / ``chars`` 是那天合计）；超过
+    ``MAX_CALENDAR_DAYS`` 天只保留**最近的**一段，``days_truncated`` 置真——
+    "更早的不在日历里"由前端据此提示。
+    """
+    buckets: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        date = str(getattr(entry, "date", "") or "")
+        if not date:
+            continue
+        bucket = buckets.get(date)
+        if bucket is None:
+            buckets[date] = {"date": date, "count": 1, "chars": len(entry.text)}
+        else:
+            bucket["count"] += 1
+            bucket["chars"] += len(entry.text)
+    days = [buckets[key] for key in sorted(buckets)]
+    truncated = len(days) > MAX_CALENDAR_DAYS
+    if truncated:
+        days = days[-MAX_CALENDAR_DAYS:]
+    return days, truncated
 
 
 def diary_content_payload(
@@ -207,6 +341,11 @@ def diary_content_payload(
     """读一段日记正文。**只读，不重写正文**。
 
     给 ``date`` 就取那天；否则取最近 ``tail`` 条（``tail<=0`` 时取全部）。
+
+    ``text`` 是给老前端与既有测试的**整段视图**，原样保留；``entries``（第 6.1 步）
+    是同一批条目的**结构化视图**——顺序与 ``picked`` 完全一致、条数等于 ``count``，
+    ``mood`` / ``who`` 原样透传（昵称替换是前端拿 ``who_options`` 干的活）。
+    非空 ``picked`` 时恒有 ``"\\n\\n".join(e["text"]) == text``（测试钉住）。
     """
     target = book if book in fmt.BOOKS else fmt.NORMAL
     entries = fmt.parse_entries(diary_store.read(target), target)
@@ -226,6 +365,17 @@ def diary_content_payload(
         "count": len(picked),
         "total": total,
         "text": "\n\n".join(entry.text for entry in picked),
+        "entries": [
+            {
+                "date": entry.date,
+                "time": entry.time,
+                "mood": entry.mood,
+                "who": entry.who,
+                "chars": len(entry.text),
+                "text": entry.text,
+            }
+            for entry in picked
+        ],
     }
 
 
@@ -237,10 +387,13 @@ def notebook_payload(
     settings: settings_mod.Settings,
     notebook_store: Any,
     who: str = "",
+    proactive_store: Any = None,
 ) -> dict[str, Any]:
     """小本本（读）。``facts`` / ``promises`` **原样透传 store 条目，键名别改**。
 
     ``who`` 只是过滤器：面板按"人"组织，不按会话（裁定 §1.3#4）。给空就是全量。
+    第 8 步：``who_name`` / ``who_options`` 带上联系人昵称（给了 ``proactive_store``
+    才拿得到），另加 ``scope_mode``（前端显示"当前启用范围：只主人"）。
     """
     doc = notebook_store.read()
     facts_all = doc.get("facts") if isinstance(doc.get("facts"), dict) else {}
@@ -257,11 +410,20 @@ def notebook_payload(
         facts = [dict(item) for bucket in facts_all.values() for item in list(bucket or []) if isinstance(item, dict)]
         promises = promises_all
     limits = dict(getattr(settings, "notebook", {}) or {})
+    contacts: Mapping[str, Any] | None = None
+    if proactive_store is not None:
+        try:
+            contacts = proactive_store.contacts()
+        except Exception:  # noqa: BLE001 - 坏表不能带累面板
+            contacts = {}
     return {
         "ok": True,
         "who": person,
-        "who_name": display_name(settings, person),
-        "who_options": who_options_full(settings=settings, notebook_store=notebook_store),
+        "who_name": display_name(settings, person, contacts=contacts),
+        "who_options": who_options_full(
+            settings=settings, notebook_store=notebook_store, proactive_store=proactive_store
+        ),
+        "scope_mode": _scope_mode(settings),
         "facts": facts,
         "promises": promises,
         "limits": limits,
@@ -497,6 +659,7 @@ __all__ = [
     "BOOK_DISPLAY",
     "DEFAULT_AFFINITY_LIMIT",
     "DEFAULT_HISTORY_DAYS",
+    "MAX_CALENDAR_DAYS",
     "affinity_payload",
     "complete_note",
     "diary_content_payload",
@@ -507,6 +670,7 @@ __all__ = [
     "history_payload",
     "notebook_payload",
     "proactive_payload",
+    "raw_name",
     "status_payload",
     "who_options",
     "who_options_full",

@@ -197,6 +197,35 @@ class ContactTest(TmpDirCase):
         run(stack.proactive.note_contact(Session(umo="aiocqhttp:GroupMessage:555", group_id="555")))
         self.assertFalse(stack.layout.proactive.exists(), "群里取不到人，不记录")
 
+    # ---- 第 8 步：contacts 落昵称（name 键） --------------------------------------
+
+    def test_note_contact_stores_name_and_keeps_it_when_missing(self) -> None:
+        stack = make_stack(self.root)
+        run(stack.proactive.note_contact(private_session(name="阿希")))
+        contacts = read_proactive(stack)["contacts"]
+        self.assertEqual(contacts["10001"]["name"], "阿希")
+        # 空名字（合成 sender / 平台没给）：既不写空串也不擦已有值
+        run(stack.proactive.note_contact(private_session(name="")))
+        self.assertEqual(read_proactive(stack)["contacts"]["10001"]["name"], "阿希")
+
+    def test_note_contact_overwrites_with_fresher_name(self) -> None:
+        stack = make_stack(self.root)
+        run(stack.proactive.note_contact(private_session(name="阿希")))
+        with mock.patch.object(storage, "atomic_write_json", wraps=storage.atomic_write_json) as spy:
+            run(stack.proactive.note_contact(private_session(name="小希")))
+            self.assertEqual(spy.call_count, 1, "名字变了要落盘（快路径不许吞掉改名）")
+        self.assertEqual(read_proactive(stack)["contacts"]["10001"]["name"], "小希")
+
+    def test_contacts_reader_tolerates_docs_without_name(self) -> None:
+        stack = make_stack(self.root)
+        storage.atomic_write_json(
+            stack.layout.proactive,
+            {"contacts": {"20002": {"umo": "aiocqhttp:FriendMessage:20002", "kind": "private"}}},
+        )
+        contacts = stack.proactive.store.contacts()
+        self.assertEqual(contacts["20002"]["umo"], "aiocqhttp:FriendMessage:20002")
+        self.assertNotIn("name", contacts["20002"], "老 doc 没有 name 键照常读")
+
 
 # ---- 闸门（gate_check / signal_gate） ---------------------------------------------
 
@@ -867,6 +896,72 @@ class ProactiveLogTest(TriggerCase):
         run(stack.proactive.confirm_sent("aiocqhttp:FriendMessage:10001", now=SUN))
         lines = self.log_lines(stack)
         self.assertEqual(len(lines), 1, "坏行丢弃，只留新确认的行")
+
+
+# ---- 启用范围（第 7 步）：目标宇宙走 scope.proactive_targets -------------------------
+
+
+class ScopeTargetsPatrolTest(TriggerCase):
+    """三档下 patrol 的目标集合：群候选只在 all 档出现，且受 daily_limit_group 与 @ 护栏。"""
+
+    GROUP_UMO = "aiocqhttp:GroupMessage:555"
+
+    def seed_group_promise(self, stack: SimpleNamespace) -> None:
+        seed_contacts(stack, {"10001": (self.GROUP_UMO, "group")})
+        run(stack.notebook.note_add(self.peer(), kind="promise", text="周三考试", due_at="2026-10-04", now=SUN))
+
+    def write_sessions(self, stack: SimpleNamespace, sessions: dict) -> None:
+        doc = read_proactive(stack)
+        doc["sessions"] = sessions
+        storage.atomic_write_json(stack.layout.proactive, doc)
+
+    def test_all_mode_yields_group_candidate_with_at_rule(self) -> None:
+        stack = self.make({"scope": {"mode": "all"}, "love_peers": ["10001"]})
+        self.seed_group_promise(stack)
+        decision = run(stack.proactive.patrol(now=SUN))
+        assert decision is not None
+        self.assertEqual(decision["kind"], "wake")
+        self.assertEqual(decision["umo"], self.GROUP_UMO)
+        self.assertIn("@", decision["note"], "群里不许裸发：note 必须要求 @ 对方")
+
+    def test_group_quota_is_daily_limit_group(self) -> None:
+        stack = self.make({"scope": {"mode": "all"}, "love_peers": ["10001"]})
+        self.seed_group_promise(stack)
+        self.write_sessions(stack, {
+            self.GROUP_UMO: {"today_date": SUN.date().isoformat(), "today_count": 1},
+        })
+        self.assertIsNone(run(stack.proactive.patrol(now=SUN)), "群配额默认 1 条/天，已满就不发")
+
+    def test_private_mode_never_targets_groups(self) -> None:
+        stack = self.make({"love_peers": ["10001"]})  # 默认档 private
+        self.seed_group_promise(stack)
+        self.assertIsNone(run(stack.proactive.patrol(now=SUN)))
+
+    def test_owner_mode_excludes_non_master_private_contacts(self) -> None:
+        stack = self.make({"scope": {"mode": "owner"}, "love_peers": ["10001"]})
+        run(stack.notebook.note_add(self.peer(), kind="promise", text="周三考试", due_at="2026-10-04", now=SUN))
+        seed_contacts(stack, {"20002": ("aiocqhttp:FriendMessage:20002", "private")})
+        self.assertIsNone(run(stack.proactive.patrol(now=SUN)), "owner 档只对主人主动")
+        seed_contacts(stack, {"10001": ("aiocqhttp:FriendMessage:10001", "private")})
+        decision = run(stack.proactive.patrol(now=SUN))
+        assert decision is not None
+        self.assertEqual(decision["umo"], "aiocqhttp:FriendMessage:10001")
+
+    def test_quota_is_counted_per_session(self) -> None:
+        """同一个 private 档：A 发满不影响 B（配额按会话，不按档位总量）。"""
+        stack = self.make({"scope": {"mode": "private"}, "love_peers": ["10001"]})
+        run(stack.notebook.note_add(self.peer(), kind="promise", text="帮 A 带书", due_at="2026-10-04", now=SUN))
+        run(stack.notebook.note_add(
+            self.peer(), kind="promise", text="帮 B 还钱", about="20002", due_at="2026-10-04", now=SUN
+        ))
+        seed_contacts(stack, {"20002": ("aiocqhttp:FriendMessage:20002", "private")})
+        full = SUN.date().isoformat()
+        self.write_sessions(stack, {
+            "aiocqhttp:FriendMessage:10001": {"today_date": full, "today_count": 2},
+        })
+        decision = run(stack.proactive.patrol(now=SUN))
+        assert decision is not None
+        self.assertEqual(decision["umo"], "aiocqhttp:FriendMessage:20002", "A 满了，轮到 B")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -96,6 +96,7 @@ def _node(path: tuple[str, ...], spec: Mapping[str, Any], fields: list[dict]) ->
     node["default"] = copy.deepcopy(spec.get("default", _EMPTY_DEFAULT.get(kind, "")))
     # 作息表这类"默认带换行"的字符串用 textarea：schema 驱动，前端不认字段名。
     node["multiline"] = isinstance(node["default"], str) and "\n" in node["default"]
+    node["editor"] = FIELD_EDITORS.get(node["path"], "")
     limits = settings_mod.INT_LIMITS.get(node["path"])
     if limits:
         node["min"], node["max"] = limits[0], limits[1]
@@ -334,6 +335,7 @@ CONFIG_GROUPS: tuple[tuple[str, str], ...] = (
     ("timezone", "时区"),
     ("data_dir", "数据目录（只读）"),
     ("subsystems", "子系统开关"),
+    ("scope", "启用范围（只主人 / 只私聊 / 全部启用）"),
     ("diary", "日记参数"),
     ("notebook", "小本本参数"),
     ("state", "状态参数（情绪 / 作息 / 熟悉度）"),
@@ -349,8 +351,8 @@ CONFIG_SECTIONS: tuple[dict[str, Any], ...] = (
     {
         "key": "basic",
         "label": "基础",
-        "description": "总开关、时区、数据目录、子系统开关与最亲密的人",
-        "groups": ("enabled", "timezone", "data_dir", "subsystems", "love_peers", "name_preference"),
+        "description": "总开关、时区、数据目录、子系统开关、启用范围与最亲密的人",
+        "groups": ("enabled", "timezone", "data_dir", "subsystems", "scope", "love_peers", "name_preference"),
     },
     {
         "key": "content",
@@ -373,6 +375,19 @@ CONFIG_SECTIONS: tuple[dict[str, Any], ...] = (
 )
 """大类（一级导航）：把 ``CONFIG_GROUPS`` 按使用场景再归并。仅影响展示层——
 归属写错 / 漏分组由 ``verify_schema_alignment`` 报出来，不在 import 时断言。"""
+
+FIELD_EDITORS: dict[str, str] = {
+    "state.rhythm": "rhythm",
+    "state.rhythm_weekend": "rhythm",
+    "state.late_night": "time_range",
+    "scope.mode": "scope",
+}
+"""字段 → 编辑器提示（第 6.1 步引入，``describe_schema`` 每个 field 都带 ``editor`` 键）。
+
+仅是我们响应里的**展示提示**（前端据此把作息表换成表格控件、深夜窗换成双时间框、
+``scope.mode`` 换成三段切换），``_conf_schema.json`` 与 ``POST settings`` 的载荷格式
+都不动——值仍然是字符串。写错的路径不算静默失效：``verify_schema_alignment`` 会把
+schema 里不存在的路径报出来（启动 warning + ``GET settings`` 的 ``problems``）。"""
 
 
 def sections_payload(schema: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -432,9 +447,9 @@ def verify_schema_alignment(schema: Mapping[str, Any] | None) -> list[str]:
     """自检 ``_conf_schema.json`` 与 ``core.settings`` 默认值表是否双向对齐（空 = 正常）。
 
     AstrBot 加载插件配置时会剔除 schema 中不存在的键——两边一旦不一致，用户
-    保存的值会在重载时静默丢失。对齐三件事：**顶层键集合**、**组内键集合**、
-    **大类归属**（``CONFIG_SECTIONS``）；int 项有没有 ``INT_LIMITS`` 取值范围
-    顺带核一遍（面板数字框的 min / max 靠它）。
+    保存的值会在重载时静默丢失。对齐四件事：**顶层键集合**、**组内键集合**、
+    **大类归属**（``CONFIG_SECTIONS``）、**editor 提示**（``FIELD_EDITORS``）；
+    int 项有没有 ``INT_LIMITS`` 取值范围顺带核一遍（面板数字框的 min / max 靠它）。
     """
     schema_map = dict(schema or {})
     code = settings_mod.default_config()
@@ -469,7 +484,18 @@ def verify_schema_alignment(schema: Mapping[str, Any] | None) -> list[str]:
             # 就是映射，不算分组错位——只有真正"该是组"的键才报。
             problems.append(f"schema 顶层「{key}」是叶子，但代码默认值是映射（分组对不上）")
 
-    return problems + section_coverage_problems(schema_map)
+    return problems + _editor_problems(schema_map) + section_coverage_problems(schema_map)
+
+
+def _editor_problems(schema: Mapping[str, Any] | None) -> list[str]:
+    """``FIELD_EDITORS`` 里写了 schema 上不存在的路径就报出来——提示表写错要喊，别静默失效。"""
+    _, fields = describe_schema(schema)
+    known = {str(field["path"]) for field in fields}
+    return [
+        f"editor 提示引用了不存在的字段「{path}」"
+        for path in sorted(FIELD_EDITORS)
+        if path not in known
+    ]
 
 
 def coerce_value(item: Mapping[str, Any], raw: Any) -> tuple[Any, str | None]:
@@ -587,6 +613,7 @@ def load_schema_file() -> dict[str, Any]:
 __all__ = [
     "CONFIG_GROUPS",
     "CONFIG_SECTIONS",
+    "FIELD_EDITORS",
     "READ_ONLY",
     "READ_ONLY_ENABLED_NOTE",
     "backup_config_file",

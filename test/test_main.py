@@ -444,9 +444,12 @@ class NotebookToolFlowTest(PluginCase):
         self.assertEqual(raw["trash"], [])
 
     def test_group_fact_injects_in_person_private_only(self) -> None:
-        """群里记下的（about 缺省＝发言者）→ 该人私聊注入得到，群里与别人私聊都注入不到。"""
+        """群里记下的（about 缺省＝发言者）→ 该人私聊注入得到，群里与别人私聊都注入不到。
+
+        第 7 步起默认档下群聊不工作，群聊读写要用 ``all`` 档才验得到——可见性规则本身没变。
+        """
         async def scenario() -> tuple[str, str, str]:
-            plugin = self.make_plugin()
+            plugin = self.make_plugin({"scope": {"mode": "all"}})
             group_event = _FakeEvent(
                 "aiocqhttp:GroupMessage:555",
                 type="GroupMessage",
@@ -478,9 +481,9 @@ class NotebookToolFlowTest(PluginCase):
         self.assertNotIn("【小本本】关于", others_prompt)
 
     def test_promise_injection_private_full_group_masked(self) -> None:
-        """约定：私聊出全文；群聊只出脱敏计数行。"""
+        """约定：私聊出全文；群聊只出脱敏计数行（群聊注入要在 ``all`` 档下才发生，第 7 步）。"""
         async def scenario() -> tuple[str, str]:
-            plugin = self.make_plugin()
+            plugin = self.make_plugin({"scope": {"mode": "all"}})
             event = _FakeEvent()
             await plugin.note_add(event, kind="promise", text="帮他带书")
             group_event = _FakeEvent(
@@ -672,6 +675,90 @@ class MoodToolFlowTest(PluginCase):
         reply, state_exists = asyncio.run(scenario())
         self.assertIn("写好了", reply, "打分坏了不能连累日记")
         self.assertFalse(state_exists, "没什么可沉淀的就不建 state.json")
+
+
+class ScopeGateTest(PluginCase):
+    """启用范围总闸（第 7 步）：范围外**整轮不介入**——不注入、不写盘、不观察。
+
+    判定住在 core.scope；这里只证明接线正确：默认 private 档下群聊三件写工具全拒、
+    注入与联系人不留痕；owner 档连别人的私聊也拒；all 档群聊放行。
+    """
+
+    def group_event(self) -> "_FakeEvent":
+        return _FakeEvent(
+            "aiocqhttp:GroupMessage:555",
+            type="GroupMessage",
+            session_id="555",
+            group_id="555",
+            sender_id="10001",
+        )
+
+    @staticmethod
+    def _snapshot(plugin) -> dict:
+        def read(path):
+            return path.read_text(encoding="utf-8") if path.exists() else ""
+
+        return {
+            "notebook": read(plugin.layout.notebook),
+            "diary": read(plugin.layout.diary),
+            "love": read(plugin.layout.love_diary),
+            "state": read(plugin.layout.state),
+            "proactive": read(plugin.layout.proactive),
+            "affinity": read(plugin.layout.affinity),
+        }
+
+    def test_group_write_tools_are_refused_by_default_and_write_nothing(self) -> None:
+        async def scenario():
+            plugin = self.make_plugin()
+            before = self._snapshot(plugin)
+            note = await plugin.note_add(self.group_event(), kind="fact", text="爱吃香菜")
+            diary = await plugin.diary_write(self.group_event(), text="群里的日记")
+            mood = await plugin.mood_report(self.group_event(), word="有点烦")
+            return before, self._snapshot(plugin), (note, diary, mood)
+
+        before, after, answers = asyncio.run(scenario())
+        for answer in answers:
+            self.assertIn("不在启用范围内", answer)
+        self.assertEqual(before, after, "范围外的拒绝一个字节都不落盘")
+
+    def test_group_injection_is_silent_and_leaves_no_trace(self) -> None:
+        async def scenario():
+            plugin = self.make_plugin()
+            provider = sys.modules["astrbot.api.provider"]
+            req = provider.ProviderRequest()
+            await plugin.inject_diary_hint(self.group_event(), req)
+            raw = (
+                plugin.layout.proactive.read_text(encoding="utf-8")
+                if plugin.layout.proactive.exists()
+                else "{}"
+            )
+            return req.system_prompt, json.loads(raw or "{}")
+
+        prompt, proactive = asyncio.run(scenario())
+        self.assertEqual(prompt, "", "范围外不注入")
+        self.assertEqual(proactive.get("contacts") or {}, {}, "note_contact 也不记范围外的会话")
+
+    def test_private_injection_still_works_by_default(self) -> None:
+        async def scenario():
+            plugin = self.make_plugin()
+            provider = sys.modules["astrbot.api.provider"]
+            req = provider.ProviderRequest()
+            await plugin.inject_diary_hint(_FakeEvent(), req)
+            return req.system_prompt
+
+        self.assertTrue(asyncio.run(scenario()), "默认档只挡群聊，私聊照常工作")
+
+    def test_owner_mode_refuses_private_strangers_but_serves_master(self) -> None:
+        plugin = self.make_plugin({"love_peers": ["10001"], "scope": {"mode": "owner"}})
+        stranger = _FakeEvent(
+            "aiocqhttp:FriendMessage:20002", type="FriendMessage", session_id="20002", sender_id="20002"
+        )
+        self.assertIn("不在启用范围内", asyncio.run(plugin.mood_report(stranger, word="平静")))
+        self.assertIn("记下了", asyncio.run(plugin.mood_report(_FakeEvent(), word="平静")))
+
+    def test_all_mode_allows_group_writes(self) -> None:
+        plugin = self.make_plugin({"scope": {"mode": "all"}})
+        self.assertIn("记好了", asyncio.run(plugin.note_add(self.group_event(), kind="fact", text="爱吃香菜")))
 
 
 class ProactiveCronTest(PluginCase):

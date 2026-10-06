@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .. import compose, storage
+from .. import compose, scope, storage
 from ..session import Session
 from . import gate, triggers
 from .store import ProactiveStore
@@ -70,23 +70,28 @@ class Proactive:
 
         挂在 ``on_llm_request``（每个请求都会走）：值没变不写盘、全程吞异常——
         它绝不能把正常对话带崩（复核 #5）。
+
+        第 8 步加键：真拿到 ``sender_name`` 就落进 ``name``（空名字**一个字不动**——
+        既不写空串也不擦已有值，换新名字才覆盖）；老 doc 没有 ``name`` 照常读。
         """
         try:
             who = session.person_id()
             if not who or not session.umo:
                 return
             kind = "group" if session.is_group else "private"
+            name = str(getattr(session, "sender_name", "") or "").strip()
 
             def update(doc: dict[str, Any]) -> dict[str, Any] | None:
                 contacts = dict(doc.get("contacts") or {})
                 current = contacts.get(who)
-                if (
-                    isinstance(current, dict)
-                    and current.get("umo") == session.umo
-                    and current.get("kind") == kind
-                ):
-                    return None  # 值没变，不写
-                contacts[who] = {"umo": session.umo, "kind": kind}
+                entry = dict(current) if isinstance(current, dict) else {}
+                entry["umo"] = session.umo
+                entry["kind"] = kind
+                if name:
+                    entry["name"] = name
+                if isinstance(current, dict) and current == entry:
+                    return None  # 值没变（含名字没变），不写
+                contacts[who] = entry
                 doc["contacts"] = contacts
                 return doc
 
@@ -130,8 +135,10 @@ class Proactive:
         if self.state is not None and self.state.is_late_night(now=moment):
             return None
 
-        # 会话闸：先算出"今天还能对谁说话"（配额 / 间隔；免打扰已在上面拦完）
-        allowed = self._allowed_sessions(doc, cfg, moment)
+        # 会话闸：先算出"今天还能对谁说话"（配额 / 间隔；免打扰已在上面拦完）。
+        # 目标宇宙由 scope.proactive_targets 给（第 7 步："谁能被主动"只住在 scope，
+        # 跟着档位走；contacts 是唯一来源——没互动过的人 / 没见过的群进不来）。
+        allowed = self._allowed_sessions(doc, cfg, moment, mode=self._scope_mode())
 
         # 再常规触发器：按优先级逐个问，第一个有内容的放行
         for finder in triggers.FINDERS:
@@ -148,32 +155,49 @@ class Proactive:
             return None  # 闸门复核没过（竞态）：本 tick 放弃，不往下问
         return None
 
+    def _scope_mode(self) -> str:
+        """当前启用范围档位（未配置时由 scope 按默认档兜底）。"""
+        return str(dict(self.settings.scope).get("mode") or "")
+
     def _allowed_sessions(
-        self, doc: dict[str, Any], cfg: dict[str, Any], moment: datetime
-    ) -> set[str]:
-        """过会话闸（配额 / 最小间隔）的 umo 集合。"""
+        self, doc: dict[str, Any], cfg: dict[str, Any], moment: datetime, *, mode: str = ""
+    ) -> dict[str, str]:
+        """过会话闸（配额 / 最小间隔）的目标：``umo → kind``。
+
+        目标宇宙 = ``scope.proactive_targets``（档位决定"谁能被主动"，contacts 是
+        唯一来源）；这里只逐会话复核配额与间隔（``late_night=False``：免打扰已在
+        patrol 的全局闸拦完，不在这里重复判）。
+        """
         contacts = doc.get("contacts")
         contacts = contacts if isinstance(contacts, dict) else {}
-        umo_kinds = {
-            str(contact.get("umo")): str(contact.get("kind") or "private")
-            for contact in contacts.values()
-            if isinstance(contact, dict) and contact.get("umo")
-        }
-        sessions = doc.get("sessions")
-        sessions = sessions if isinstance(sessions, dict) else {}
-        allowed: set[str] = set()
-        for umo in {*(str(k) for k in sessions), *umo_kinds}:
-            if not umo:
+        known_groups: list[str] = []
+        seen_groups: set[str] = set()
+        for contact in contacts.values():
+            if not isinstance(contact, dict) or str(contact.get("kind") or "") != "group":
                 continue
+            umo = str(contact.get("umo") or "")
+            if umo and umo not in seen_groups:
+                seen_groups.add(umo)
+                known_groups.append(umo)
+        sessions = doc.get("sessions")
+        targets = scope.proactive_targets(
+            mode,
+            contacts=contacts,
+            love_peers=tuple(self.settings.love_peers or ()),
+            sessions=sessions if isinstance(sessions, dict) else {},
+            known_groups=known_groups,
+        )
+        allowed: dict[str, str] = {}
+        for umo, kind in targets:
             reason = gate.gate_check(
                 entry=gate.entry_of(doc, umo),
-                kind=umo_kinds.get(umo, "private"),  # 只在 sessions 出现过的按私聊算
+                kind=kind,
                 cfg=cfg,
                 late_night=False,
                 now=moment,
             )
             if reason is None:
-                allowed.add(umo)
+                allowed[umo] = kind
         return allowed
 
     async def confirm_sent(self, umo: str, *, now: datetime | None = None) -> bool:
@@ -278,7 +302,10 @@ class Proactive:
         }
 
     def _build_note(self, candidate: triggers.Candidate, *, now: datetime) -> str:
-        """完整注入（复用第 3 步渲染器）+ ≤100 字上下文包。"""
+        """完整注入（复用第 3 步渲染器）+ ≤100 字上下文包。
+
+        群聊目标**不许裸发**（第 7 步护栏）：上下文包开头就要求她先 @ 提及对方。
+        """
         inject = ""
         if self.diary is not None:
             inject = compose.compose_prompt(
@@ -290,7 +317,8 @@ class Proactive:
                 now=now,
             )
         label = SLOT_LABELS.get(candidate.slot, candidate.slot)
-        pack = f"【{label}】{candidate.instruction}素材：{candidate.fragment}"
+        at_rule = "" if candidate.session.is_private else "（群聊：开口必须先 @ TA，别裸发）"
+        pack = f"【{label}】{at_rule}{candidate.instruction}素材：{candidate.fragment}"
         pack = " ".join(pack.split())[:PACK_MAX]  # 压掉换行（json.dumps 转义预算）+ 截 100
         return f"{inject}\n{pack}" if inject else pack
 

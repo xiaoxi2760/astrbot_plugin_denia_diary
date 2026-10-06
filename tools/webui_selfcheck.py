@@ -30,6 +30,7 @@ ROUTES_PY = PLUGIN_DIR / "web_api" / "routes.py"
 HANDLERS_PY = PLUGIN_DIR / "web_api" / "handlers.py"
 
 NEW_FILES = (
+    "core/scope.py",
     "core/webui_data.py",
     "core/webui_settings.py",
     "core/webui_portrait.py",
@@ -37,6 +38,7 @@ NEW_FILES = (
     "web_api/_web.py",
     "web_api/routes.py",
     "web_api/handlers.py",
+    "test/test_scope.py",
     "test/test_webui_data.py",
     "test/test_webui_settings.py",
     "test/test_webui_portrait.py",

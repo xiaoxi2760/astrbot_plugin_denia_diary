@@ -112,7 +112,10 @@ def _make_notebook(deps: Any) -> Callable[..., Any]:
         who = _query_str(request, "who", "")
         return json_response(
             webui_data.notebook_payload(
-                settings=deps.settings, notebook_store=deps.notebook.store, who=who
+                settings=deps.settings,
+                notebook_store=deps.notebook.store,
+                who=who,
+                proactive_store=deps.proactive.store,  # 第 8 步：小本本视图的「对谁」也要联系人昵称
             )
         )
 

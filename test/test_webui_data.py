@@ -141,7 +141,96 @@ class TestStatusPayload(WebuiDataCase):
         ids = [item["id"] for item in payload["who_options"]]
         self.assertIn("u_1001", ids)  # love_peers 兜底
         self.assertIn("u_2002", ids)  # contacts
-        self.assertEqual(payload["who_name"], "希")
+        self.assertEqual(payload["who_name"], "希(u_1001)")  # 第 8 步：who_name 带上数字
+
+
+class TestWhoNaming(WebuiDataCase):
+    """「对谁」显示名字（第 8 步）：contacts 落昵称 → 三级回落 → 名字(数字) + 档位标注。"""
+
+    def seed_contacts(self) -> None:
+        self.write_json(self.layout.proactive, {"contacts": {
+            "10001": {"umo": "aiocqhttp:FriendMessage:10001", "kind": "private", "name": "阿希"},
+            "20002": {"umo": "aiocqhttp:GroupMessage:555", "kind": "group", "name": "群友"},
+            "30003": {"umo": "aiocqhttp:FriendMessage:30003", "kind": "private"},
+        }})
+
+    def options_for(self, mode: str) -> list[dict]:
+        self.seed_contacts()
+        settings = make_settings(
+            love_peers=["10001"], name_preference={"10001": "希"}, scope={"mode": mode}
+        )
+        return webui_data.who_options(settings=settings, proactive_store=self.proactive_store)
+
+    def test_display_name_three_sources(self) -> None:
+        settings = make_settings(name_preference={"u_1": "希"})
+        self.assertEqual(webui_data.display_name(settings, "u_1", contacts={}), "希(u_1)")  # 偏好
+        self.assertEqual(
+            webui_data.display_name(settings, "u_2", contacts={"u_2": {"name": "阿希"}}),
+            "阿希(u_2)",  # contacts 昵称
+        )
+        self.assertEqual(webui_data.display_name(settings, "u_3", contacts={}), "u_3")  # 什么都没配 → id
+
+    def test_display_name_never_duplicates_the_id(self) -> None:
+        settings = make_settings(name_preference={"u_1": "u_1"})
+        self.assertEqual(webui_data.display_name(settings, "u_1", contacts={}), "u_1")
+        self.assertEqual(
+            webui_data.display_name(settings, "u_2", contacts={"u_2": {"name": "u_2"}}), "u_2"
+        )
+
+    def test_display_name_without_contacts_keeps_old_behavior(self) -> None:
+        settings = make_settings(name_preference={"u_1": "希"})
+        self.assertEqual(webui_data.display_name(settings, "u_1"), "希")  # 既有调用（不传 contacts）不破坏
+        self.assertEqual(webui_data.display_name(settings, "u_2"), "u_2")
+
+    def test_owner_mode_pins_owner_and_flags_others(self) -> None:
+        options = self.options_for("owner")
+        self.assertEqual(options[0]["id"], "10001")  # 主人置顶
+        by_id = {item["id"]: item for item in options}
+        self.assertTrue(by_id["10001"]["is_owner"])
+        self.assertFalse(by_id["10001"]["out_of_scope"])
+        self.assertEqual(by_id["10001"]["label"], "希(10001)")
+        self.assertEqual(by_id["10001"]["name"], "希")  # 偏好优先于 contacts 昵称
+        self.assertTrue(by_id["20002"]["out_of_scope"], "owner 档下其余人标档位外")
+        self.assertFalse(by_id["20002"]["is_owner"])
+        self.assertEqual(by_id["30003"]["label"], "30003")  # 没昵称就是裸 id，不重复拼
+        self.assertEqual(by_id["30003"]["name"], "")
+        self.assertEqual(by_id["20002"]["label"], "群友(20002)")
+
+    def test_private_and_all_modes_have_no_out_of_scope(self) -> None:
+        for mode in ("private", "all"):
+            with self.subTest(mode=mode):
+                options = self.options_for(mode)
+                self.assertTrue(all(not item["out_of_scope"] for item in options))
+                self.assertEqual(len(options), 3)
+
+    def test_candidate_count_identical_across_modes(self) -> None:
+        counts = {mode: len(self.options_for(mode)) for mode in ("owner", "private", "all")}
+        self.assertEqual(len(set(counts.values())), 1, "三档候选数量相同，只是标注不同")
+
+    def test_status_and_notebook_carry_scope_mode_and_labels(self) -> None:
+        self.seed_contacts()
+        payload = webui_data.status_payload(
+            settings=self.settings,
+            layout=self.layout,
+            state_store=self.state_store,
+            proactive_store=self.proactive_store,
+            now=NOW,
+            who="u_1001",
+        )
+        self.assertEqual(payload["scope_mode"], "private")
+        self.assertEqual(payload["who_name"], "希(u_1001)")
+        notebook = webui_data.notebook_payload(
+            settings=self.settings,
+            notebook_store=self.notebook_store,
+            who="u_1001",
+            proactive_store=self.proactive_store,
+        )
+        self.assertEqual(notebook["scope_mode"], "private")
+        self.assertEqual(notebook["who_name"], "希(u_1001)")
+        for item in notebook["who_options"]:
+            self.assertIn("label", item)
+            self.assertIn("is_owner", item)
+            self.assertIn("out_of_scope", item)
 
 
 class TestDiaryPayloads(WebuiDataCase):
@@ -199,6 +288,113 @@ class TestDiaryPayloads(WebuiDataCase):
         payload = webui_data.diary_list_payload(diary_store=self.diary_store, now=NOW)
         self.assertEqual(payload["books"][0]["entries"], 0)
         self.assertEqual(payload["books"][0]["latest_date"], "")
+
+    # ---- 第 6.1 步：days / first_date / days_truncated ---------------------------
+
+    def test_list_carries_daily_calendar(self) -> None:
+        self.seed_diaries()
+        payload = webui_data.diary_list_payload(diary_store=self.diary_store, now=NOW)
+        normal = payload["books"][0]
+        for key in ("days", "first_date", "days_truncated"):
+            self.assertIn(key, normal)
+        # 三天各一条：count=1，chars 是那天正文字数；按 date 升序
+        self.assertEqual(
+            normal["days"],
+            [
+                {"date": "2026-10-01", "count": 1, "chars": len("普通日记一。")},
+                {"date": "2026-10-03", "count": 1, "chars": len("普通日记二。")},
+                {"date": "2026-10-04", "count": 1, "chars": len("普通日记三。")},
+            ],
+        )
+        self.assertEqual(normal["first_date"], "2026-10-01")
+        self.assertFalse(normal["days_truncated"])
+        love = payload["books"][1]
+        self.assertEqual([day["date"] for day in love["days"]], ["2026-10-02"])
+        self.assertEqual(love["first_date"], "2026-10-02")
+
+    def test_list_aggregates_same_day_entries(self) -> None:
+        storage.atomic_write_text(
+            self.layout.diary,
+            "2026-10-05 08:00（开心）〔希〕\n早上好。\n\n"
+            "2026-10-05 22:00\n晚安。\n\n"
+            "2026-10-04 09:00\n前一天。\n",
+        )
+        payload = webui_data.diary_list_payload(diary_store=self.diary_store, now=NOW)
+        days = payload["books"][0]["days"]
+        self.assertEqual([day["date"] for day in days], ["2026-10-04", "2026-10-05"])  # 升序
+        self.assertEqual(days[1], {"date": "2026-10-05", "count": 2,
+                                   "chars": len("早上好。") + len("晚安。")})
+        self.assertEqual(payload["books"][0]["first_date"], "2026-10-04")
+
+    def test_list_empty_diary_has_empty_calendar(self) -> None:
+        payload = webui_data.diary_list_payload(diary_store=self.diary_store, now=NOW)
+        normal = payload["books"][0]
+        self.assertEqual(normal["days"], [])
+        self.assertEqual(normal["first_date"], "")
+        self.assertFalse(normal["days_truncated"])
+
+    def test_list_truncates_to_the_recent_730_days(self) -> None:
+        total = webui_data.MAX_CALENDAR_DAYS + 70  # 800 天
+        blocks = []
+        for offset in range(total):  # offset 0 最旧（NOW-799d），total-1 就是今天
+            day = (NOW - timedelta(days=total - 1 - offset)).date().isoformat()
+            blocks.append(f"{day} 08:00\n记。\n")
+        storage.atomic_write_text(self.layout.diary, "\n".join(blocks) + "\n")
+        payload = webui_data.diary_list_payload(diary_store=self.diary_store, now=NOW)
+        normal = payload["books"][0]
+        self.assertTrue(normal["days_truncated"])
+        self.assertEqual(len(normal["days"]), webui_data.MAX_CALENDAR_DAYS)
+        # first_date 必须取截断后 days[0]，别单独再算"最早一天"
+        self.assertEqual(normal["first_date"], normal["days"][0]["date"])
+        self.assertEqual(normal["days"][0]["date"], (NOW - timedelta(days=729)).date().isoformat())
+        self.assertEqual(normal["days"][-1]["date"], NOW.date().isoformat())
+        self.assertEqual(normal["days"][0]["chars"], len("记。"))
+        self.assertEqual(sum(day["chars"] for day in normal["days"]), 730 * len("记。"))
+        self.assertEqual(normal["chars"], 800 * len("记。"), "顶层 chars 仍是全量口径，不随截断变")
+
+    # ---- 第 6.1 步：结构化 entries（text 保留） -----------------------------------
+
+    def test_content_carries_structured_entries(self) -> None:
+        storage.atomic_write_text(
+            self.layout.diary,
+            "2026-10-01 21:30（开心）〔希〕\n第一段。\n\n第二段。\n\n"
+            "2026-10-03 20:00\n没心情也有一条。\n",
+        )
+        payload = webui_data.diary_content_payload(
+            diary_store=self.diary_store, book=fmt.NORMAL, date="2026-10-01"
+        )
+        for key in ("ok", "book", "date", "count", "total", "text"):
+            self.assertIn(key, payload)  # 老键一个不少
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(len(payload["entries"]), payload["count"])
+        entry = payload["entries"][0]
+        self.assertEqual(entry["date"], "2026-10-01")
+        self.assertEqual(entry["time"], "21:30")
+        self.assertEqual(entry["mood"], "开心")
+        self.assertEqual(entry["who"], "希")  # 原样透传，不做昵称替换
+        self.assertEqual(entry["chars"], len("第一段。\n\n第二段。"))
+        self.assertEqual(entry["text"], "第一段。\n\n第二段。")  # 条目正文可含换行
+        self.assertEqual(payload["text"], "第一段。\n\n第二段。")
+
+    def test_content_entries_match_text_and_order(self) -> None:
+        self.seed_diaries()
+        payload = webui_data.diary_content_payload(diary_store=self.diary_store, book=fmt.NORMAL, tail=2)
+        self.assertEqual(len(payload["entries"]), payload["count"])
+        self.assertEqual(payload["entries"][0]["date"], "2026-10-03")  # picked 顺序 = parse 顺序
+        self.assertEqual(payload["entries"][1]["date"], "2026-10-04")
+        self.assertEqual("\n\n".join(e["text"] for e in payload["entries"]), payload["text"])
+        bare = payload["entries"][0]
+        self.assertEqual(bare["mood"], "安心")
+        self.assertEqual(bare["who"], "")
+
+    def test_content_empty_day_has_no_entries(self) -> None:
+        self.seed_diaries()
+        payload = webui_data.diary_content_payload(
+            diary_store=self.diary_store, book=fmt.NORMAL, date="2026-09-01"
+        )
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["entries"], [])
+        self.assertEqual(payload["text"], "")
 
 
 class TestNotebookPayload(WebuiDataCase):

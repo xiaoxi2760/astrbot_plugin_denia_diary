@@ -21,6 +21,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .outbound import DEFAULT_MARKER_PATTERN
+from .scope import DEFAULT_MODE, normalize_mode
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,11 @@ _STATE_DEFAULTS: dict[str, str] = {
     "late_night": "23:30-06:30",  # 深夜时段（可跨午夜）；留空＝永不深夜
 }
 
+_SCOPE_DEFAULTS: dict[str, str] = {
+    "mode": DEFAULT_MODE,  # 默认「只私聊」：群聊的记录/注入从这一步起默认关闭（用户拍板）
+}
+"""启用范围组（第 7 步）：判定与语义的唯一来源在 ``core.scope``——这里只声明键与默认值。"""
+
 # 频率与冷却默认值 = 第 4 步任务书 §2 的用户定稿值（§5 工期纪律：全部待调）。
 # 暗号触发阈值（当下 valence ≤ -0.7，判衰减后坐标）与各触发器的时段窗口是代码
 # 常量，不进配置——前者要浮点（面板 int 项装不下），后者属于"判定阈值"不是"频率"。
@@ -111,6 +117,7 @@ def default_config() -> dict[str, Any]:
         "timezone": DEFAULT_TIMEZONE,
         "data_dir": "",
         "subsystems": dict.fromkeys(SUBSYSTEMS, True),
+        "scope": dict(_SCOPE_DEFAULTS),
         "diary": dict(_DIARY_DEFAULTS),
         "notebook": dict(_NOTEBOOK_DEFAULTS),
         "state": dict(_STATE_DEFAULTS),
@@ -129,6 +136,7 @@ class Settings:
     timezone: str = DEFAULT_TIMEZONE
     data_dir: str = ""
     subsystems: Mapping[str, bool] = field(default_factory=lambda: dict.fromkeys(SUBSYSTEMS, True))
+    scope: Mapping[str, str] = field(default_factory=lambda: dict(_SCOPE_DEFAULTS))
     diary: Mapping[str, int] = field(default_factory=lambda: dict(_DIARY_DEFAULTS))
     notebook: Mapping[str, int] = field(default_factory=lambda: dict(_NOTEBOOK_DEFAULTS))
     state: Mapping[str, str] = field(default_factory=lambda: dict(_STATE_DEFAULTS))
@@ -207,6 +215,8 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
 
     state = _as_state(src.get("state"), warnings)
 
+    scope = _as_scope(src.get("scope"), warnings)
+
     proactive = _as_proactive(src.get("proactive"), warnings)
 
     outbound = _as_outbound(src.get("outbound"), warnings)
@@ -222,6 +232,7 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
         timezone=timezone,
         data_dir=data_dir,
         subsystems=subsystems,
+        scope=dict(scope),
         diary=dict(diary),
         notebook=dict(notebook),
         state=dict(state),
@@ -289,6 +300,18 @@ def _as_state(value: Any, warnings: list[str]) -> dict[str, str]:
             warnings.append(f"state.{key} 不是字符串（{raw!r}），使用默认")
             out[key] = default
     return out
+
+
+def _as_scope(value: Any, warnings: list[str]) -> dict[str, str]:
+    """启用范围组（第 7 步）：一个 ``mode`` 字段。取值判定住在 ``core.scope.normalize_mode``
+    （未知回落默认 + warning），这里只接线——判定逻辑写两份必然漂移。"""
+    if value is not None and not isinstance(value, Mapping):
+        warnings.append("scope 不是对象，全部使用默认值")
+    raw = value.get("mode") if isinstance(value, Mapping) else None
+    mode, warning = normalize_mode(raw)
+    if warning:
+        warnings.append(warning)
+    return {"mode": mode}
 
 
 def _as_proactive(value: Any, warnings: list[str]) -> dict[str, Any]:

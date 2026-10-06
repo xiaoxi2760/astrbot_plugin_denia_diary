@@ -44,6 +44,19 @@
       }
     }
   },
+  "scope": {
+    "type": "object",
+    "description": "启用范围",
+    "hint": "按会话决定她在哪里工作：记录 / 注入 / 她的写工具与主动消息对象都跟着这一档走；面板不受影响",
+    "items": {
+      "mode": {
+        "type": "string",
+        "default": "private",
+        "description": "档位",
+        "hint": "owner=只在主人的私聊工作；private=任何私聊都工作，群聊不工作（默认）；all=私聊和群聊都工作。主动消息对象跟着档位：owner=只主人；private=互动过的私聊；all=再加上互动过的群（群里必须 @ 某人）。写错的值回落 private 并在日志提示"
+      }
+    }
+  },
   "diary": {
     "type": "object",
     "description": "日记参数",

@@ -744,6 +744,47 @@ class TestSchemaAlignment(unittest.TestCase):
         self.assertTrue(any("悬空" in item for item in problems))
 
 
+class TestFieldEditors(TestSettingsHandlers):
+    """``FIELD_EDITORS`` 编辑器提示（第 6.1 步）：出键、对值、写错要喊出来。"""
+
+    def fields_of(self) -> dict[str, dict]:
+        _, fields = webui_settings.describe_schema(SCHEMA)
+        return {field["path"]: field for field in fields}
+
+    def test_three_paths_carry_their_editor(self) -> None:
+        by_path = self.fields_of()
+        self.assertEqual(by_path["state.rhythm"]["editor"], "rhythm")
+        self.assertEqual(by_path["state.rhythm_weekend"]["editor"], "rhythm")
+        self.assertEqual(by_path["state.late_night"]["editor"], "time_range")
+
+    def test_every_field_has_an_editor_string(self) -> None:
+        for field in webui_settings.describe_schema(SCHEMA)[1]:
+            self.assertIn("editor", field, f"{field['path']} 缺 editor 键")
+            self.assertIsInstance(field["editor"], str)
+        by_path = self.fields_of()
+        self.assertEqual(by_path["timezone"]["editor"], "")
+        self.assertEqual(by_path["diary.max_chars"]["editor"], "")
+        self.assertEqual(by_path["state.rhythm"]["multiline"], True)  # 作息表默认值带换行
+
+    def test_get_response_fields_carry_editor(self) -> None:
+        data = self.data_of(self.call("settings_get"))
+        by_path = {field["path"]: field for field in data["fields"]}
+        self.assertEqual(by_path["state.late_night"]["editor"], "time_range")
+        self.assertEqual(by_path["enabled"]["editor"], "")
+
+    def test_ghost_editor_path_is_reported_by_alignment(self) -> None:
+        self.assertEqual(webui_settings.verify_schema_alignment(SCHEMA), [], "基线：提示表干净时无问题")
+        patched = dict(webui_settings.FIELD_EDITORS)
+        patched["state.不存在的字段"] = "rhythm"
+        with mock.patch.object(webui_settings, "FIELD_EDITORS", patched):
+            problems = webui_settings.verify_schema_alignment(SCHEMA)
+        self.assertTrue(any("editor 提示" in item and "state.不存在的字段" in item for item in problems))
+        # GET settings 的 problems 同源（handler 直调 verify_schema_alignment）
+        with mock.patch.object(webui_settings, "FIELD_EDITORS", patched):
+            data = self.data_of(self.call("settings_get"))
+        self.assertTrue(any("state.不存在的字段" in item for item in data["problems"]))
+
+
 class TestCoerceValue(unittest.TestCase):
     def field(self, kind, **extra):
         return {"path": "x.y", "type": kind, "description": "测试项", **extra}

@@ -27,8 +27,11 @@ AstrBot 陪伴系统插件。内核零 AstrBot 依赖，适配器只负责注册
 | 5.2 | 全部配置项搬进 WebUI 设置页（schema 驱动、改完即生效） | ✅ 已完成（真机已验设置读写 + 一键恢复默认） |
 | 5.3 | 立绘上传（用户自上传 + 单图展示 / 切换） | ✅ 已完成（真机已验 22/22：真 multipart / 真 `save` / 落盘 / 拒绝路径） |
 | 5.4 | 危险区「一键恢复全部默认」+ 两步确认 | ✅ 已完成（真机已验 10/10：改 → 落盘 → 热生效 → 恢复 → 回默认 → 空操作） |
+| 6.1 | 日历 / 单页日记本的数据面（`days` 清单 + 结构化 `entries` + `editor` 提示） | ✅ 后端已完成（前端照 README 契约接） |
+| 7 | 启用范围总闸（owner / private / all 三档；记录、注入、写工具与主动对象全跟档位走） | ✅ 后端已完成 |
+| 8 | 「对谁」显示名字（contacts 落昵称 + 名字(数字) 显示串 + 候选跟档位标注） | ✅ 后端已完成（前端照契约接） |
 
-当前 **596 项单测全绿**（第 5.2 步 60 + 「后端对齐」47 + 「立绘后端」30 + 「宿主契约」7）。WebUI 面板由插件侧提供（`web_api/` + `pages/diary/`）：
+当前 **664 项单测全绿**（第 5.2 步 60 + 「后端对齐」47 + 「立绘后端」30 + 「宿主契约」7 + 第 6.1 步数据面 11 + 第 7 步范围闸 34 + 第 8 步名字 10）。WebUI 面板由插件侧提供（`web_api/` + `pages/diary/`）：
 **读走 store 层、不走门面**（面板是主人视角，不受聊天可见性规则约束），
 写只走 store 的原子写方法。数据面在 `core/webui_data.py`（纯函数、可离线单测），
 设置页的数据面在 `core/webui_settings.py`（schema 递归展开 + 以 `load_settings` 的 warnings 为准绳）。
@@ -186,6 +189,8 @@ astrbot_plugin_denia_diary/
 
 Dashboard → 插件管理 → `astrbot_plugin_denia_diary` → 插件页。**新增/删除页面目录后必须重载插件**（官方 §0#8）；只改静态资源刷新页面即可。
 
+> 视觉参考：[`astrbot_plugin_daily_life`](https://github.com/siciyuanweilai/astrbot_plugin_daily_life)（MIT，作者 四次元未来）——第 6.3 步的仪表条、设计令牌与 bento 网格手法取自它；**只取手法不取体量**，其环境粒子层与光标跟随便签均未采用。
+
 ### 六个 tab
 
 | tab | 数据 | 读写 |
@@ -202,6 +207,36 @@ Dashboard → 插件管理 → `astrbot_plugin_denia_diary` → 插件页。**�
 **读与写都走 `store` 层，不走门面。** 门面方法全都吃一个 `Session`，而 WebUI 是 Dashboard 登录态、**没有会话上下文**；聊天里的可见性规则与归属判定是**对话安全规则**，套到面板上会让主人自己反而看不到、改不了。所以 `core/webui_data.py` 直接读 `DiaryStore` / `NotebookStore` / `StateStore` / `AffinityStore` / `ProactiveStore`，**不需要 `umo` 也能画出全部内容**。
 
 衰减与档位**不自算**：情绪与作息照抄 `State.snapshot()` 的 `mood`/`rhythm` 子表，榜与档位词照抄 `Affinity.top()` / `Affinity.band()`。
+
+### 日历清单与结构化条目（第 6.1 步）
+
+前端要画日历、渲染单页日记本，数据面为此加了两份**只增不改**的键（老键一个没动）：
+
+- `GET diary/list` 每本多出 `days` / `first_date` / `days_truncated`：
+  - `days` 是 `{"date": "YYYY-MM-DD", "count": n, "chars": m}` 每天一项，**按 `date` 升序**，同一天多条聚合成一项（`count`/`chars` 是那天合计）；
+  - 上限 **730 天**（`MAX_CALENDAR_DAYS`，约两年）：超了只保留**最近的 730 天**并把 `days_truncated` 置 `true`——前端据此提示"更早的不在日历里"。`first_date` 一律取**截断后** `days[0].date`（没有日记就是 `""`），别按"最早一天"单独理解，否则截断时前端会跳进空月份；
+  - 顶层 `entries` / `chars` / `latest_date` 仍是**全量口径**，不随截断变。
+- `GET diary/content` 多出 `entries` 数组：`{"date", "time", "mood", "who", "chars", "text"}` 每条一项，顺序与 `picked`（`parse_entries` 出来的顺序）完全一致、条数等于 `count`。`mood` / `who` **原样透传**（`mood` 可能是空串；`who` 是标注原文，昵称替换是前端拿 `who_options` 干的活）；`entries[].text` 是那一条的正文原文（可含换行，前端按空行分段渲染）。
+  - **`text` 原样保留**（整段视图，老前端与既有测试在读它）；非空 `picked` 时恒有 `"\n\n".join(e["text"] for e in entries) == text`（测试钉住）。
+
+### 「对谁」显示名字（第 8 步）
+
+顶栏「对谁」下拉不再是一串裸数字。三件事：
+
+1. **昵称落盘**：`proactive.json` 的 `contacts[<person_id>]` 加 **`name`** 键（加键不改名，
+   不用迁移）——互动时从 `session.sender_name` 写入；**空名字一个字不动**（不写空串、
+   不擦已有值），换新名字才覆盖。
+2. **显示串 = `名字(数字)`**：`display_name(settings, person, contacts)` 按
+   `name_preference[person] → contacts[person]["name"] → 空` 三级回落（与
+   `Session.label()` 同序），有名字且名字 ≠ id 就拼 `名字(id)`，否则就是 id 本身
+   （**绝不出现** `1411638634(1411638634)`）。**不传 `contacts` 退回旧行为**
+   （只认 `name_preference`，不加后缀）——熟悉度榜等没有联系人表的既有调用零破坏。
+   `who_options*` 每项带 `name`（昵称本体，可能空）与 `label`（显示串），
+   **`id` 恒为 person_id**（前端按 id 去重）。
+3. **候选跟档位标注（一个都不删）**：`who_options*` 每项加 `is_owner`（在 `love_peers`
+   里）与 `out_of_scope`（当前档下她不会在这个人的会话里工作；按第 7 步口径只有
+   `owner` 档会产生档位外的人），`owner` 档主人**置顶**（稳定排序）；三档候选数量相同。
+   `status_payload` / `notebook_payload` 另加 **`scope_mode`**（前端显示"当前启用范围：只主人"）。
 
 ### 路由表
 
@@ -264,7 +299,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 
 ```powershell
 $env:PYTHONDONTWRITEBYTECODE=1; $env:PYTHONUTF8=1
-py -m unittest discover -s test -t .      # 596 项
+py -m unittest discover -s test -t .      # 620 项
 py tools/webui_selfcheck.py                # 静态对账 + 资源/编码体检
 ```
 
@@ -294,6 +329,33 @@ WebUI 第 6 个 tab「设置」：**全部配置项**都在这里改，改完立
 `string`→单行、`list`→一行一项、`dict`→JSON 文本域（**解析失败就地报错、绝不提交**）。
 底部固定「保存 / 撤销改动 / 恢复默认值」，有未保存改动会提示；保存后把后端返回的
 `applied` / `backup` / `reloaded` / `warnings` 显示出来。
+
+### 字段提示与字符串格式（第 6.1 步写死）
+
+`describe_schema` 的每个 field 都带一个 `editor` 字符串，前端据此把特定字段换成更好的输入控件
+（**其它键一个没少**；`_conf_schema.json` 不动，`POST settings` 的载荷格式也不变——值仍然是字符串）：
+
+| 字段 | `editor` | 前端控件 |
+| :--- | :--- | :--- |
+| `state.rhythm` | `"rhythm"` | 作息表编辑器（见下方格式） |
+| `state.rhythm_weekend` | `"rhythm"` | 同上 |
+| `state.late_night` | `"time_range"` | 双时间框（可跨午夜） |
+| `scope.mode` | `"scope"` | 三段切换（owner / private / all） |
+| 其余全部 | `""` | 按类型自动选 |
+
+提示表住在 `core/webui_settings.py` 的 `FIELD_EDITORS` 常量里；表里写了 schema 上不存在的路径
+会被 `verify_schema_alignment` 报出来（启动 warning + `GET settings` 的 `problems`）——写错要喊，别静默失效。
+
+两个自定义编辑器要解析的**字符串格式**如下（此前只散在 `core/settings.py` / `core/state/api.py`
+的注释里，这里写死为准，与 `_segment_word` / `_parse_window` 的实现一一对应）：
+
+- **作息表**（`state.rhythm` / `state.rhythm_weekend`）：每行 `HH:MM|状态词`；
+  - `#` 开头是注释行；全角 `｜` 也当分隔符；解析不了的行、或词为空的行**忽略（不报错）**；
+  - **到点的最近一段生效**；**凌晨（第一段之前）归入最后一段**（跨天收尾，如 `23:00|该睡了` 对凌晨 02:00 依然有效）；
+  - 行顺序无关（内部按时间排序）；**空表 = 没有作息词**，注入里就不会有作息行；
+  - `rhythm_weekend` **留空 = 沿用工作日那张**，只有周六日才读它。
+- **深夜窗**（`state.late_night`）：`HH:MM-HH:MM`，**可跨午夜**（如 `23:30-06:30`，判 `分钟≥起点 或 <终点`）；
+  起止相同或留空 = 永不深夜；解析不了 = 永不深夜（不报错）。
 
 ### 校验准绳是 `load_settings` 的 warnings
 
@@ -406,6 +468,47 @@ schema 里不存在的键，两边不一致时用户保存的值会在重载时�
 | 未知点分路径、只读项、类型不符、组路径本身 | **400** |
 | 值被 `load_settings` 判为非法（越界/坏正则/坏时区/零宽） | **400** + `problems` 逐条列出，**不写盘** |
 | 备份或落盘失败 | 200 + `{ok: false, error}` |
+
+## 启用范围（第 7 步）
+
+一个总闸决定"她在哪里工作"：**记录 / 观察 / 注入 / 她的写工具**按会话范围收放，
+**主动消息的对象**也跟着同一档位走。判定只住在 `core/scope.py`（纯函数，零 astrbot），
+三个入口（`main.py` 注入钩子、三个写工具、`core/proactive/`）都只调它。
+
+三档语义（用户拍板，写死；设置页 `scope.mode`，editor 提示 `"scope"`）：
+
+| 档 | 记录 / 观察 / 注入 / 她的写工具 | 主动消息目标 |
+| :--- | :--- | :--- |
+| `owner`（只主人） | **只在 `love_peers` 里那个人的私聊**里工作；群聊一律不工作 | 主人私聊（现状不变） |
+| `private`（只私聊·**默认**） | **任何私聊**都工作；群聊不工作 | **任何私聊过的人**（不再只有主人）+ 名单内的人 |
+| `all`（全部启用） | 私聊 + **群聊**都工作 | 任何私聊过的人 **+ 群聊**（受护栏，见下） |
+
+「工作」= 注入了她的动态上下文 / 写了日记或小本本 / 观察了情绪。**范围外就是整轮不介入**：
+不注入、`diary_write` / `note_add` / `mood_report` 拒绝并回一句人话（「这个会话不在启用范围内，
+我不在这里记」）、连熟悉度计数与联系人表都不留痕。
+
+⚠️ **面板与 WebUI 接口永远可用**，不受这个闸影响——否则切到 `owner` 之后，在群里打开面板会被自己锁死。
+
+### 升级注意（对现有行为的变化）
+
+**从这一步起默认只在私聊工作（`private`），群聊里的记录 / 注入 / 写工具默认全部停止**——
+这是用户明确要的。需要群聊请把 `scope.mode` 切到「全部启用」（`all`）。
+
+### `love_peers` 的语义收窄
+
+`love_peers` = **主人身份**：`owner` 档的判定 + 恋爱日记可见性（这两条不变）。
+主动消息的对象从这一步起由**档位**决定（`scope.proactive_targets`），名单里的人只是
+`owner` 档下的全部、`private` 档下的子集。心情暗号是例外：它是主人之间的约定信号
+（决策 #16），对象保持 `love_peers` 私聊不变。
+
+### 主动消息的护栏（`private` 放开对象、`all` 再放开群聊）
+
+- **对象必须"跟她互动过"**：目标集合的唯一来源是 `proactive.contacts`（每个被动轮由
+  `note_contact` 记录"谁在哪跟我说话"）。从没互动过的人、没见过的群，**任何档位都进不来**；
+- **配额沿用按会话的现成计数**：`sessions[<umo>].today_count` + `daily_limit_private`（默认 2）/
+  `daily_limit_group`（默认 1）——扩对象天然每人一份配额，A 发满不影响 B，没有新增计数器；
+- 深夜 / 免打扰 / 冷却 / 素材这些闸一个不少；
+- **群里不许裸发**：群聊目标的唤醒 note 开头就要求她先 @ 提及对方（`all` 档）。
 
 ## 出站文本清洗（第 5.1 步）
 
@@ -623,6 +726,7 @@ schema 里不存在的键，两边不一致时用户保存的值会在重载时�
 | `state.rhythm` | 5 段默认表 | 每行「HH:MM\|状态词」；到点的最近一段生效，凌晨归入最后一段；留空＝不出作息行 |
 | `state.rhythm_weekend` | 空 | 周六周日生效；留空＝与工作日同一张 |
 | `state.late_night` | `23:30-06:30` | 深夜时段（可跨午夜）；留空＝永不深夜；非法值恒 False |
+| `scope.mode` | `private` | 启用范围档位：`owner` / `private`（默认）/ `all`；非法值回落 `private` 并记 warning（判定在 `core/scope.py`） |
 | `love_peers` | `[]` | 手工指定的"最亲密"名单（去空、去重、保序） |
 | `name_preference` | `{}` | `{id: 称呼}`，空称呼丢弃 |
 | `proactive.patrol_minutes` | `15` | 巡检间隔（1-59）；basic job 按 `*/N * * * *` 重建 |

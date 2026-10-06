@@ -15,7 +15,9 @@
                             "slots_today": {"YYYY-MM-DD": ["greeting"]},
                             "signal_last_at": "ISO8601 带时区",
                             "signal_date": "YYYY-MM-DD"}},
-     "contacts": {"<person_id>": {"umo": "...", "kind": "private"}}}
+     "contacts": {"<person_id>": {"umo": "...", "kind": "private",
+                                  "name": "昵称（第 8 步加键：互动时从 sender_name 落盘，
+                                           空名字不写也不擦已有值；不认这个键的读者忽略）"}}}
 
 - 键一律用 **umo**（``trace_line`` 按 umo 优先、session_id 兜底查）；
 - ``last_sent_at`` 只在**真的发出去那一刻**写（两段式第二步，确认点在钩子里）；
