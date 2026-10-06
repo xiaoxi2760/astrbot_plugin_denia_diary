@@ -32,7 +32,7 @@
   };
 
   var TABS = [
-    { key: "overview", title: "总览", note: "达妮娅此刻" },
+    { key: "overview", title: "总览", note: "此刻状态" },
     { key: "diary", title: "日记", note: "只读" },
     { key: "notebook", title: "小本本", note: "事实与约定" },
     { key: "affinity", title: "熟悉度", note: "榜与档位" },
@@ -304,6 +304,29 @@
     }
   }
 
+  /* ---- 左上角标题（第 10 步 · 用户自定义）----
+     收的是**panel 这一组自己**（`{brand, brand_sub}`），不是整份 values——
+     两个调用点（启动那次、设置页保存后）手里都是这一组，别再各自往里挖一层。
+     值来自配置 `panel.brand` / `panel.brand_sub`，由后端过完默认值再给，
+     所以这里不自己造默认值：**只认"给了什么就显示什么"，空串＝那一行不显示**。
+     ⚠️ 藏那两行必须靠 CSS 里的 `[hidden]` 兜底——`.brand` 是 display:flex，
+     UA 的 `[hidden]{display:none}` 特异性不够，光设 hidden 属性是藏不住的
+     （第 10 步真浏览器检查抓到的就是这个）。
+     index.html 里那份字面量是"还没拿到配置时"的兜底（连不上后端也不能空着）。 */
+  var FALLBACK_BRAND = "情绪日记";
+
+  function applyPanel(panel) {
+    var box = (panel && typeof panel === "object") ? panel : {};
+    var brand = String(box.brand === undefined ? FALLBACK_BRAND : box.brand).trim();
+    var sub = String(box.brand_sub === undefined ? "" : box.brand_sub).trim();
+    var brandEl = document.getElementById("brand");
+    var subEl = document.getElementById("brand-sub");
+    if (brandEl) { brandEl.textContent = brand; brandEl.hidden = !brand; }
+    if (subEl) { subEl.textContent = sub; subEl.hidden = !sub; }
+    /* 标签页标题跟着走：两行都空也留个能认出来的名字，不然书签全一样 */
+    document.title = (brand || FALLBACK_BRAND) + (sub ? " · " + sub : "");
+  }
+
   /* ---- 视图切换 ---- */
   function factoryFor(key) {
     var makers = {
@@ -418,6 +441,8 @@ document.addEventListener("error", function (event) {
         applyScopeMode(value);
         renderWhoPicker();          /* 「当前启用范围：X」那句跟着走 */
       },
+      /* 设置页保存后把新的面板标题推过来（保存的是同一个 panel 组） */
+      setPanel: function (panel) { applyPanel(panel); },
     };
 
     renderTabs();
@@ -440,7 +465,7 @@ document.addEventListener("error", function (event) {
     renderWhoPicker();
 
     /* 外观：URL ?theme= 覆盖 > 本地存的偏好 > 默认（少女心）。
-       不跟随宿主主题——用户明确要默认粉萌少女心，宿主明暗不该替达妮娅做这个决定。 */
+       不跟随宿主主题——用户明确要默认粉萌少女心，宿主明暗不该替这个决定做主。 */
     setTheme(themeFromUrl() || storedTheme() || DEFAULT_PRESET);
     renderThemePicker();
     document.getElementById("theme-picker").addEventListener("change", function (event) {
@@ -456,6 +481,7 @@ document.addEventListener("error", function (event) {
     try {
       var st0 = await apiGet("settings", {});
       loadNamePref(st0 && st0.values);
+      applyPanel(st0 && st0.values && st0.values.panel);
       var v = (((st0 || {}).values || {}).scope || {}).mode;
       if (v) { applyScopeMode(v); renderWhoPicker(); }
     } catch (error) { /* 读不到就按默认档显示，不打扰用户 */ }
@@ -523,5 +549,6 @@ document.addEventListener("error", function (event) {
   global.DiaryPanel = {
     ENDPOINTS: ENDPOINTS, TABS: TABS, PRESETS: PRESETS,
     DEFAULT_PRESET: DEFAULT_PRESET, show: show, setTheme: setTheme,
+    applyPanel: applyPanel,
   };
 })(window);

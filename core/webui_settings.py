@@ -334,6 +334,7 @@ CONFIG_GROUPS: tuple[tuple[str, str], ...] = (
     ("enabled", "总开关"),
     ("timezone", "时区"),
     ("data_dir", "数据目录（只读）"),
+    ("panel", "面板外观（标题与副标题）"),
     ("subsystems", "子系统开关"),
     ("scope", "启用范围（只主人 / 只私聊 / 全部启用）"),
     ("diary", "日记参数"),
@@ -351,8 +352,8 @@ CONFIG_SECTIONS: tuple[dict[str, Any], ...] = (
     {
         "key": "basic",
         "label": "基础",
-        "description": "总开关、时区、数据目录、子系统开关、启用范围与最亲密的人",
-        "groups": ("enabled", "timezone", "data_dir", "subsystems", "scope", "love_peers", "name_preference"),
+        "description": "总开关、时区、数据目录、面板外观、子系统开关、启用范围与最亲密的人",
+        "groups": ("enabled", "timezone", "data_dir", "panel", "subsystems", "scope", "love_peers", "name_preference"),
     },
     {
         "key": "content",

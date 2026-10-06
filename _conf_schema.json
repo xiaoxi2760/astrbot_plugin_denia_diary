@@ -17,6 +17,25 @@
     "description": "数据目录",
     "hint": "留空使用 AstrBot 的插件数据目录（data/plugin_data/astrbot_plugin_denia_diary）"
   },
+  "panel": {
+    "type": "object",
+    "description": "面板外观",
+    "hint": "只改 WebUI 观察面板左上角怎么显示，不影响她怎么说话、也不影响注入",
+    "items": {
+      "brand": {
+        "type": "string",
+        "default": "情绪日记",
+        "description": "面板标题",
+        "hint": "左上角那行大字，同时用作浏览器标签页标题；留空＝那行不显示"
+      },
+      "brand_sub": {
+        "type": "string",
+        "default": "观察面板",
+        "description": "面板副标题",
+        "hint": "标题下面那行小字；留空＝那行不显示"
+      }
+    }
+  },
   "subsystems": {
     "type": "object",
     "description": "子系统开关",

@@ -946,6 +946,9 @@
       });
       ctx.UI.toast("设置已生效");
       await refresh();
+      /* 面板标题（panel.brand / panel.brand_sub）改完要**当场**换掉左上角，
+         不然用户得刷新页面才看得见自己刚改的字。整组一起推，省得逐字段盯。 */
+      if (ctx.setPanel) ctx.setPanel(schema.values && schema.values.panel);
       say(parts.join("　·　"), false);
     }
 

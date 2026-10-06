@@ -95,6 +95,16 @@ _SCOPE_DEFAULTS: dict[str, str] = {
 }
 """启用范围组（第 7 步）：判定与语义的唯一来源在 ``core.scope``——这里只声明键与默认值。"""
 
+_PANEL_DEFAULTS: dict[str, str] = {
+    "brand": "情绪日记",  # 面板左上角标题（可改成任意称呼）
+    "brand_sub": "观察面板",  # 标题下面那行小字
+}
+"""面板外观组（第 10 步）：只驱动 WebUI 显示，**不进任何提示词、不参与判定**。
+留空串是有意义的值（＝那行不显示），所以缺键才回落默认——与 ``state``/``proactive`` 同规矩。"""
+
+MAX_PANEL_TEXT = 60
+"""面板文案长度上限：它是显示层的东西，超长的值会把侧栏撑坏，就地截断并记 warning。"""
+
 # 频率与冷却默认值 = 第 4 步任务书 §2 的用户定稿值（§5 工期纪律：全部待调）。
 # 暗号触发阈值（当下 valence ≤ -0.7，判衰减后坐标）与各触发器的时段窗口是代码
 # 常量，不进配置——前者要浮点（面板 int 项装不下），后者属于"判定阈值"不是"频率"。
@@ -118,6 +128,7 @@ def default_config() -> dict[str, Any]:
         "data_dir": "",
         "subsystems": dict.fromkeys(SUBSYSTEMS, True),
         "scope": dict(_SCOPE_DEFAULTS),
+        "panel": dict(_PANEL_DEFAULTS),
         "diary": dict(_DIARY_DEFAULTS),
         "notebook": dict(_NOTEBOOK_DEFAULTS),
         "state": dict(_STATE_DEFAULTS),
@@ -137,6 +148,7 @@ class Settings:
     data_dir: str = ""
     subsystems: Mapping[str, bool] = field(default_factory=lambda: dict.fromkeys(SUBSYSTEMS, True))
     scope: Mapping[str, str] = field(default_factory=lambda: dict(_SCOPE_DEFAULTS))
+    panel: Mapping[str, str] = field(default_factory=lambda: dict(_PANEL_DEFAULTS))
     diary: Mapping[str, int] = field(default_factory=lambda: dict(_DIARY_DEFAULTS))
     notebook: Mapping[str, int] = field(default_factory=lambda: dict(_NOTEBOOK_DEFAULTS))
     state: Mapping[str, str] = field(default_factory=lambda: dict(_STATE_DEFAULTS))
@@ -217,6 +229,8 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
 
     scope = _as_scope(src.get("scope"), warnings)
 
+    panel = _as_panel(src.get("panel"), warnings)
+
     proactive = _as_proactive(src.get("proactive"), warnings)
 
     outbound = _as_outbound(src.get("outbound"), warnings)
@@ -233,6 +247,7 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
         data_dir=data_dir,
         subsystems=subsystems,
         scope=dict(scope),
+        panel=dict(panel),
         diary=dict(diary),
         notebook=dict(notebook),
         state=dict(state),
@@ -312,6 +327,31 @@ def _as_scope(value: Any, warnings: list[str]) -> dict[str, str]:
     if warning:
         warnings.append(warning)
     return {"mode": mode}
+
+
+def _as_panel(value: Any, warnings: list[str]) -> dict[str, str]:
+    """面板外观组（第 10 步）：两个纯展示字符串。
+
+    空串是**合法值**（＝那行不显示），所以只有"缺键"才回落默认；非字符串回落默认并记
+    warning，超长就地截断——这一段坏了顶多让侧栏难看，绝不该连带把面板弄崩。
+    """
+    if value is not None and not isinstance(value, Mapping):
+        warnings.append("panel 不是对象，全部使用默认值")
+    out: dict[str, str] = {}
+    for key, default in _PANEL_DEFAULTS.items():
+        raw = value.get(key) if isinstance(value, Mapping) else None
+        if raw is None:
+            out[key] = default
+        elif not isinstance(raw, str):
+            warnings.append(f"panel.{key} 不是字符串（{raw!r}），使用默认")
+            out[key] = default
+        else:
+            text = raw.strip()
+            if len(text) > MAX_PANEL_TEXT:
+                warnings.append(f"panel.{key} 超过 {MAX_PANEL_TEXT} 字，已截断")
+                text = text[:MAX_PANEL_TEXT]
+            out[key] = text
+    return out
 
 
 def _as_proactive(value: Any, warnings: list[str]) -> dict[str, Any]:
@@ -415,6 +455,7 @@ def _as_preference(value: Any, warnings: list[str]) -> Mapping[str, str]:
 __all__ = [
     "DEFAULT_TIMEZONE",
     "INT_LIMITS",
+    "MAX_PANEL_TEXT",
     "OUTBOUND_DEFAULTS",
     "SUBSYSTEMS",
     "Settings",

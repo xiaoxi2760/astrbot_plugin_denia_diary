@@ -1,5 +1,5 @@
 /* 曲线 / 主动消息（三期）：手写 SVG 折线（valence 与 arousal）+
-   主动消息记录（达妮娅什么时候主动说了什么）。
+   主动消息记录（她什么时候主动说了什么）。
 
    曲线数据源是 state_history.jsonl（追加型，键名冻结 ts/layer/valence/arousal/word），
    页面在受限 iframe 里读不到文件系统——**GET /history 是曲线唯一入口**。 */
@@ -123,7 +123,7 @@
 
       var log = proactive.log || [];
       var lBox = UI.h("div", { class: "card panel" }, [
-        UI.h("h3", { text: "达妮娅主动说了什么（倒序，共 " + (proactive.log_total || 0) + " 条）" }),
+        UI.h("h3", { text: "她主动说了什么（倒序，共 " + (proactive.log_total || 0) + " 条）" }),
       ]);
       if (!log.length) lBox.appendChild(UI.empty("还没有发送记录"));
       log.forEach(function (item) {

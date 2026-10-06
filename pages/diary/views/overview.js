@@ -1,4 +1,4 @@
-/* 总览（达妮娅此刻）：**只管"一眼看完"**——心情 / 作息 / 基调 / 主动计数 / 对谁。
+/* 总览（此刻状态）：**只管"一眼看完"**——心情 / 作息 / 基调 / 主动计数 / 对谁。
    「此刻的坐标」和「数据文件」两块纯数据搬去了新增的第 7 个 tab「数据」
    （views/data.js）。理由：总览是给人看她现在怎么样的，不是看数值的。
    数值不是不要看，是不该混在这一屏里。
@@ -30,13 +30,12 @@
 
   /* ---- 立绘：一次只展示一张，右边一个切换按钮 + 上传 / 删这张 ----
 
-     列表有两条来源：
-       - 接口：GET portrait → {current, items[]}，每项带 data_url（用户传上来的）
-       - 打包的默认图：接口还没接上、或用户一张都没传时兜底
+     图源**只有一种**：用户自己传的那张（接口 GET portrait → {current, items[]}，
+     每项带 data_url）。第 10 步把打包的默认立绘删掉了——公开发布不夹带角色立绘，
+     也不替用户决定放谁的照片，所以没有图时露 #portrait-empty 那块「这里可以放图」。
      **模块级缓存**：data_url 是 base64，一张就几百 KB，每次切 tab 重拉一遍太浪费。
      上传 / 删除后主动作废缓存重取。 */
 
-  var DEFAULT_ALT = ["樱花树下的达妮娅", "达妮娅全身立绘"];
   var portrait = { items: [], index: 0, fromUpload: false, ready: false };
   var portraitWired = false;
   var deleteArmed = null;
@@ -46,7 +45,7 @@
       strip: document.getElementById("portraits"),
       frame: document.getElementById("portrait-frame"),
       upload: document.getElementById("portrait-img"),
-      defaults: Array.prototype.slice.call(document.querySelectorAll(".portrait-default")),
+      empty: document.getElementById("portrait-empty"),
       count: document.getElementById("portrait-count"),
       switchBtn: document.getElementById("portrait-switch"),
       delBtn: document.getElementById("portrait-delete"),
@@ -56,7 +55,7 @@
 
   async function loadPortrait(ctx) {
     if (portrait.ready) return portrait;
-    var items;
+    var items = [];
     try {
       var data = await ctx.apiGet("portrait");
       items = (data && data.items) || [];
@@ -65,9 +64,9 @@
       portrait.index = at >= 0 ? at : 0;
       portrait.fromUpload = items.length > 0;
     } catch (error) {
-      /* 接口还没接上（后端未实现 / 离线预览）：退回打包的默认图，
-         这也正是「用户还没传过」时该有的样子。 */
-      items = DEFAULT_ALT.map(function (alt, i) { return { id: "default-" + i, name: alt }; });
+      /* 接口没接上（后端未实现 / 离线预览）：当作"一张都没有"，
+         也就是「这里可以放图」那块占位——**不再退回打包的默认图**。 */
+      items = [];
       portrait.index = 0;
       portrait.fromUpload = false;
     }
@@ -91,10 +90,8 @@
       refs.upload.hidden = true;
       refs.upload.removeAttribute("src");
     }
-    /* 默认图与上传图互斥：任一时刻只亮一个槽位 */
-    refs.defaults.forEach(function (el, i) {
-      el.hidden = portrait.fromUpload || i !== portrait.index;
-    });
+    /* 有图就没占位、没图就只有占位：两个槽位永远互斥 */
+    if (refs.empty) refs.empty.hidden = !!(portrait.fromUpload && item);
 
     if (refs.count) refs.count.textContent = total > 1 ? (portrait.index + 1) + " / " + total : "";
     if (refs.switchBtn) refs.switchBtn.hidden = total <= 1;

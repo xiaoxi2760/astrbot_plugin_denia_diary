@@ -187,7 +187,10 @@ html, body {
   display: flex;
   align-items: center;
   gap: 7px;
-  white-space: nowrap;   /* 窄屏下不要把"达妮娅的日记"折成两行 */
+  /* 标题是用户自定义的（panel.brand）：默认短标题自然是一行，
+     真填了超长的一句，宁可换行也别把侧栏撑破、更别横向溢出 */
+  min-width: 0;
+  overflow-wrap: anywhere;
   flex: 0 0 auto;
 }
 .brand::before {
@@ -199,7 +202,11 @@ html, body {
   box-shadow: 0 0 0 3px var(--accent-soft);
   flex: 0 0 auto;
 }
-.brand-sub { font-size: 11px; color: var(--fg-faint); margin-top: -12px; padding-left: 14px; letter-spacing: .5px; }
+.brand-sub { font-size: 11px; color: var(--fg-faint); margin-top: -12px; padding-left: 14px; letter-spacing: .5px; overflow-wrap: anywhere; }
+/* JS 用 `hidden` 属性藏这两行（panel.brand / brand_sub 留空＝不显示）。
+   ⚠️ UA 的 `[hidden] { display: none }` 特异性比 `.brand { display: flex }` 低，
+   不补这条的话 `.brand` 设了 hidden 也照样占着位置（第 10 步真浏览器检查抓到的）。 */
+.brand[hidden], .brand-sub[hidden] { display: none; }
 
 .tabs { display: flex; flex-direction: column; gap: 2px; }
 .tab {
@@ -706,11 +713,35 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
   max-height: clamp(150px, 32vh, 300px);
   object-fit: contain;
 }
-/* 空态兜底：默认图一直在，理论上到不了，但别让它塌成一条线 */
+/* 没图时的占位（第 10 步）：默认立绘不再打包，所以这块**一定会出现**在
+   用户还没传图的机器上——它得自己站得住（有宽度、能读、虚线一眼看出是空的）。
+   文案在 index.html 里（这里不写死，免得两处漂）。 */
 .portrait.is-empty {
   min-width: 200px;
   min-height: 120px;
   border-style: dashed;
+}
+.portrait-empty {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: clamp(220px, 34vw, 340px);
+  padding: 18px 20px;
+  text-align: center;
+  color: var(--fg-dim);
+}
+.portrait-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: 0.06em;
+}
+.portrait-empty-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
 }
 /* 图没找到：给个虚线框 + alt 文字，别在总览开天窗 */
 .portrait img.is-missing {

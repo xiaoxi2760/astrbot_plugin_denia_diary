@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>达妮娅的日记 · 观察面板</title>
+<title>情绪日记 · 观察面板</title>
 <!-- 相对路径 + 版本 query：Dashboard 会重写资源引用，query 免得浏览器缓存住旧 CSS（任务书 §10 建议） -->
-<link rel="stylesheet" href="./style.css?v=0.9.0" />
+<link rel="stylesheet" href="./style.css?v=1.0.0" />
 </head>
 <body>
 <div id="guard" class="guard" hidden>
@@ -21,8 +21,11 @@
 
 <div id="app" class="app" hidden>
   <aside class="nav">
-    <div class="brand">达妮娅的日记</div>
-    <div class="brand-sub">观察面板</div>
+    <!-- 左上角这两行是**用户自己定的**（配置项 panel.brand / panel.brand_sub，设置页可改）：
+         这里的文字只是「拿不到配置时」的默认值，app.js 启动时按后端回的值覆盖。
+         留空串＝那一行整个不显示，所以别把默认字面量写死在 CSS 里。 -->
+    <div class="brand" id="brand">情绪日记</div>
+    <div class="brand-sub" id="brand-sub">观察面板</div>
     <nav class="tabs" id="tabs" role="tablist" aria-label="面板视图"></nav>
     <div class="nav-foot">
       <label class="foot-label" for="theme-picker">外观</label>
@@ -57,17 +60,22 @@
     </header>
 
     <!-- 立绘区。一次只展示一张，右边一个切换按钮 + 上传 / 删除。
-         两条图源互斥显示：
-         1) 下面两张 **打包进来的默认图**——必须是静态节点，AstrBot 才会在服务端
-            重写相对路径并补 asset_token（JS 里 img.src = "./assets/…" 拿不到 token，
-            真机会 403）。用户没上传过时它们就是全部内容。
-         2) #portrait-img —— 用户上传后由接口回的 data_url 走这个槽位，
-            data URL 不经过服务端重写，所以可以安全地由 JS 设 src。 -->
+         图源**只有一种**：用户自己传的那张（接口 GET portrait 回的 current.data_url）。
+         打包进来的默认立绘在第 10 步删掉了（公开发布不夹带角色立绘，也免得替用户
+         决定放谁的照片），所以没有图时**必须**有 #portrait-empty 这块占位——
+         既告诉用户"这里可以放图"，也保证总览不开天窗。
+         ⚠️ img#portrait-img 的 src 由 JS 设（data_url 不经过服务端重写）；
+         想改成打包静态图的话得注意：JS 里设 "./assets/x.jpg" 拿不到 asset_token，真机会 403。 -->
     <div id="portraits" class="portrait-strip">
       <figure class="portrait" id="portrait-frame">
-        <img class="portrait-default" src="./assets/denia-sakura.jpg" alt="樱花树下的达妮娅">
-        <img class="portrait-default" src="./assets/denia-full.jpg" alt="达妮娅全身立绘" hidden>
         <img id="portrait-img" alt="" hidden>
+        <div class="portrait-empty" id="portrait-empty">
+          <div class="portrait-empty-title">这里可以放图</div>
+          <p class="portrait-empty-text">
+            点右边的「选择文件」传一张立绘（png / jpg / webp / gif，8 MB 以内），
+            传好就显示在这里。
+          </p>
+        </div>
       </figure>
       <div class="portrait-side">
         <div class="portrait-count" id="portrait-count"></div>
@@ -90,15 +98,15 @@
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
 <!-- 预览桩：只在 file:// 或 ?preview=1 时安装假 bridge，正式 iframe 里什么也不做（§0#11/12 的红线不被破坏） -->
-<script src="./preview-bridge.js?v=0.9.0"></script>
-<script src="./ui.js?v=0.9.0"></script>
-<script src="./app.js?v=0.9.0"></script>
-<script src="./views/overview.js?v=0.9.0"></script>
-<script src="./views/diary.js?v=0.9.0"></script>
-<script src="./views/notebook.js?v=0.9.0"></script>
-<script src="./views/affinity.js?v=0.9.0"></script>
-<script src="./views/proactive.js?v=0.9.0"></script>
-<script src="./views/data.js?v=0.9.0"></script>
-<script src="./views/settings.js?v=0.9.0"></script>
+<script src="./preview-bridge.js?v=1.0.0"></script>
+<script src="./ui.js?v=1.0.0"></script>
+<script src="./app.js?v=1.0.0"></script>
+<script src="./views/overview.js?v=1.0.0"></script>
+<script src="./views/diary.js?v=1.0.0"></script>
+<script src="./views/notebook.js?v=1.0.0"></script>
+<script src="./views/affinity.js?v=1.0.0"></script>
+<script src="./views/proactive.js?v=1.0.0"></script>
+<script src="./views/data.js?v=1.0.0"></script>
+<script src="./views/settings.js?v=1.0.0"></script>
 </body>
 </html>

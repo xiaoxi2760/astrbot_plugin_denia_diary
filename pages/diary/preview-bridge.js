@@ -9,6 +9,9 @@
   var params = String(global.location && global.location.search || "");
   var isPreview = global.location && global.location.protocol === "file:" ||
     params.indexOf("preview=1") >= 0;
+  /* ?portrait=empty 把立绘 stub 清空，用来预览「这里可以放图」那块占位
+     （默认有图，因为要能预览切换 / 删除那两个按钮）。 */
+  var emptyPortrait = params.indexOf("portrait=empty") >= 0;
   if (!isPreview) return;
   if (global.AstrBotPluginPage) return;
 
@@ -99,12 +102,12 @@
       ok: true, who: "u_1001", who_name: "希",
       who_options: [{ id: "u_1001", name: "希" }, { id: "u_1002", name: "" }],
       facts: [
-        { id: "f1", text: "达妮娅不喝咖啡，只喝热牛奶", created_at: iso(20, 10) },
-        { id: "f2", text: "达妮娅怕打雷", created_at: iso(12, 22) },
+        { id: "f1", text: "只喝热牛奶，不碰咖啡", created_at: iso(20, 10) },
+        { id: "f2", text: "怕打雷", created_at: iso(12, 22) },
       ],
       promises: [
         { id: "p1", about: "u_1001", text: "周末一起去看展", created_at: iso(3, 19), done_at: "" },
-        { id: "p2", about: "u_1001", text: "把那本书读完讲给达妮娅听", created_at: iso(9, 21), done_at: iso(1, 20) },
+        { id: "p2", about: "u_1001", text: "把那本书读完讲给她听", created_at: iso(9, 21), done_at: iso(1, 20) },
       ],
       limits: { promise_limit: 20, fact_limit: 15 },
     },
@@ -152,6 +155,14 @@
         { path: "data_dir", key: "data_dir", type: "string", description: "数据目录",
           hint: "留空使用 AstrBot 的插件数据目录", editable: false,
           note: "数据目录只能在这里看。改它＝搬走全部日记与本子，必须在 AstrBot 插件面板改完再重载插件。" },
+        { path: "panel", key: "panel", type: "object", description: "面板外观",
+          hint: "只改 WebUI 观察面板左上角怎么显示，不影响她怎么说话",
+          children: [
+            { path: "panel.brand", key: "brand", type: "string", description: "面板标题",
+              hint: "左上角那行大字；留空＝不显示", default: "情绪日记", editable: true, note: "" },
+            { path: "panel.brand_sub", key: "brand_sub", type: "string", description: "面板副标题",
+              hint: "标题下面那行小字；留空＝不显示", default: "观察面板", editable: true, note: "" },
+          ] },
         { path: "diary", key: "diary", type: "object", description: "日记参数", hint: "",
           children: [
             { path: "diary.max_chars", key: "max_chars", type: "int", description: "单条上限（字）",
@@ -172,7 +183,7 @@
               editable: true, note: "", editor: "time_range" },
           ] },
         { path: "scope", key: "scope", type: "object", description: "启用范围",
-          hint: "面板本身永远可用，这一档只管达妮娅在哪儿工作",
+          hint: "面板本身永远可用，这一档只管她在哪儿工作",
           children: [
             { path: "scope.mode", key: "mode", type: "string", description: "启用范围",
               hint: "启用范围：只主人 / 只私聊 / 全部启用",
@@ -188,6 +199,7 @@
       fields: [],
       values: {
         enabled: true, timezone: "Asia/Shanghai", data_dir: "",
+        panel: { brand: "情绪日记", brand_sub: "观察面板" },
         diary: { max_chars: 1200, nudge_after_hour: 22 },
         state: { rhythm: "06:00|刚醒\n09:00|精神不错\n13:00|有点犯困\n18:00|晚饭后放松\n23:00|该睡了",
                  rhythm_weekend: "", late_night: "23:30-06:30" },
@@ -196,6 +208,7 @@
       },
       defaults: {
         enabled: true, timezone: "Asia/Shanghai", data_dir: "",
+        panel: { brand: "情绪日记", brand_sub: "观察面板" },
         diary: { max_chars: 1200, nudge_after_hour: 22 },
         state: { rhythm: "06:00|刚醒\n09:00|精神不错\n23:00|该睡了" },
         scope: { mode: "private" },
@@ -203,7 +216,8 @@
       },
       warnings: ["proactive.patrol_minutes=999 超出 [1, 59]，已夹紧"],
       editable_paths: ["enabled", "timezone", "diary.max_chars", "diary.nudge_after_hour",
-        "state.rhythm", "scope.mode", "love_peers", "name_preference"],
+        "state.rhythm", "scope.mode", "panel.brand", "panel.brand_sub",
+        "love_peers", "name_preference"],
       notices: ["关掉总开关后日记、小本本、状态、主动消息全部不可用（数据保留）。"],
     },
   };
@@ -234,7 +248,7 @@
     return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
   }
 
-  var portraitStore = {
+  var portraitStore = emptyPortrait ? { current: null, items: [] } : {
     current: "p_preview1",
     items: [
       { id: "p_preview1", name: "预览图一.svg", mime: "image/svg+xml", bytes: 512,
