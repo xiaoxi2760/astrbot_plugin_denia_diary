@@ -25,22 +25,22 @@ RouteSpec = tuple[str, str, tuple[str, ...], str]
 """``(endpoint, handler 名, 方法, 描述)``——``endpoint`` 是不带前缀、不带前导斜杠的。"""
 
 ROUTES: tuple[RouteSpec, ...] = (
-    ("status", "status", ("GET",), "总览：此刻的情绪、作息、今日主动计数与文件体检"),
+    ("status", "status", ("GET",), "总览：情绪、作息、今日主动计数与文件体检"),
     ("diary/list", "diary_list", ("GET",), "两本日记的篇数、字数与最近更新"),
-    ("diary/content", "diary_content", ("GET",), "读一段日记正文（只读）"),
+    ("diary/content", "diary_content", ("GET",), "读日记正文"),
     ("notebook", "notebook", ("GET",), "小本本：事实与约定（按人过滤）"),
     ("notebook/complete", "notebook_complete", ("POST",), "把一条约定标记为完成"),
-    ("notebook/delete", "notebook_delete", ("POST",), "删一条事实或约定（先进回收站）"),
-    ("affinity", "affinity", ("GET",), "熟悉度榜、档位与当前 love_peers（只显示）"),
-    ("history", "history", ("GET",), "情绪曲线数据点（来自 state_history.jsonl）"),
+    ("notebook/delete", "notebook_delete", ("POST",), "删一条（先进回收站）"),
+    ("affinity", "affinity", ("GET",), "熟悉度榜、档位与当前 love_peers"),
+    ("history", "history", ("GET",), "情绪曲线数据点"),
     ("proactive", "proactive", ("GET",), "主动消息计数与发送记录"),
-    ("settings", "settings_get", ("GET",), "设置页：schema 驱动的字段表、大类树、当前值与默认值"),
-    ("settings", "settings_post", ("POST",), "保存设置（逐项校验 → 备份 → 落盘 → 热生效）"),
-    ("settings/reset", "settings_reset", ("POST",), "恢复默认设置（默认值只从 schema 取，先备份再落盘）"),
-    ("portrait", "portrait_get", ("GET",), "立绘：当前图（含 data_url）与元数据列表；?id= 取单张"),
-    ("portrait/upload", "portrait_upload", ("POST",), "上传立绘（multipart 字段 file；按魔数收 png/jpeg/webp/gif，单张 ≤8 MB，≤20 张）"),
-    ("portrait/select", "portrait_select", ("POST",), "切换当前立绘（响应带新的 current 含 data_url）"),
-    ("portrait/delete", "portrait_delete", ("POST",), "删除一张立绘（连文件一起删；删 current 落到剩余第一张）"),
+    ("settings", "settings_get", ("GET",), "设置页字段表、当前值与默认值"),
+    ("settings", "settings_post", ("POST",), "保存设置（校验 → 备份 → 落盘 → 热生效）"),
+    ("settings/reset", "settings_reset", ("POST",), "恢复默认设置"),
+    ("portrait", "portrait_get", ("GET",), "立绘：当前图（含 data_url）与列表；?id= 取单张"),
+    ("portrait/upload", "portrait_upload", ("POST",), "上传立绘（multipart 字段 file，png/jpeg/webp/gif，≤8 MB / ≤20 张）"),
+    ("portrait/select", "portrait_select", ("POST",), "切换当前立绘"),
+    ("portrait/delete", "portrait_delete", ("POST",), "删除一张立绘（连文件）"),
 )
 
 ENDPOINTS: tuple[str, ...] = tuple(spec[0] for spec in ROUTES)

@@ -3,76 +3,80 @@
     "type": "bool",
     "default": true,
     "description": "总开关",
-    "hint": "关闭后日记、小本本、状态、主动消息全部不可用（数据保留）"
+    "hint": "关闭后日记、小本本、状态、主动消息全部停用（数据保留）"
   },
   "timezone": {
     "type": "string",
     "default": "Asia/Shanghai",
     "description": "时区",
-    "hint": "IANA 时区名。部署在 UTC 云主机上必须显式设置，否则日期与提醒时段会整体错位"
+    "hint": "IANA 时区名。云主机在 UTC 时必须显式设置，否则日期与提醒时段会错位"
   },
   "data_dir": {
     "type": "string",
     "default": "",
     "description": "数据目录",
-    "hint": "留空使用 AstrBot 的插件数据目录（data/plugin_data/astrbot_plugin_denia_diary）"
+    "hint": "留空＝用 AstrBot 的插件数据目录"
   },
   "panel": {
     "type": "object",
     "description": "面板外观",
-    "hint": "只改 WebUI 观察面板左上角怎么显示，不影响她怎么说话、也不影响注入",
+    "hint": "只改观察面板怎么显示",
     "items": {
       "brand": {
         "type": "string",
         "default": "情绪日记",
         "description": "面板标题",
-        "hint": "左上角那行大字，同时用作浏览器标签页标题；留空＝那行不显示"
+        "hint": "左上角大字；留空＝不显示"
       },
       "brand_sub": {
         "type": "string",
         "default": "观察面板",
         "description": "面板副标题",
-        "hint": "标题下面那行小字；留空＝那行不显示"
+        "hint": "标题下的小字；留空＝不显示"
       }
     }
   },
   "subsystems": {
     "type": "object",
     "description": "子系统开关",
-    "hint": "调试期可以只关一块，其余不受影响",
+    "hint": "调试期可以只关一块",
     "items": {
       "diary": {
         "type": "bool",
         "default": true,
-        "description": "日记"
+        "description": "日记",
+        "hint": "她能写日记、翻日记"
       },
       "notebook": {
         "type": "bool",
         "default": true,
-        "description": "小本本"
+        "description": "小本本",
+        "hint": "记约定与事实"
       },
       "state": {
         "type": "bool",
         "default": true,
-        "description": "状态（情绪 / 作息 / 熟悉度）"
+        "description": "状态",
+        "hint": "情绪 / 作息 / 熟悉度"
       },
       "proactive": {
         "type": "bool",
         "default": true,
-        "description": "主动消息"
+        "description": "主动消息",
+        "hint": "她主动找你"
       }
     }
   },
   "scope": {
     "type": "object",
     "description": "启用范围",
-    "hint": "按会话决定她在哪里工作：记录 / 注入 / 她的写工具与主动消息对象都跟着这一档走；面板不受影响",
+    "hint": "她在哪里工作：记录 / 注入 / 写工具与主动对象都跟着这一档走",
     "items": {
       "mode": {
         "type": "string",
         "default": "private",
         "description": "档位",
-        "hint": "owner=只在主人的私聊工作；private=任何私聊都工作，群聊不工作（默认）；all=私聊和群聊都工作。主动消息对象跟着档位：owner=只主人；private=互动过的私聊；all=再加上互动过的群（群里必须 @ 某人）。写错的值回落 private 并在日志提示"
+        "hint": "owner=只主人私聊；private=任何私聊（默认）；all=私聊+群聊。非法值回落 private"
       }
     }
   },
@@ -84,7 +88,7 @@
         "type": "int",
         "default": 7,
         "description": "可改天数",
-        "hint": "只允许改/删最近 N 天的段落，1-60；老日记是历史"
+        "hint": "1-60；更早的是历史，只读"
       },
       "max_chars": {
         "type": "int",
@@ -96,7 +100,7 @@
         "type": "int",
         "default": 22,
         "description": "深夜催促时刻",
-        "hint": "0-23；到这个点还没写，提示换成“今天还空着”"
+        "hint": "0-23；到这个点还没写就换一句更重的提醒"
       },
       "soft_nudge_after_hour": {
         "type": "int",
@@ -108,32 +112,32 @@
         "type": "int",
         "default": 30,
         "description": "事件提醒冷却（分钟）",
-        "hint": "5-1440；“记账提醒命中”那条提醒的冷却"
+        "hint": "5-1440"
       },
       "fallback_hint_cooldown_min": {
         "type": "int",
         "default": 90,
         "description": "弱提醒冷却（分钟）",
-        "hint": "15-1440；“刚跟人聊完一轮”那条提醒的冷却"
+        "hint": "15-1440"
       },
       "exchange_window_min": {
         "type": "int",
         "default": 30,
         "description": "“刚聊过”时间窗（分钟）",
-        "hint": "5-1440；判断最近是否真的有来回对话"
+        "hint": "5-1440；判断刚才有没有来回对话"
       }
     }
   },
   "notebook": {
     "type": "object",
     "description": "小本本参数",
-    "hint": "每人每类的条目硬上限；满了不报错，会提示她先删掉或合并几条",
+    "hint": "每人每类的条目上限；满了不报错，提示先删几条",
     "items": {
       "promise_limit": {
         "type": "int",
         "default": 20,
         "description": "约定上限（每人）",
-        "hint": "1-200；按未完成的约定计，完成即腾坑"
+        "hint": "1-200；按未完成计，完成即腾坑"
       },
       "fact_limit": {
         "type": "int",
@@ -146,44 +150,44 @@
   "state": {
     "type": "object",
     "description": "状态参数（情绪 / 作息）",
-    "hint": "作息表是「时段 → 状态词」的纯函数，不落盘；熟悉度的衰减参数是代码常量（周级半衰期）",
+    "hint": "作息表是「时段 → 状态词」的纯函数，不落盘",
     "items": {
       "rhythm": {
         "type": "string",
         "default": "06:00|刚醒\n09:00|精神不错\n13:00|有点犯困\n18:00|晚饭后放松\n23:00|该睡了",
         "description": "作息表（工作日）",
-        "hint": "每行「HH:MM|状态词」，到点的最近一段生效，凌晨归入最后一段；留空＝不出作息行"
+        "hint": "每行「HH:MM|状态词」；到点的最近一段生效，凌晨归入最后一段；留空＝不出作息行"
       },
       "rhythm_weekend": {
         "type": "string",
         "default": "",
         "description": "作息表（周末）",
-        "hint": "周六周日生效；留空＝与工作日同一张（默认单表）"
+        "hint": "周六周日生效；留空＝与工作日同一张"
       },
       "late_night": {
         "type": "string",
         "default": "23:30-06:30",
         "description": "深夜时段",
-        "hint": "HH:MM-HH:MM，可跨午夜；喂给关怀触发器与主动消息免打扰，留空＝永不深夜"
+        "hint": "HH:MM-HH:MM，可跨午夜；留空＝永不深夜"
       }
     }
   },
   "proactive": {
     "type": "object",
     "description": "主动消息参数（频率与冷却）",
-    "hint": "巡检制：定时器每 N 分钟问一圈，一 tick 最多放行一条；各触发器的时段窗口与暗号阈值是代码常量（待调）",
+    "hint": "巡检制：每 N 分钟问一圈，一轮最多放行一条",
     "items": {
       "patrol_minutes": {
         "type": "int",
         "default": 15,
         "description": "巡检间隔（分钟）",
-        "hint": "1-59；每 N 分钟判断一次该不该主动说话"
+        "hint": "1-59"
       },
       "daily_limit_private": {
         "type": "int",
         "default": 2,
         "description": "私聊每日上限",
-        "hint": "1-10；暗号另受独立冷却与每日一次限制"
+        "hint": "1-10"
       },
       "daily_limit_group": {
         "type": "int",
@@ -195,50 +199,50 @@
         "type": "int",
         "default": 120,
         "description": "同会话最小间隔（分钟）",
-        "hint": "0-1440；两次主动之间至少隔这么久"
+        "hint": "0-1440"
       },
       "signal_cooldown_days": {
         "type": "int",
         "default": 3,
         "description": "暗号独立冷却（天）",
-        "hint": "1-30；与每日上限无关的独立约束，宁可憋回去不可常用"
+        "hint": "1-30"
       },
       "pending_window_hours": {
         "type": "int",
         "default": 6,
         "description": "待回窗口（小时）",
-        "hint": "1-48；她主动找过但对方还没回的这段时间里，互动轨迹只说「她刚找过你」"
+        "hint": "1-48；这段时间里只说她刚找过你"
       },
       "quiet_days": {
         "type": "int",
         "default": 3,
         "description": "久未联系阈值（天）",
-        "hint": "1-30；熟悉度榜上的人超过 N 天没来才触发问候（待调）"
+        "hint": "1-30"
       },
       "signal_char": {
         "type": "string",
         "default": "。",
         "description": "心情暗号字符",
-        "hint": "1~4 个字符；她撑不住时整条消息就发这一个字符，不带任何解释"
+        "hint": "1~4 个字符；整条消息只有它，不带解释。别用聊天里常见的字符"
       }
     }
   },
   "outbound": {
     "type": "object",
     "description": "出站文本清洗",
-    "hint": "她发消息前把表情包标记从正文里剥掉（直发路径绕过了表情包插件的装饰钩子，标记会原样漏给用户）",
+    "hint": "发消息前把表情包标记从正文里剥掉",
     "items": {
       "strip_meme_marks": {
         "type": "bool",
         "default": true,
         "description": "剥掉表情包标记",
-        "hint": "只处理 send_message_to_user 的纯文本组件；关掉则原样发送"
+        "hint": "只处理纯文本组件；关掉则原样发送"
       },
       "marker_pattern": {
         "type": "string",
         "default": "&&[^&\\s]{1,24}&&",
         "description": "标记正则",
-        "hint": "Python re 语法。默认只剥 &&名字&& 这一种无歧义形态；[x]、(x)、:x:、meme:id 不会被动（宁可漏不可误伤）。非法或能匹配空串的正则会回落默认值"
+        "hint": "Python re 语法；默认只剥 &&名字&&。非法或能匹配空串的正则回落默认"
       }
     }
   },
@@ -246,12 +250,12 @@
     "type": "list",
     "default": [],
     "description": "最亲密名单",
-    "hint": "填用户 id（字符串）。名单内的人的私聊里写下的日记进入“恋爱日记”那本"
+    "hint": "填用户 id。名单内的人私聊里的日记进「恋爱日记」那本"
   },
   "name_preference": {
     "type": "dict",
     "default": {},
     "description": "称呼偏好",
-    "hint": "{\"用户id\": \"称呼\"}。只影响日记标注里怎么写，不改正文"
+    "hint": "{\"用户id\": \"称呼\"}；只改日记标注的写法"
   }
 }
