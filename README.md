@@ -414,7 +414,10 @@ WebUI 第 6 个 tab「设置」：**全部配置项**都在这里改，改完立
 - **就地重建 `self.settings`**，并把 Diary / Notebook / State / Affinity / Proactive 五个门面的
   `settings` 引用一起换掉——门面在构造时各拿了一份快照，只换 `self.settings` 等于"改了不生效"；
 - `proactive.patrol_minutes` 变了 → 重建巡检 job（老规矩：按 name 删旧再 `add_basic_job` 新建）；
-- `timezone` 变了**不需要**重建（`settings.zone()` 每次现算）。
+- `timezone` 变了 → **也重建**（第 11 步改判）：判定用 `settings.zone()` 每次现算没错，
+  但 job 上的 `timezone` 是建的时候那个，不重建就是"调度按旧时区、判断按新时区"两套真相。
+  ⚠️ 说实话：`*/N * * * *` 这种纯分钟步长的**触发时刻与时区无关**（整小时偏移下完全一样），
+  所以真危害只是面板上那个 job 的时区显示是旧的——这是一次"对齐"，不是修了个严重 bug。
 
 **安全**：写盘前把旧配置文件整份备份到数据目录 `config_backup_<YYYYmmdd-HHMMSS>.json`；
 备份失败**就整单放弃**（备份是安全网，备份不下来时"这次没改成"好过"配置写坏"）；

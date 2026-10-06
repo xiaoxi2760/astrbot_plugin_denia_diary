@@ -806,6 +806,36 @@ class ProactiveCronTest(PluginCase):
         plugin = self.make_plugin(context=None)
         asyncio.run(plugin.initialize())  # 不抛即过（宿主裁剪了 cron 模块也不拖垮插件）
 
+    def test_timezone_change_rebuilds_patrol_job(self) -> None:
+        """第 11 步回归：job 上的 ``timezone`` 是**建的时候**那个，判定侧却读实时的
+        ``settings.zone()`` —— 改了时区不重建，就成了"调度按旧时区、判断按新时区"。
+        这条只钉"重建了、且 job 上是新值"；``*/N`` 的触发时刻本来就与时区无关，
+        别据此宣称"修掉了一个严重 bug"。
+        """
+        manager = self._manager([SimpleNamespace(name=self.module.PROACTIVE_JOB_NAME, job_id="old-1")])
+        plugin = self.make_plugin(context=SimpleNamespace(cron_manager=manager))
+        raw = dict(plugin.config)
+        raw["timezone"] = "UTC"
+        result = asyncio.run(plugin.apply_settings(raw, applied=["timezone"]))
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["reloaded"], "改了时区必须重建巡检 job")
+        self.assertEqual(manager.deleted, ["old-1"], "旧 job 要先删掉，别留僵尸")
+        self.assertEqual(len(manager.basic), 1)
+        self.assertEqual(manager.basic[0]["timezone"], "UTC", "job 上要挂新时区，不能两套真相")
+        self.assertTrue(any("时区" in item for item in result["notices"]), result["notices"])
+
+    def test_unrelated_change_does_not_rebuild_patrol_job(self) -> None:
+        """对照组：只改日记字数不该动巡检 job（别把重建做成"每次保存都重建"）。"""
+        manager = self._manager([SimpleNamespace(name=self.module.PROACTIVE_JOB_NAME, job_id="old-1")])
+        plugin = self.make_plugin(context=SimpleNamespace(cron_manager=manager))
+        raw = dict(plugin.config)
+        raw["diary"] = {**dict(raw.get("diary") or {}), "max_chars": 1500}
+        result = asyncio.run(plugin.apply_settings(raw, applied=["diary.max_chars"]))
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["reloaded"], "没改间隔也没改时区，不该重建")
+        self.assertEqual(manager.basic, [])
+        self.assertEqual(manager.deleted, [])
+
     def test_patrol_dispatches_active_job_with_session_and_note(self) -> None:
         manager = self._manager()
         plugin = self.make_plugin(context=SimpleNamespace(cron_manager=manager))

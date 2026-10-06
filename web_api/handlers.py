@@ -144,7 +144,14 @@ def _make_history(deps: Any) -> Callable[..., Any]:
         days = _query_int(
             request, "days", webui_data.DEFAULT_HISTORY_DAYS, low=1, high=MAX_HISTORY_DAYS
         )
-        return json_response(webui_data.history_payload(state_store=deps.state.store, days=days))
+        # ⚠️ now **必须传**（第 11 步独立审查订正）：不传时 core 回落 `datetime.now()`
+        # 得到 **naive** 系统本地时间，而历史行里的 ts 是带偏移的 **aware**，
+        # `stamp < cutoff` 直接 TypeError —— 这条路由只要有情绪历史就 500。
+        return json_response(
+            webui_data.history_payload(
+                state_store=deps.state.store, days=days, now=deps._now()
+            )
+        )
 
     return handler
 
@@ -152,8 +159,12 @@ def _make_history(deps: Any) -> Callable[..., Any]:
 def _make_proactive(deps: Any) -> Callable[..., Any]:
     async def handler() -> Any:
         limit = _query_int(request, "limit", 0, low=0, high=MAX_LOG_LIMIT)
+        # ⚠️ 同上：不传 now 则「今日」按**系统本地时区**算，主机在 UTC 时
+        # 会与写入侧（settings.zone()）的 today_date 对不上，每日 00:00–08:00 恒显示 0。
         return json_response(
-            webui_data.proactive_payload(proactive_store=deps.proactive.store, limit=limit)
+            webui_data.proactive_payload(
+                proactive_store=deps.proactive.store, limit=limit, now=deps._now()
+            )
         )
 
     return handler
@@ -170,7 +181,8 @@ def _make_notebook_complete(deps: Any) -> Callable[..., Any]:
         note_id = str(body.get("id") or "").strip()
         if not note_id:
             return error_response("缺少参数 id", 400)
-        result = await webui_data.complete_note(deps.notebook.store, note_id)
+        # 传 now：落盘的时间戳与项目里其它时间戳一样带时区偏移
+        result = await webui_data.complete_note(deps.notebook.store, note_id, now=deps._now())
         return json_response(result)
 
     return handler
@@ -184,7 +196,10 @@ def _make_notebook_delete(deps: Any) -> Callable[..., Any]:
         note_id = str(body.get("id") or "").strip()
         if not note_id:
             return error_response("缺少参数 id", 400)
-        result = await webui_data.forget_note(deps.notebook.store, note_id)
+        # 传 deleted_at：回收站里的时间戳同样带时区偏移（forget_note 只收字符串）
+        result = await webui_data.forget_note(
+            deps.notebook.store, note_id, deleted_at=deps._now().isoformat(timespec="seconds")
+        )
         return json_response(result)
 
     return handler

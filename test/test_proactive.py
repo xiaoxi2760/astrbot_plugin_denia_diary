@@ -611,6 +611,19 @@ class GreetingTriggerTest(TriggerCase):
         night = triggers.find_greetings(stack.proactive, doc, now=MON_GOODNIGHT)
         self.assertEqual(len(night), 1, "早安发过不影响晚安")
 
+    def test_night_window_covers_its_last_minute(self) -> None:
+        """第 11 步回归：晚安窗口原来写 ``(23, 0) -> (23, 59)``，配右开区间只到 23:58:59，
+        23:59 那一分钟是死区（默认 15 分钟一 tick 碰不到，``patrol_minutes=1`` 就会每天空转）。
+        常量改成 ``(24, 0)``（当天结束哨兵）之后必须覆盖到 23:59:59。"""
+        last = MON_GOODNIGHT.replace(hour=23, minute=59, second=30)
+        self.assertTrue(triggers._in_window(last, triggers.GREETING_NIGHT), "23:59:30 要在窗口内")
+        self.assertTrue(triggers._in_window(MON_LATE, triggers.GREETING_NIGHT), "23:45 仍要在窗口内")
+        midnight = MON_GOODNIGHT.replace(hour=0, minute=0, second=0)
+        self.assertFalse(triggers._in_window(midnight, triggers.GREETING_NIGHT),
+                         "右开区间语义不能被改坏：00:00 不在窗口内")
+        before = MON_GOODNIGHT.replace(hour=22, minute=59)
+        self.assertFalse(triggers._in_window(before, triggers.GREETING_NIGHT), "起点前不在窗口内")
+
 
 class DiaryTriggerTest(TriggerCase):
     def test_uses_yesterday_entry(self) -> None:

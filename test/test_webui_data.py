@@ -684,6 +684,10 @@ class TestHandlerLayer(WebuiDataCase):
             state=SimpleNamespace(store=self.state_store),
             affinity=SimpleNamespace(store=self.affinity_store),
             proactive=SimpleNamespace(store=self.proactive_store),
+            # 真插件实例上有 _now()（main.py），handler 靠它拿到**带时区**的 now。
+            # 这个桩以前没给，于是 history/proactive/notebook 三条路由只能走
+            # core 里 `now or datetime.now()` 的裸回落（naive 系统本地时间）。
+            _now=lambda: NOW,
         )
 
     def call(self, name: str, query=None, body=None):
@@ -746,6 +750,36 @@ class TestHandlerLayer(WebuiDataCase):
         response = self.call("notebook_complete", body={})
         self.assertEqual(response["_stub"], "error_response")
         self.assertEqual(response["status"], 400)
+
+    def test_history_route_survives_aware_history_rows(self) -> None:
+        """第 11 步回归：情绪曲线路由以前只要有历史就 500。
+
+        历史行的 ts 是 ``isoformat()`` 写出来的**带偏移**时间，而 handler 不传 now 时
+        core 回落到 ``datetime.now()``（naive 系统本地时间），``aware < naive`` 直接
+        TypeError。现在 handler 传 ``deps._now()``，两边都 aware。
+        """
+        lines = [
+            {"ts": (NOW - timedelta(days=i)).isoformat(timespec="seconds"),
+             "layer": LAYER_NOW, "valence": 0.2, "arousal": 0.1, "word": "平静"}
+            for i in range(3)
+        ]
+        storage.atomic_write_text(
+            self.layout.state_history,
+            "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines),
+        )
+        data = self.data_of(self.call("history", query={"days": "7"}))
+        self.assertTrue(data["points"], "有历史就必须有数据点，不能空数组更不能 500")
+
+    def test_proactive_today_count_uses_configured_timezone(self) -> None:
+        """第 11 步回归：「今日」要按 settings 的时区算，不是主机本地时区。"""
+        self.write_json(self.layout.proactive, {
+            "sessions": {"u_1": {"today_date": NOW.date().isoformat(), "today_count": 3}},
+        })
+        data = self.data_of(self.call("proactive", query={"limit": "10"}))
+        sessions = data.get("sessions") or []
+        hit = [s for s in sessions if s.get("session") == "u_1" or s.get("umo") == "u_1"]
+        self.assertTrue(hit, "今天的会话要出现在列表里")
+        self.assertEqual(int(hit[0].get("today_count") or 0), 3, "今日计数不能因为时区错位变成 0")
 
     def test_broken_backend_gives_structured_error_not_exception(self) -> None:
         class Exploding:

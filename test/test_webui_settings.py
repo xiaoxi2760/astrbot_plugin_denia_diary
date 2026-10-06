@@ -618,9 +618,22 @@ class TestApplySettingsAdapter(TmpDirCase):
         self.assertFalse(result["reloaded"])
         self.assertEqual(self.cron.added, [])
 
-    def test_timezone_change_does_not_rebuild_job(self) -> None:
+    def test_timezone_change_rebuilds_job(self) -> None:
+        """第 11 步改判：**时区变了也要重建巡检 job**。
+
+        原来这里的口径是"`timezone` 变了不需要重建（`settings.zone()` 每次现算）"——
+        判定确实每次现算，但 job 上的 `timezone` 是**建的时候**那个，于是就成了
+        "调度按旧时区、判断按新时区"两套真相。改判理由：让 job 上的时区永远等于配置
+        （真危害只有"面板上显示的是旧时区"这一档，`*/N` 的触发时刻本来就与时区无关——
+        别再拿这条宣称修了严重 bug），代价只是切时区时多重建一次。
+        """
+        self.cron.added.clear()
         result = self.apply({"timezone": "UTC"}, ["timezone"])
-        self.assertFalse(result["reloaded"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["reloaded"], "改了时区要重建，job 上挂着旧的时区")
+        self.assertTrue(self.cron.deleted, "旧 job 必须先删再建")
+        self.assertEqual(self.cron.added[0]["timezone"], "UTC", "job 上要挂新时区")
+        self.assertTrue(any("时区" in item for item in result["notices"]), result["notices"])
 
     def test_save_failure_reports_error_and_rolls_memory_back(self) -> None:
         before = dict(self.config)

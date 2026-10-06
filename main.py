@@ -182,6 +182,8 @@ class DeniaDiary(Star):
         resolved = settings_mod.load_settings(updated)
         old_patrol = int(self.settings.proactive.get("patrol_minutes", 15))
         new_patrol = int(resolved.proactive.get("patrol_minutes", 15))
+        old_timezone = str(self.settings.timezone)
+        new_timezone = str(resolved.timezone)
 
         # 1) 备份旧配置：备份不下来就**不改**（写坏配置的风险比"这次没改成"大）
         try:
@@ -227,10 +229,19 @@ class DeniaDiary(Star):
         result["warnings"] = list(resolved.warnings)
 
         # 4) 巡检间隔变了必须重建 job（basic handler 只在内存注册表，表达式不会自己变）
-        if new_patrol != old_patrol:
+        #    时区变了也重建：job 上是**建的时候**那个 `timezone`，判定侧却读实时的
+        #    `settings.zone()` —— 不重建就会出现"调度按旧时区、判断按新时区"。
+        #    ⚠️ 实话：`*/N * * * *` 这种纯分钟步长**几点执行与时区无关**（整小时偏移
+        #    下触发时刻完全一样），所以真正的危害只是面板上那个 job 的时区显示是旧的、
+        #    以及万一以后加了"每天几点"的 job 会踩坑；顺手对齐，不留两套真相。
+        timezone_changed = old_timezone != new_timezone
+        if new_patrol != old_patrol or timezone_changed:
             await self._setup_proactive_job()
             result["reloaded"] = True
-            result["notices"].append(f"主动消息巡检已重建：{old_patrol} → {new_patrol} 分钟一次。")
+            if new_patrol != old_patrol:
+                result["notices"].append(f"主动消息巡检已重建：{old_patrol} → {new_patrol} 分钟一次。")
+            if timezone_changed:
+                result["notices"].append(f"主动消息巡检已按新时区重建：{old_timezone} → {new_timezone}。")
 
         logger.info(
             "[%s] 设置已生效：%s%s",

@@ -30,13 +30,19 @@
 
   /* ---- 立绘：一次只展示一张，右边一个切换按钮 + 上传 / 删这张 ----
 
-     图源**只有一种**：用户自己传的那张（接口 GET portrait → {current, items[]}，
-     每项带 data_url）。第 10 步把打包的默认立绘删掉了——公开发布不夹带角色立绘，
-     也不替用户决定放谁的照片，所以没有图时露 #portrait-empty 那块「这里可以放图」。
-     **模块级缓存**：data_url 是 base64，一张就几百 KB，每次切 tab 重拉一遍太浪费。
-     上传 / 删除后主动作废缓存重取。 */
+     图源**只有一种**：用户自己传的那张。第 10 步把打包的默认立绘删掉了——公开发布
+     不夹带角色立绘，也不替用户决定放谁的照片，所以没有图时露 #portrait-empty 那块
+     「这里可以放图」。
 
-  var portrait = { items: [], index: 0, fromUpload: false, ready: false };
+     ⚠️ 接口形状（第 11 步独立审查订正）：`GET portrait` 回的是
+        `{current: {id, name, mime, bytes, created_at, data_url} | null, items: [元数据…]}`
+     ——**current 是一个对象**（不是 id 字符串），**items 里没有 data_url**
+     （test_webui_portrait.py:126 钉的就是这个：items 只有元数据）。
+     所以画哪张就按 id 单独 `GET portrait?id=…` 取那张的 data_url，
+     取过一次记进 `urls` 缓存（模块级，data_url 几百 KB，切 tab 不重拉）。
+     上传 / 删除后作废缓存重取。 */
+
+  var portrait = { items: [], index: 0, fromUpload: false, ready: false, urls: {} };
   var portraitWired = false;
   var deleteArmed = null;
 
@@ -59,10 +65,18 @@
     try {
       var data = await ctx.apiGet("portrait");
       items = (data && data.items) || [];
+      /* current 是**对象**（带 data_url），不是 id 字符串——拿它的 .id 去定位。
+         万一老后端回的是字符串 id 也能认，两种都不炸。 */
+      var cur = data && data.current;
+      var currentId = (cur && typeof cur === "object") ? cur.id : cur;
       var at = -1;
-      items.forEach(function (item, i) { if (item && item.id === data.current) at = i; });
+      items.forEach(function (item, i) { if (item && item.id === currentId) at = i; });
       portrait.index = at >= 0 ? at : 0;
       portrait.fromUpload = items.length > 0;
+      /* current 自带 data_url，直接进缓存，省一次单图请求 */
+      if (cur && typeof cur === "object" && cur.id && cur.data_url) {
+        portrait.urls[cur.id] = cur.data_url;
+      }
     } catch (error) {
       /* 接口没接上（后端未实现 / 离线预览）：当作"一张都没有"，
          也就是「这里可以放图」那块占位——**不再退回打包的默认图**。 */
@@ -75,28 +89,52 @@
     return portrait;
   }
 
-  function paintPortrait() {
+  /* 当前这张的 data_url：三条来源依次取——
+       1. 这一项自己就带 data_url（离线预览桩 / 老后端就是这形状）；
+       2. 缓存里有（之前按 id 取过）；
+       3. 没有就按 id 单取一次（真后端 items 只有元数据，只能这么拿）。
+     取不到返回 ""，paintPortrait 会退到占位块，不会开天窗。 */
+  async function urlOf(ctx, item) {
+    if (!item) return "";
+    if (item.data_url) return item.data_url;
+    if (!item.id) return "";
+    if (portrait.urls[item.id]) return portrait.urls[item.id];
+    try {
+      var one = await ctx.apiGet("portrait", { id: item.id });
+      var url = one && one.item && one.item.data_url;
+      if (url) {
+        portrait.urls[item.id] = url;
+        return url;
+      }
+    } catch (error) {
+      /* 这张取不到（可能刚被别人删了）：下面按空处理 */
+    }
+    return "";
+  }
+
+  async function paintPortrait(ctx) {
     var refs = portraitRefs();
     if (!refs.strip) return;
     var total = portrait.items.length;
     if (total) portrait.index = ((portrait.index % total) + total) % total;
     var item = total ? portrait.items[portrait.index] : null;
+    var url = portrait.fromUpload && item ? await urlOf(ctx, item) : "";
 
-    if (portrait.fromUpload && item) {
-      refs.upload.src = item.data_url || "";
+    /* 拿到 url 才亮图；拿不到就当这张没有——有图没占位、没图只有占位，两槽永远互斥 */
+    if (url) {
+      refs.upload.src = url;
       refs.upload.alt = item.name || "上传的立绘";
       refs.upload.hidden = false;
     } else {
       refs.upload.hidden = true;
       refs.upload.removeAttribute("src");
     }
-    /* 有图就没占位、没图就只有占位：两个槽位永远互斥 */
-    if (refs.empty) refs.empty.hidden = !!(portrait.fromUpload && item);
+    if (refs.empty) refs.empty.hidden = !!url;
 
     if (refs.count) refs.count.textContent = total > 1 ? (portrait.index + 1) + " / " + total : "";
     if (refs.switchBtn) refs.switchBtn.hidden = total <= 1;
     if (refs.delBtn) refs.delBtn.hidden = !portrait.fromUpload || !total;
-    if (refs.frame) refs.frame.classList.toggle("is-empty", !total);
+    if (refs.frame) refs.frame.classList.toggle("is-empty", !url);
   }
 
   function wirePortrait(ctx) {
@@ -108,7 +146,7 @@
     refs.switchBtn.addEventListener("click", function () {
       if (portrait.items.length < 2) return;
       portrait.index = (portrait.index + 1) % portrait.items.length;
-      paintPortrait();
+      paintPortrait(ctx);
       /* 把选择记回后端，刷新后还停在同一张。存的是哪张与界面无关，失败也别打断切换。 */
       var item = portrait.items[portrait.index];
       if (portrait.fromUpload && item && item.id) {
@@ -124,8 +162,9 @@
         ctx.toast("正在上传…");
         await ctx.apiUpload("portraitUpload", file);
         portrait.ready = false;
+        portrait.urls = {};          /* 缓存里有作废的 id，必须一起清 */
         await loadPortrait(ctx);
-        paintPortrait();
+        paintPortrait(ctx);
         ctx.toast("传好了");
       } catch (error) {
         ctx.toast(String((error && error.message) || error || "上传失败"), true);
@@ -153,8 +192,9 @@
       try {
         await ctx.apiPost("portraitDelete", { id: item.id });
         portrait.ready = false;
+        portrait.urls = {};          /* 同上：删掉的 id 别留在缓存里 */
         await loadPortrait(ctx);
-        paintPortrait();
+        paintPortrait(ctx);
         ctx.toast("删了");
       } catch (error) {
         ctx.toast(String((error && error.message) || error || "删除失败"), true);
@@ -211,7 +251,7 @@
          放最后面：拉立绘要传 data_url，别让上面这 6 张卡片等着它。 */
       wirePortrait(ctx);
       await loadPortrait(ctx);
-      paintPortrait();
+      await paintPortrait(ctx);
     }
 
     return {
