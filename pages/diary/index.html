@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>达妮娅的日记 · 观察面板</title>
 <!-- 相对路径 + 版本 query：Dashboard 会重写资源引用，query 免得浏览器缓存住旧 CSS（任务书 §10 建议） -->
-<link rel="stylesheet" href="./style.css?v=0.7.0" />
+<link rel="stylesheet" href="./style.css?v=0.9.0" />
 </head>
 <body>
 <div id="guard" class="guard" hidden>
@@ -23,12 +23,23 @@
   <aside class="nav">
     <div class="brand">达妮娅的日记</div>
     <div class="brand-sub">观察面板</div>
-    <nav class="tabs" id="tabs"></nav>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="面板视图"></nav>
     <div class="nav-foot">
       <label class="foot-label" for="theme-picker">外观</label>
       <select id="theme-picker" class="who-picker" title="外观预设（记在这台设备上）"></select>
       <label class="foot-label" for="who-picker">对谁</label>
       <select id="who-picker" class="who-picker" title="面板按人组织，不按会话"></select>
+      <!-- 「起个名」：昵称要等"她下次跟你说话时"才落盘，群里根本不记，
+           所以主人那位常常只有数字。给它一个内联改名入口，比干等划算。
+           受限 iframe 没有 allow-modals，所以**绝不**用 window.prompt。 -->
+      <button id="who-rename" class="btn btn-sm who-rename" type="button"
+              title="给当前这个人起个名字（会写进称呼偏好）">起个名</button>
+      <div class="who-name-edit" id="who-name-edit" hidden>
+        <input id="who-name-input" class="set-input" type="text" maxlength="24"
+               placeholder="留空＝删掉这个名字" />
+        <button id="who-name-ok" class="btn btn-sm" type="button">确定</button>
+        <button id="who-name-cancel" class="btn btn-sm" type="button">取消</button>
+      </div>
       <div class="who-hint" id="who-hint">对谁</div>
     </div>
   </aside>
@@ -38,6 +49,9 @@
       <h1 class="stage-title" id="stage-title">总览</h1>
       <div class="stage-tools">
         <span class="stage-note" id="stage-note"></span>
+        <!-- 启用范围三段切换（主入口，第 7 步）。即时生效：点一下就 POST settings，
+             不必去设置页点保存。面板本身不受这一档影响——切到「只主人」后群里照样能看能改。 -->
+        <div class="scope-bar" id="scope-bar"></div>
         <button class="btn" id="refresh" type="button">刷新</button>
       </div>
     </header>
@@ -69,22 +83,22 @@
       </div>
     </div>
 
-    <section class="stage-body" id="stage-body"></section>
+    <section class="stage-body" id="stage-body" role="tabpanel" aria-live="polite"></section>
   </main>
 </div>
 
-<div id="toast" class="toast" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
 <!-- 预览桩：只在 file:// 或 ?preview=1 时安装假 bridge，正式 iframe 里什么也不做（§0#11/12 的红线不被破坏） -->
-<script src="./preview-bridge.js?v=0.7.0"></script>
-<script src="./ui.js?v=0.7.0"></script>
-<script src="./app.js?v=0.7.0"></script>
-<script src="./views/overview.js?v=0.7.0"></script>
-<script src="./views/diary.js?v=0.7.0"></script>
-<script src="./views/notebook.js?v=0.7.0"></script>
-<script src="./views/affinity.js?v=0.7.0"></script>
-<script src="./views/proactive.js?v=0.7.0"></script>
-<script src="./views/data.js?v=0.7.0"></script>
-<script src="./views/settings.js?v=0.7.0"></script>
+<script src="./preview-bridge.js?v=0.9.0"></script>
+<script src="./ui.js?v=0.9.0"></script>
+<script src="./app.js?v=0.9.0"></script>
+<script src="./views/overview.js?v=0.9.0"></script>
+<script src="./views/diary.js?v=0.9.0"></script>
+<script src="./views/notebook.js?v=0.9.0"></script>
+<script src="./views/affinity.js?v=0.9.0"></script>
+<script src="./views/proactive.js?v=0.9.0"></script>
+<script src="./views/data.js?v=0.9.0"></script>
+<script src="./views/settings.js?v=0.9.0"></script>
 </body>
 </html>

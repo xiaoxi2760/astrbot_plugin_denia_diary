@@ -88,6 +88,32 @@
     return h("div", { class: "empty", text: text || "这里还没有内容" });
   }
 
+  /* 仪表条（手法参考 astrbot_plugin_daily_life 的 appendMeter）。
+     **只是把纯文字数字换一种呈现，不改任何数值口径**——原文字由调用方自己留着。
+     axis 非空时会在条下画刻度：valence/arousal 是 -2~+2，映射到 0~100 属于
+     前端展示，**必须让人看见它是从哪来的**，不许装成百分比。 */
+  function meter(label, value, tone, axis, max) {
+    var raw = Number(value);
+    if (isNaN(raw)) raw = 0;
+    var pct = max ? Math.max(0, Math.min(100, raw / max * 100)) : Math.max(0, Math.min(100, raw));
+    /* 有真实分母就显示真分母（熟悉度 0~20 写 n/20，不准装成 n/100）；
+       没有分母的按 0~100 呈现，靠 axis 标明它是从什么映射来的。 */
+    var shown = max ? String(Math.round(raw)) + "/" + max : String(Math.round(pct)) + "/100";
+    var top = h("div", { class: "meter-top" }, [
+      h("span", { text: label }),
+      h("span", { class: "meter-val", text: shown }),
+    ]);
+    var bar = h("div", { class: "bar" + (tone ? " is-" + tone : "") });
+    bar.style.width = pct + "%";
+    var kids = [top, h("div", { class: "track" }, [bar])];
+    if (axis && axis.length) {
+      kids.push(h("div", { class: "meter-axis" }, axis.map(function (t) {
+        return h("span", { text: t });
+      })));
+    }
+    return h("div", { class: "meter" }, kids);
+  }
+
   function errorBox(message) {
     return h("div", { class: "err-box", text: "读取失败：" + String(message || "未知错误") });
   }
@@ -203,9 +229,60 @@
     }));
   }
 
+  /* ---- 启用范围（scope.mode）：三段分段控件 ----
+     **唯一实现**，顶栏和设置页共用同一份，免得两处各画一遍、以后文案各改各的。
+     三档的含义与文案照任务书定死，别自己发明。面板本身永远可用，不受这一档影响。 */
+  var SCOPE_MODES = [
+    { value: "owner", label: "只主人", title: "只在主人（最亲密名单里那个人）的私聊里工作：注入、记日记 / 小本本、观察情绪。群聊一律不介入" },
+    { value: "private", label: "只私聊", title: "任何私聊都工作；群聊不介入" },
+    { value: "all", label: "全部启用", title: "私聊 + 群聊都工作；主动消息这时才可能发到群里（受群聊上限与四道闸约束）" },
+  ];
+
+  function scopeValue(value) {
+    var v = String(value === undefined || value === null ? "" : value);
+    return SCOPE_MODES.some(function (m) { return m.value === v; }) ? v : "private";
+  }
+
+  function scopeLabel(value) {
+    var v = scopeValue(value);
+    return (SCOPE_MODES.filter(function (m) { return m.value === v; })[0] || SCOPE_MODES[1]).label;
+  }
+
+  function scopeControl(value, onPick) {
+    var cur = scopeValue(value);
+    var buttons = SCOPE_MODES.map(function (mode) {
+      var btn = h("button", {
+        class: "seg-btn", type: "button", "data-scope": mode.value,
+        title: mode.title, text: mode.label,
+        onclick: function () {
+          if (cur === mode.value) return;
+          var prev = cur;            /* 先记住旧的：切换失败要靠它回滚 */
+          cur = mode.value; paint();
+          if (onPick) onPick(mode.value, prev);
+        },
+      });
+      return btn;
+    });
+    function paint() {
+      buttons.forEach(function (btn) {
+        var on = btn.getAttribute("data-scope") === cur;
+        btn.className = "seg-btn" + (on ? " is-on" : "");
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+    }
+    paint();
+    return {
+      el: h("div", { class: "seg", role: "group", "aria-label": "启用范围" }, buttons),
+      get: function () { return cur; },
+      set: function (v) { cur = scopeValue(v); paint(); },
+    };
+  }
+
   global.UI = {
     h: h, s: s, clear: clear, toast: toast, bytes: bytes, shortTime: shortTime,
     dayOnly: dayOnly, empty: empty, errorBox: errorBox, card: card, kv: kv,
-    lineChart: lineChart, legend: legend,
+    lineChart: lineChart, legend: legend, meter: meter,
+    scopeControl: scopeControl, scopeValue: scopeValue, scopeLabel: scopeLabel,
+    SCOPE_MODES: SCOPE_MODES,
   };
 })(window);

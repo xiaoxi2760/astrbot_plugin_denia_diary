@@ -15,6 +15,19 @@
     return (number >= 0 ? "+" : "") + number.toFixed(2);
   }
 
+  /* -2~+2 → 0~100，只给仪表条用。**这是映射不是百分比**，
+     所以调用处必须在 axis 上标出 -2 / 0 / +2。 */
+  function scaleCoord(value) {
+    var n = Number(value);
+    if (isNaN(n)) return 0;
+    return Math.max(0, Math.min(100, (n + 2) / 4 * 100));
+  }
+  function toneCoord(value) {
+    var n = Number(value);
+    if (isNaN(n) || n === 0) return "zero";
+    return n > 0 ? "ok" : "warn";
+  }
+
   /* ---- 立绘：一次只展示一张，右边一个切换按钮 + 上传 / 删这张 ----
 
      列表有两条来源：
@@ -166,18 +179,35 @@
       var rhythm = data.rhythm || {};
       var today = data.today || {};
 
-      var grid = UI.h("div", { class: "grid" }, [
-        UI.card(mood.word || "（还没情绪）", mood.valence !== undefined ? coord(mood.valence) : "—",
-          "此刻心情" + (mood.updated_at ? " · " + UI.shortTime(mood.updated_at) : "")),
-        UI.card(rhythm.word || "（这个点没什么特别）", rhythm.late_night ? "深夜档" : "清醒",
-          "作息" + (rhythm.late_night ? "（免打扰可能生效）" : "")),
-        UI.card("基调", coord(base.valence), "达妮娅最近一直是" + (Number(base.valence) >= 0 ? "偏暖" : "偏冷") + "的"),
+      /* bento：心情/作息两卡放宽（span 2），计数与小卡用常规宽度。
+         不新增任何数据请求，只用 status 已经返回的东西。 */
+      /* 卡片主次（第 9 步）：**大字给中文**，数字降级到副行。
+         数值一个都不许丢——只是从"大字"挪到"小字"，我们对外说过"数值可见但不进提示词"。 */
+      var signCoord = function (v) {
+        if (v === undefined || v === null || v === "") return "—";
+        var n = Number(v);
+        return (n >= 0 ? "+" : "−") + Math.abs(n).toFixed(2);
+      };
+      var wide = function (el) { el.className += " bento-wide"; return el; };
+      var grid = UI.h("div", { class: "grid bento" }, [
+        wide(UI.card("此刻心情", mood.word || "（还没情绪）",
+          signCoord(mood.valence) + (mood.updated_at ? " · " + UI.shortTime(mood.updated_at) : ""))),
+        wide(UI.card(rhythm.word || "（这个点没什么特别）", rhythm.late_night ? "深夜档" : "清醒",
+          "作息" + (rhythm.late_night ? "（免打扰可能生效）" : ""))),
+        UI.card("基调", "最近一直是" + (Number(base.valence) >= 0 ? "偏暖" : "偏冷") + "的", signCoord(base.valence)),
         UI.card("今日主动", String(today.total || 0), "共 " + (today.by_session || 0) + " 个会话 · " + (today.date || "")),
         UI.card("累计主动记录", String(data.log_total === undefined ? 0 : data.log_total), "确认发出去的条数"),
         UI.card("对谁", data.who_name || "（未选）", data.who || "面板按人组织"),
       ]);
 
+      /* 仪表条是**加**不是**替**：上面的原文字一个字没删。
+         valence/arousal 是 -2~+2，映射到 0~100 属于前端展示，
+         所以轴上标出 -2 / 0 / +2，不许装成百分比。 */
       holder.appendChild(UI.h("div", { class: "panel-title", text: "一眼看完" }));
+      holder.appendChild(UI.h("div", { class: "ov-meters" }, [
+        UI.meter("此刻情绪", scaleCoord(mood.valence), toneCoord(mood.valence), ["-2", "0", "+2"]),
+        UI.meter("此刻精神", scaleCoord(mood.arousal), toneCoord(mood.arousal), ["-2", "0", "+2"]),
+      ]));
       holder.appendChild(grid);
 
       /* 立绘区是 stage-body **外面**的静态节点（UI.clear 清不到它），单独画。

@@ -32,17 +32,20 @@
       var mood = data.mood || {};
       var base = mood.baseline || {};
       var subs = data.subsystems || {};
+      /* 子系统键是后端给的英文 key（diary/notebook/…），这里翻成中文再显示，
+         免得面板上冒出一串英文。映射表在前端，键名对不上就退回原样。 */
+      var SUBS_CN = { diary: "日记", notebook: "小本本", state: "状态", proactive: "主动消息" };
       var subsText = Object.keys(subs).map(function (key) {
-        return key + (subs[key] ? "✓" : "✕");
+        return (SUBS_CN[key] || key) + (subs[key] ? "✓" : "✕");
       }).join("  ");
       var subsBroken = Object.keys(subs).some(function (key) { return !subs[key]; });
 
       var coordCard = UI.h("div", { class: "card panel" }, [
         UI.h("h3", { text: "此刻的坐标" }),
-        UI.kv("valence（暖↔冷）", coord(mood.valence)),
-        UI.kv("arousal（激动↔安静）", coord(mood.arousal)),
-        UI.kv("基调 valence", coord(base.valence)),
-        UI.kv("基调 arousal", coord(base.arousal)),
+        UI.kv("情绪（暖↔冷）", coord(mood.valence)),
+        UI.kv("精神（激动↔安静）", coord(mood.arousal)),
+        UI.kv("基调·情绪", coord(base.valence)),
+        UI.kv("基调·精神", coord(base.arousal)),
         UI.kv("情绪自报于", UI.shortTime(mood.updated_at)),
         UI.kv("子系统", subsText, subsBroken ? "warn" : "ok"),
         UI.kv("插件版本", data.version || "—"),
@@ -57,11 +60,19 @@
       if (!names.length) {
         fileCard.appendChild(UI.empty("没有文件信息"));
       }
+      /* 占用条按「当前最大的那个文件」为满格；原文字（字节数 / 时间 / 不存在）一个字没删。 */
+      var biggest = names.reduce(function (max, name) {
+        var info = files[name] || {};
+        return Math.max(max, info.exists ? Number(info.bytes) || 0 : 0);
+      }, 0) || 1;
       names.forEach(function (name) {
         var info = files[name] || {};
         fileCard.appendChild(UI.kv(name,
           info.exists ? UI.bytes(info.bytes) + " · " + UI.shortTime(info.mtime) : "不存在",
           info.exists ? "" : "warn"));
+        if (info.exists) {
+          fileCard.appendChild(UI.meter("占用（相对最大文件）", Number(info.bytes) || 0, "ok", null, biggest));
+        }
       });
 
       holder.appendChild(UI.h("div", { class: "panel-title", text: "数值" }));

@@ -55,18 +55,46 @@
       today: { date: todayStr, by_session: 2, total: 3 },
       log_total: 6,
     },
-    "diary/list": {
-      ok: true,
-      love_collapsed: true,
-      books: [
-        { book: "normal", display: "日记", is_love: false, entries: 42, chars: 18220, updated_at: iso(0, 8), latest_date: todayStr },
-        { book: "love", display: "恋爱日记", is_love: true, entries: 7, chars: 3080, updated_at: iso(1, 23), latest_date: iso(1, 0).slice(0, 10) },
-      ],
-    },
-    "diary/content": {
-      ok: true, book: "normal", date: "", count: 2, total: 42,
-      text: "今天达妮娅把窗户推开了一条缝，说外面的风终于不冷了。\n\n达妮娅记下了这句，没写为什么。",
-    },
+    "diary/list": (function () {
+      /* 桩也要有 days / first_date / days_truncated，否则日历是一片空白，
+         离线根本没法验第 6.2 步的新界面。日期按"今天往前推"造，覆盖同一天多条。 */
+      function daysAgo(n) { var d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); }
+      function fakeDays() {
+        var out = [{ date: daysAgo(1), count: 2, chars: 420 }, { date: daysAgo(3), count: 1, chars: 210 },
+                   { date: daysAgo(4), count: 3, chars: 700 }, { date: daysAgo(9), count: 1, chars: 180 },
+                   { date: daysAgo(17), count: 2, chars: 350 }];
+        return out;
+      }
+      var normalDays = fakeDays();
+      return {
+        ok: true,
+        love_collapsed: true,
+        books: [
+          { book: "normal", display: "日记", is_love: false, entries: 42, chars: 18220,
+            updated_at: iso(0, 8), latest_date: normalDays[0].date,
+            days: normalDays, first_date: normalDays[0].date, days_truncated: true },
+          { book: "love", display: "恋爱日记", is_love: true, entries: 7, chars: 3080,
+            updated_at: iso(1, 23), latest_date: daysAgo(1),
+            days: [normalDays[1]], first_date: normalDays[1].date, days_truncated: false },
+        ],
+      };
+    })(),
+    "diary/content": (function () {
+      function daysAgo(n) { var d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); }
+      var entries = [
+        { date: daysAgo(1), time: "09:12", mood: "安心", who: "10001", chars: 46,
+          text: "今天把窗户推开了一条缝，外面的风终于不冷了。\n\n她记下了这句，没写为什么。" },
+        { date: daysAgo(1), time: "21:13", mood: "", who: "10001", chars: 28,
+          text: "晚上读到一半就困了，书还摊在桌上。" },
+        { date: daysAgo(3), time: "22:40", mood: "有点累", who: "99999", chars: 30,
+          text: "今天没怎么说话。\n\n但也没有不开心。" },
+      ];
+      return {
+        ok: true, book: "normal", date: "", count: entries.length, total: 42,
+        text: entries.map(function (e) { return e.text; }).join("\n\n"),
+        entries: entries,
+      };
+    })(),
     notebook: {
       ok: true, who: "u_1001", who_name: "希",
       who_options: [{ id: "u_1001", name: "希" }, { id: "u_1002", name: "" }],
@@ -136,7 +164,20 @@
           children: [
             { path: "state.rhythm", key: "rhythm", type: "string", description: "作息表（工作日）",
               hint: "每行「HH:MM|状态词」", default: "06:00|刚醒\n09:00|精神不错\n23:00|该睡了",
-              multiline: true, editable: true, note: "" },
+              multiline: true, editable: true, note: "", editor: "rhythm" },
+            { path: "state.rhythm_weekend", key: "rhythm_weekend", type: "string", description: "作息表（周末）",
+              hint: "留空＝沿用工作日", default: "", multiline: true, editable: true, note: "", editor: "rhythm" },
+            { path: "state.late_night", key: "late_night", type: "string", description: "深夜时段",
+              hint: "HH:MM-HH:MM，可跨午夜；留空＝永不深夜", default: "23:30-06:30",
+              editable: true, note: "", editor: "time_range" },
+          ] },
+        { path: "scope", key: "scope", type: "object", description: "启用范围",
+          hint: "面板本身永远可用，这一档只管达妮娅在哪儿工作",
+          children: [
+            { path: "scope.mode", key: "mode", type: "string", description: "启用范围",
+              hint: "启用范围：只主人 / 只私聊 / 全部启用",
+              default: "private", editable: true, note: "", editor: "scope",
+              options: ["owner", "private", "all"] },
           ] },
         { path: "love_peers", key: "love_peers", type: "list", description: "最亲密名单",
           hint: "填用户 id（字符串）。名单内的人的私聊日记进入“恋爱日记”",
@@ -148,18 +189,21 @@
       values: {
         enabled: true, timezone: "Asia/Shanghai", data_dir: "",
         diary: { max_chars: 1200, nudge_after_hour: 22 },
-        state: { rhythm: "06:00|刚醒\n09:00|精神不错\n13:00|有点犯困\n18:00|晚饭后放松\n23:00|该睡了" },
+        state: { rhythm: "06:00|刚醒\n09:00|精神不错\n13:00|有点犯困\n18:00|晚饭后放松\n23:00|该睡了",
+                 rhythm_weekend: "", late_night: "23:30-06:30" },
+        scope: { mode: "private" },
         love_peers: ["u_1001"], name_preference: { u_1001: "希" },
       },
       defaults: {
         enabled: true, timezone: "Asia/Shanghai", data_dir: "",
         diary: { max_chars: 1200, nudge_after_hour: 22 },
         state: { rhythm: "06:00|刚醒\n09:00|精神不错\n23:00|该睡了" },
+        scope: { mode: "private" },
         love_peers: [], name_preference: {},
       },
       warnings: ["proactive.patrol_minutes=999 超出 [1, 59]，已夹紧"],
       editable_paths: ["enabled", "timezone", "diary.max_chars", "diary.nudge_after_hour",
-        "state.rhythm", "love_peers", "name_preference"],
+        "state.rhythm", "scope.mode", "love_peers", "name_preference"],
       notices: ["关掉总开关后日记、小本本、状态、主动消息全部不可用（数据保留）。"],
     },
   };
@@ -204,13 +248,41 @@
     return JSON.parse(JSON.stringify(portraitStore));
   }
 
+  /* 「对谁」候选（第 8 步契约）：每项带 label / is_owner / out_of_scope。
+     **out_of_scope 随当前档位变**，所以切档之后前端重拉就能看见下拉分区真的变了。
+     没名字的那项 label 就等于 id —— 不会出现 "1411638634(1411638634)"。 */
+  function currentScope() {
+    return (((FAKE.settings.values || {}).scope || {}).mode) || "private";
+  }
+
+  function whoOptions(rich) {
+    var mode = currentScope();
+    var list = [
+      { id: "u_1001", name: "希", label: "希(u_1001)", is_owner: true, out_of_scope: false },
+      /* u_1002 故意**不给 label**（模拟老后端）→ 前端该退回 name || id，
+         而它没名字，于是就是裸 id —— 正是用户截图里看到的那一档。 */
+      { id: "u_1002", name: "", is_owner: false, out_of_scope: false },
+      { id: "u_1003", name: "小满", label: "小满(u_1003)", is_owner: false, out_of_scope: mode === "owner" },
+    ];
+    /* /notebook 那轮信息更全：用来验"同一 id 后来居上"。 */
+    if (rich) list[1] = { id: "u_1002", name: "路人甲", label: "路人甲(u_1002)", is_owner: false, out_of_scope: false };
+    return list;
+  }
+
   global.AstrBotPluginPage = {
     ready: function () { return Promise.resolve(); },
     apiGet: function (endpoint, params) {
       if (endpoint === "portrait") return Promise.resolve(copyPortrait());
       var data = FAKE[endpoint];
       if (!data) return Promise.reject(new Error("预览桩没有这个 endpoint：" + endpoint));
-      return Promise.resolve(JSON.parse(JSON.stringify(data)));
+      var out = JSON.parse(JSON.stringify(data));
+      /* /status 与 /notebook 都要带候选和当前档位（第 8 步契约）；
+         桩里**随档位变**，切档后前端重拉能看见下拉分区真的变了。 */
+      if (endpoint === "status" || endpoint === "notebook") {
+        out.who_options = whoOptions(endpoint === "notebook");
+        out.scope_mode = currentScope();
+      }
+      return Promise.resolve(out);
     },
     apiPost: function (endpoint, body) {
       if (endpoint === "portrait/select") {
@@ -233,10 +305,21 @@
       }
       if (endpoint === "settings") {
         var changes = (body && body.changes) || {};
+        /* 桩也**真的**写回 values（点分路径），这样顶栏切档 / 设置页保存之后
+           重新拉设置能看见值真的变了，才算走通，而不是只弹个假响应。 */
+        Object.keys(changes).forEach(function (path) {
+          var parts = String(path).split(".");
+          var node = FAKE.settings.values;
+          for (var i = 0; i < parts.length - 1 && node && typeof node === "object"; i += 1) {
+            if (!(parts[i] in node)) node[parts[i]] = {};
+            node = node[parts[i]];
+          }
+          if (node && typeof node === "object") node[parts[parts.length - 1]] = changes[path];
+        });
         return Promise.resolve({
           ok: true, applied: Object.keys(changes), warnings: [], reloaded: false,
           backup: "config_backup_20261006-010203.json",
-          notices: ["（预览桩：这里没有真的落盘）"],
+          notices: ["（预览桩：写在内存里，没真的落盘）"],
         });
       }
       if (endpoint === "settings/reset") {

@@ -108,8 +108,227 @@
 
     /* ---- 控件 ---- */
 
+    /* ---- 第 6.2 步：结构化编辑器 ----
+       **只按 field.editor 分派**，绝不按字段名硬编码——editor 就是后端为此加的。
+       editor 为空串的字段走的还是下面那套原逻辑，一行没动。 */
+
+    /* 一行作息 = HH:MM|状态词。`#` 开头是注释；**全角 ｜ 也当分隔符**（用户输入法很容易打出来）。
+       返回 {rows, extras}：rows 是能用的，extras 是**原样保留**的（注释 + 解析不了的行）。
+       往返安全是硬要求：用户打开面板不该发现自己敲的东西没了。 */
+    function parseRhythm(text) {
+      var rows = [], extras = [];
+      String(text === undefined || text === null ? "" : text).split("\n").forEach(function (line) {
+        var trimmed = line.replace(/\s+$/, "");
+        if (trimmed.trim() === "") return;            /* 纯空行直接丢，不是用户写的内容 */
+        if (trimmed.trim().charAt(0) === "#") { extras.push(trimmed); return; }
+        var cut = trimmed.indexOf("|");
+        if (cut < 0) cut = trimmed.indexOf("｜");
+        if (cut < 0) { extras.push(trimmed); return; }
+        var time = trimmed.slice(0, cut).trim();
+        var word = trimmed.slice(cut + 1).trim();
+        if (!/^\d{2}:\d{2}$/.test(time) ||
+            Number(time.slice(0, 2)) > 23 || Number(time.slice(3)) > 59) {
+          extras.push(trimmed);
+          return;
+        }
+        if (word === "") { extras.push(trimmed); return; }   /* 词为空后端会丢，收进 extras 免得静默 */
+        rows.push({ time: time, word: word });
+      });
+      rows.sort(function (a, b) { return a.time < b.time ? -1 : (a.time > b.time ? 1 : 0); });
+      return { rows: rows, extras: extras };
+    }
+
+    function serializeRhythm(rows, extras) {
+      var lines = [];
+      (rows || []).forEach(function (r) { if (r.time && r.word) lines.push(r.time + "|" + r.word); });
+      (extras || []).forEach(function (x) { if (x) lines.push(x); });
+      return lines.join("\n");
+    }
+
+    function makeRhythmControl(field, current) {
+      var UI = ctx.UI;
+      var parsed = parseRhythm(current);
+      var rows = parsed.rows;
+      var extras = parsed.extras;
+      var isWeekend = field.path === "state.rhythm_weekend";
+      var empty = rows.length === 0 && extras.length === 0;
+
+      var listEl = UI.h("div", { class: "rhythm-rows" });
+      var warnEl = UI.h("div", { class: "set-hint warn", hidden: true });
+
+      function draw() {
+        UI.clear(listEl);
+        if (!rows.length) {
+          listEl.appendChild(UI.h("div", { class: "rhythm-empty" , text: "还没有作息段" }));
+        }
+        rows.forEach(function (row, i) {
+          (function (row) {
+            var t = UI.h("input", { type: "time", class: "rhythm-time", value: row.time,
+              step: "60", title: "从这一刻起生效" });
+            var w = UI.h("input", { type: "text", class: "rhythm-word", value: row.word,
+              placeholder: "状态词", maxlength: "40" });
+            t.addEventListener("change", function () { row.time = t.value || "00:00"; draw(); });
+            w.addEventListener("input", function () { row.word = w.value; });
+            listEl.appendChild(UI.h("div", { class: "rhythm-row" }, [
+              t, w,
+              UI.h("button", { class: "btn btn-sm", type: "button", text: "删",
+                title: "删掉这一段",
+                onclick: function () { rows.splice(i, 1); draw(); } }),
+            ]));
+          })(row);
+        });
+        /* 重复时间只提示、不拦：后写的那段覆盖前面那段，是用户的自由 */
+        var seen = {}, dup = [];
+        rows.forEach(function (r) { if (seen[r.time]) dup.push(r.time); seen[r.time] = 1; });
+        warnEl.hidden = dup.length === 0;
+        if (dup.length) {
+          warnEl.textContent = "时间重复了：" + dup.join("、") + "（后写的会盖住先写的）";
+        }
+        empty = rows.length === 0 && extras.length === 0;
+        if (emptyEl) emptyEl.hidden = !empty;
+      }
+
+      var addBtn = UI.h("button", { class: "btn btn-sm", type: "button", text: "+ 加一段",
+        onclick: function () {
+          var last = rows.length ? rows[rows.length - 1].time : "08:00";
+          rows.push({ time: last, word: "" });
+          draw();
+          var inputs = listEl.querySelectorAll(".rhythm-word");
+          var last2 = inputs[inputs.length - 1];
+          if (last2 && last2.focus) last2.focus();
+        } });
+      var emptyEl = UI.h("div", { class: "set-hint" , hidden: true,
+        text: "空表 = 没有作息词，她就不会被告知「现在这个点该干嘛」。" });
+
+      var el = UI.h("div", { class: "rhythm" }, [
+        UI.h("div", { class: "rhythm-legend",
+          text: "到点的最近一段生效；凌晨（第一段之前）归入最后一段" }),
+        emptyEl,
+        listEl,
+        warnEl,
+        addBtn,
+      ]);
+
+      /* 注释 / 解析不了的行：收进折叠区，保存时原样写回（接在末尾，保持相对顺序） */
+      if (extras.length) {
+        var box = UI.h("div", { class: "rhythm-extras", hidden: true });
+        extras.forEach(function (line) {
+          box.appendChild(UI.h("div", { class: "rhythm-extra", text: line }));
+        });
+        var toggle = UI.h("button", { class: "btn btn-sm", type: "button",
+          text: "原样保留（不参与作息）· " + extras.length + " 行",
+          title: "注释和解析不了的行。保存时会原样写回去，不会丢。",
+          onclick: function () {
+            box.hidden = !box.hidden;
+            toggle.textContent = (box.hidden ? "原样保留（不参与作息）· " : "收起原样保留 · ") + extras.length + " 行";
+          } });
+        el.appendChild(UI.h("div", { class: "rhythm-keep" }, [toggle, box]));
+      }
+
+      /* 周末表：空态给「照平时那张复制过来」（只填表单，仍要点保存才落盘） */
+      if (isWeekend) {
+        el.insertBefore(UI.h("div", { class: "set-hint",
+          text: "留空 = 周六周日沿用工作日那张表（默认单表）。填了才单独生效。" }), el.firstChild);
+        var copyBtn = UI.h("button", { class: "btn btn-sm", type: "button", text: "照平时那张复制过来",
+          title: "把工作日作息表的内容复制进这里（只是填进表单，仍要点保存才落盘）",
+          onclick: function () {
+            var src = parseRhythm(baselineAt("state.rhythm"));
+            rows = src.rows.map(function (r) { return { time: r.time, word: r.word }; });
+            extras = src.extras.slice();
+            draw();
+          } });
+        el.appendChild(UI.h("div", { class: "rhythm-copy" }, [copyBtn]));
+      }
+
+      draw();
+
+      return {
+        el: el,
+        read: function () {
+          /* 状态词为空**直接拦在保存前**：后端会把这行当无效丢掉，
+             用户会莫名其妙少一行还以为是自己删错了。 */
+          for (var i = 0; i < rows.length; i += 1) {
+            if (!String(rows[i].word).trim()) {
+              return { __value: null, __error: "第 " + (i + 1) + " 段还没填状态词" };
+            }
+          }
+          return { __value: serializeRhythm(rows, extras), __error: "" };
+        },
+        set: function (v) {
+          var p = parseRhythm(v);
+          rows = p.rows;
+          extras = p.extras;
+          draw();
+        },
+      };
+    }
+
+    /* late_night：HH:MM-HH:MM，可跨午夜；空 = 永不深夜 */
+    function makeTimeRangeControl(field, current) {
+      var UI = ctx.UI;
+      var raw = String(current === undefined || current === null ? "" : current);
+      var m = /^(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$/.exec(raw.trim());
+      var startVal = m ? pad2(m[1]) : "23:30";
+      var endVal = m ? pad2(m[2]) : "06:30";
+      var never = !m;
+
+      var start = UI.h("input", { type: "time", class: "set-input", value: startVal, step: "60", disabled: never });
+      var end = UI.h("input", { type: "time", class: "set-input", value: endVal, step: "60", disabled: never });
+      var off = UI.h("input", { type: "checkbox", class: "set-switch" });
+      off.checked = never;
+      function sync() { start.disabled = never; end.disabled = never; }
+      off.addEventListener("change", function () { never = off.checked; sync(); });
+      sync();
+
+      var el = UI.h("div", { class: "time-range" }, [
+        UI.h("div", { class: "time-range-row" }, [start, UI.h("span", { class: "muted", text: "到" }), end]),
+        UI.h("label", { class: "set-only" }, [off, " 永不深夜（留空）"]),
+        UI.h("div", { class: "set-hint", text: "可以跨午夜，比如 23:30 到次日 06:30 是合法的。" }),
+      ]);
+
+      return {
+        el: el,
+        read: function () {
+          if (never) return { __value: "", __error: "" };
+          if (!start.value || !end.value) return { __value: null, __error: "起止时间都要填，或勾「永不深夜」" };
+          return { __value: start.value + "-" + end.value, __error: "" };
+        },
+        set: function (v) {
+          var mm = /^(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$/.exec(String(v || "").trim());
+          never = !mm;
+          if (mm) { start.value = pad2(mm[1]); end.value = pad2(mm[2]); }
+          off.checked = never;
+          sync();
+        },
+      };
+    }
+
+    function pad2(hhmm) {
+      var p = String(hhmm).split(":");
+      if (p.length !== 2) return String(hhmm);
+      return (p[0].length < 2 ? "0" + p[0] : p[0]) + ":" + (p[1].length < 2 ? "0" + p[1] : p[1]);
+    }
+
+    /* 启用范围（第 7 步）：**和顶栏同一个控件**（UI.scopeControl），
+       区别只在这里走草稿——改完点保存才落盘，顶栏是点一下就存。
+       这里**不认识** "scope.mode" 这个路径，只认 editor === "scope"。 */
+    function makeScopeControl(field, current) {
+      var ctl = ctx.UI.scopeControl(current);
+      return {
+        el: ctl.el,
+        read: function () { return { __value: ctl.get(), __error: "" }; },
+        set: function (v) { ctl.set(v); },
+      };
+    }
+
     function makeControl(field, current) {
       var path = field.path;
+
+      /* 第 6.2 步 / 第 7 步：只认 editor，不认字段名 */
+      if (field.editor === "rhythm") return makeRhythmControl(field, current);
+      if (field.editor === "time_range") return makeTimeRangeControl(field, current);
+      if (field.editor === "scope") return makeScopeControl(field, current);
+
 
       function text(value) {
         return value === undefined || value === null ? "" : String(value);
@@ -167,8 +386,75 @@
         };
       }
 
-      /* dict：JSON 文本域，解析失败就地报错、绝不提交 */
+      /* dict：默认给「一行一格」的表格（左边 id、右边称呼、后面一个删），
+         **别逼人手写 JSON**。但只在当前值**确实是扁平的 字符串→字符串 映射**时才用表格；
+         解析不了、或里面有嵌套结构 / 非字符串值，就老实退回下面的 JSON 文本域并就地报错——
+         绝不能因为"好看"就把用户已有的数据悄悄改了形。 */
       if (field.type === "dict") {
+        var isFlatMap = function (v) {
+          if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+          return Object.keys(v).every(function (k) { return typeof v[k] === "string"; });
+        };
+
+        /* A. 扁平字符串映射 → 表格编辑器 */
+        if (isFlatMap(current)) {
+          var rowsBox = ctx.UI.h("div", { class: "set-kv-rows" });
+          var rows = [];
+          function addRow(key, val) {
+            var keyIn = ctx.UI.h("input", { class: "set-input set-kv-key", type: "text", value: key === undefined || key === null ? "" : String(key) });
+            var valIn = ctx.UI.h("input", { class: "set-input set-kv-val", type: "text", value: val === undefined || val === null ? "" : String(val) });
+            var row = { key: keyIn, val: valIn, el: null };
+            row.el = ctx.UI.h("div", { class: "set-kv-row" }, [
+              keyIn,
+              ctx.UI.h("span", { class: "muted set-kv-arrow", text: "→" }),
+              valIn,
+              ctx.UI.h("button", {
+                class: "btn btn-sm", type: "button", text: "删", title: "删掉这一条",
+                onclick: function () {
+                  rows = rows.filter(function (r) { return r !== row; });
+                  rowsBox.removeChild(row.el);
+                },
+              }),
+            ]);
+            rows.push(row);
+            rowsBox.appendChild(row.el);
+          }
+          var seed = Object.keys(current);
+          if (seed.length) seed.forEach(function (k) { addRow(k, current[k]); });
+          else addRow("", "");
+
+          return {
+            el: ctx.UI.h("div", { class: "set-kv" }, [
+              rowsBox,
+              ctx.UI.h("button", {
+                class: "btn btn-sm set-kv-add", type: "button", text: "＋ 加一条",
+                onclick: function () { addRow("", ""); },
+              }),
+            ]),
+            read: function () {
+              var out = {};
+              for (var i = 0; i < rows.length; i += 1) {
+                var k = String(rows[i].key.value || "").trim();
+                var v = String(rows[i].val.value || "").trim();
+                if (k === "" && v === "") continue;        /* 全空的行直接忽略 */
+                if (k === "") return { __value: null, __error: "有一行左边没填是谁" };
+                if (Object.prototype.hasOwnProperty.call(out, k)) return { __value: null, __error: "「" + k + "」重复了" };
+                out[k] = v;
+              }
+              return { __value: out, __error: "" };
+            },
+            set: function (v) {
+              if (!isFlatMap(v)) return;                  /* 不是扁平结构就别画表格，保持现状 */
+              rows = [];
+              ctx.UI.clear(rowsBox);
+              var keys = Object.keys(v);
+              if (keys.length) keys.forEach(function (k) { addRow(k, v[k]); });
+              else addRow("", "");
+            },
+          };
+        }
+
+        /* B. 兜底：JSON 文本域，解析失败就地报错、绝不提交 */
         var jsonBox = ctx.UI.h("textarea", { class: "set-area", rows: 3 });
         jsonBox.value = JSON.stringify(current || {}, null, 2);
         return {
@@ -398,7 +684,7 @@
         UI.h("div", { class: "danger-text sub" }, [
           "把插件的全部配置项恢复成出厂默认值，",
           UI.h("strong", { text: "立即生效" }),
-          "：会落盘、热重载配置并重建巡检 job。想先看看默认值长什么样，"
+          "：会落盘、热重载配置并重建巡检任务。想先看看默认值长什么样，"
             + "请用上面的「恢复默认值」——那个只填表单，不写盘。",
         ]),
         els.reset,
@@ -648,9 +934,16 @@
       }
       var parts = ["已保存 " + ((result.applied || []).length || st.dirtyPaths.length) + " 项"];
       if (result.backup) parts.push("旧配置已备份为 " + result.backup);
-      if (result.reloaded) parts.push("巡检 job 已重建");
+      if (result.reloaded) parts.push("巡检任务已重建");
       (result.notices || []).forEach(function (item) { parts.push(String(item)); });
       (result.warnings || []).forEach(function (item) { parts.push("注意：" + item); });
+      /* 保存成功后把新档位推给顶栏，两个入口永远显示同一个值。
+         认的是 field.editor === "scope"（field 本来就存在 controls[path] 里），
+         不按路径名判断——换个字段路径也不影响。 */
+      st.dirtyPaths.forEach(function (path) {
+        var c = controls[path];
+        if (c && c.field && c.field.editor === "scope" && ctx.setScope) ctx.setScope(c.value);
+      });
       ctx.UI.toast("设置已生效");
       await refresh();
       say(parts.join("　·　"), false);

@@ -21,7 +21,7 @@
             y: Number(item[field]),
             label: item.date,
             strong: (item.n || 1) > 1,
-            title: item.date + "　valence " + item.valence + " / arousal " + item.arousal +
+            title: item.date + "　情绪 " + item.valence + " / 精神 " + item.arousal +
               (item.n > 1 ? "（当天 " + item.n + " 条）" : ""),
           };
         });
@@ -70,13 +70,13 @@
           yMin: -1, yMax: 1,
         }));
         holder.appendChild(UI.legend([
-          { color: "#e69bb0", text: "当下 valence（" + now.length + " 点）" },
-          { color: "#6d7787", text: "基调 valence（" + base.length + " 点）" },
+          { color: "#e69bb0", text: "当下情绪（" + now.length + " 点）" },
+          { color: "#6d7787", text: "基调情绪（" + base.length + " 点）" },
         ]));
         holder.appendChild(UI.lineChart({
           points: toPoints(history.points, "arousal"), color: "#7fc8a9", yMin: -1, yMax: 1,
         }));
-        holder.appendChild(UI.legend([{ color: "#7fc8a9", text: "当下 arousal（唤醒度）" }]));
+        holder.appendChild(UI.legend([{ color: "#7fc8a9", text: "当下精神（唤醒度）" }]));
         holder.appendChild(UI.h("div", { class: "sub",
           text: "共 " + now.length + " 个当下点、 " + base.length + " 个基调点" +
             (history.truncated ? "　·　超出窗口的点已折叠（truncated=true）" : "") }));
@@ -92,6 +92,16 @@
       if (!proactive) return;
 
       var sessions = proactive.sessions || [];
+      /* 时段槽位是后端给的英文枚举（private/group/night/idle/greeting/platform），
+         直接显示就是一片英文。翻成中文，认不出来的键退回原样，别显示成空白。 */
+      var SLOT_CN = {
+        private: "私聊", group: "群聊", night: "深夜", idle: "空闲",
+        greeting: "打招呼", platform: "平台", morning: "早上", evening: "晚上",
+      };
+      var slotText = function (v) {
+        var s = String(v === undefined || v === null || v === "" ? "—" : v);
+        return SLOT_CN[s] || s;
+      };
       var sBox = UI.h("div", { class: "card panel" }, [
         UI.h("h3", { text: "会话（今日计数）" }),
       ]);
@@ -101,7 +111,7 @@
           UI.h("div", { class: "row-main" }, [
             UI.h("div", { class: "row-title", text: item.umo }),
             UI.h("div", { class: "row-sub",
-              text: "最近 " + (item.last_slot || "—") + " · " +
+              text: "最近 " + slotText(item.last_slot) + " · " +
                 (item.last_sent_at ? UI.shortTime(item.last_sent_at) : "没发过") }),
           ]),
           UI.h("div", { class: "row-actions" }, [
@@ -120,7 +130,7 @@
         lBox.appendChild(UI.h("div", { class: "row" }, [
           UI.h("div", { class: "row-main" }, [
             UI.h("div", { class: "row-title", text: item.fragment || "（空）" }),
-            UI.h("div", { class: "row-sub", text: UI.shortTime(item.ts) + " · " + (item.slot || "—") + " · " + item.umo }),
+            UI.h("div", { class: "row-sub", text: UI.shortTime(item.ts) + " · " + slotText(item.slot) + " · " + item.umo }),
           ]),
         ]));
       });

@@ -792,3 +792,255 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
   color: #fff;
   font-weight: 600;
 }
+
+/* ===== 第 6.2 步：日程表结构化 + 日记日历 + 单页日记本 · 追加区 ===== */
+
+/* ---- 日程表行式编辑器 ---- */
+.rhythm { display: flex; flex-direction: column; gap: 8px; }
+.rhythm-legend {
+  font-size: 12px;
+  color: var(--fg-dim);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+}
+.rhythm-rows { display: flex; flex-direction: column; gap: 6px; }
+.rhythm-row { display: flex; align-items: center; gap: 8px; }
+.rhythm-time { width: 108px; flex: 0 0 auto; padding: 5px 8px; font: inherit; font-size: 13px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); color: var(--fg); }
+.rhythm-word { flex: 1 1 auto; min-width: 0; padding: 5px 9px; font: inherit; font-size: 13px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); color: var(--fg); }
+.rhythm-empty, .rhythm-extra {
+  font-size: 12px; color: var(--fg-dim); padding: 8px 10px;
+  border: 1px dashed var(--line); border-radius: var(--radius-sm);
+}
+.rhythm-extras { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.rhythm-keep { display: flex; flex-direction: column; gap: 6px; }
+.rhythm-copy { display: flex; gap: 8px; }
+
+/* ---- 深夜时段（可跨午夜） ---- */
+.time-range { display: flex; flex-direction: column; gap: 8px; }
+.time-range-row { display: flex; align-items: center; gap: 8px; }
+.time-range-row .set-input { width: 120px; }
+
+/* ---- 日历（周一开头） ---- */
+.cal-wrap { margin-top: 10px; }
+.cal-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.cal-title { font-size: 13px; font-weight: 600; min-width: 92px; text-align: center; }
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+}
+.cal-wd { text-align: center; font-size: 11px; color: var(--fg-dim); padding: 3px 0; }
+.cal-cell {
+  position: relative;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: 12px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.cal-cell.is-blank { border: 0; cursor: default; }
+.cal-cell:hover { background: var(--bg-soft); }
+.cal-cell.has-diary { color: var(--fg); background: var(--bg-soft); }
+.cal-cell.is-today { border-color: var(--accent-line); font-weight: 600; }
+.cal-cell.is-pick { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.cal-num { line-height: 1; }
+/* 条数角标：1 / 2 / 3+ 三档 */
+.cal-dot {
+  position: absolute; top: 2px; right: 3px;
+  min-width: 13px; height: 13px; padding: 0 2px;
+  border-radius: 7px;
+  background: var(--accent); color: #fff;
+  font-size: 9px; line-height: 13px; text-align: center;
+}
+.cal-cell.is-pick .cal-dot { background: var(--accent); }
+.cal-note { margin-top: 8px; font-size: 11px; color: var(--fg-dim); }
+
+/* ---- 单页日记本 ---- */
+.np-panel { margin-top: 4px; }
+.notebook {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px 14px;
+}
+.np-pagehead {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 10px; margin-bottom: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.np-datestamp { font-size: 15px; font-weight: 600; color: var(--fg); letter-spacing: .02em; }
+.np-count { font-size: 11px; color: var(--fg-dim); }
+.np-entry + .np-entry { margin-top: 20px; padding-top: 18px; border-top: 1px dashed var(--line-soft); }
+.np-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.np-time {
+  font-size: 12px; font-weight: 600; color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.np-mood {
+  font-size: 11px; padding: 2px 9px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line);
+}
+.np-who { font-size: 11px; color: var(--fg-faint); }
+.np-body { display: flex; flex-direction: column; gap: 12px; }
+.np-p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.95;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.np-foot { text-align: center; color: var(--fg-faint); letter-spacing: .5em; margin: 18px 0 6px; font-size: 12px; }
+.np-pager { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 8px; }
+.np-pageno { font-size: 12px; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+.np-tools { margin-top: 10px; }
+.np-tail { margin-top: 10px; }
+
+/* ===== 第 6.3 步 视觉打磨 · 追加区 =====
+   手法参考 astrbot_plugin_daily_life（MIT，作者 四次元未来）的 design token /
+   meter / bento 三样，**不抄它的体量，也不用它的粒子层**（用户明确否掉）。 */
+
+/* ---- 补齐设计令牌（第 3 样）----
+   **不逐主题硬写**：全部从各主题已有的 --fg/--line/--card 派生，
+   五套主题（sakura/moon/mist/mint/cream）自动全覆盖，不会漏掉某一档。
+   --card-soft 是半透明卡片底；已有的 --card（不透明）**故意不动**，
+   全局改它会连带改掉五套主题现有观感，不值得为这一档冒险。 */
+/* ---- 兜底（6.3 步修正）：老宿主 Chromium < 111 不认 color-mix()，整条丢弃 → 令牌变空 → 焦点环/
+   次级正文/柔和阴影全没（var(--focus) 进 box-shadow 还会让整条 box-shadow 失效）。下面 5 行逐主题给
+   字面量（数值按对应 color-mix 公式手算，共用一套色会让焦点环串色）；紧随的 `:root, html[data-theme]`
+   块同为 (0,1,1) 但源码更靠后 → 支持的拿派生色，不支持的吃字面量。 */
+html[data-theme="sakura"] { --ink-soft: #76656f; --line-strong: rgba(215,191,201,.76); --card-soft: rgba(255,255,255,.86); --shadow-soft: 0 2px 8px rgba(75,55,67,.07); --focus: 0 0 0 3px rgba(242,120,159,.42); }
+html[data-theme="moon"] { --ink-soft: #b4b7bd; --line-strong: rgba(74,80,92,.76); --card-soft: rgba(23,27,36,.86); --shadow-soft: 0 2px 8px rgba(233,236,243,.07); --focus: 0 0 0 3px rgba(232,160,182,.42); }
+html[data-theme="mist"] { --ink-soft: #525660; --line-strong: rgba(191,195,203,.76); --card-soft: rgba(255,255,255,.86); --shadow-soft: 0 2px 8px rgba(30,36,48,.07); --focus: 0 0 0 3px rgba(196,97,127,.42); }
+html[data-theme="mint"] { --ink-soft: #526862; --line-strong: rgba(182,203,195,.76); --card-soft: rgba(255,255,255,.86); --shadow-soft: 0 2px 8px rgba(31,58,51,.07); --focus: 0 0 0 3px rgba(70,172,138,.42); }
+html[data-theme="cream"] { --ink-soft: #746b5c; --line-strong: rgba(206,194,176,.76); --card-soft: rgba(255,253,249,.86); --shadow-soft: 0 2px 8px rgba(74,63,46,.07); --focus: 0 0 0 3px rgba(217,154,78,.42); }
+:root,
+html[data-theme] {
+  --ink-soft: color-mix(in srgb, var(--fg) 76%, var(--bg));
+  --muted: var(--fg-dim);
+  --line-strong: color-mix(in srgb, var(--line) 62%, var(--fg) 14%);
+  --card-soft: color-mix(in srgb, var(--card) 86%, transparent);
+  --shadow-soft: 0 2px 8px color-mix(in srgb, var(--fg) 7%, transparent);
+  --glow: inset 0 1px 0 rgba(255, 255, 255, .55);
+  --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 42%, transparent);
+  --meter-h: 7px;
+}
+
+/* 焦点环统一到一处：按钮 / 输入 / 日历格子 / 可点卡片都走它 */
+:where(button, input, select, textarea, [role="button"], [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+  border-radius: var(--radius-sm);
+}
+
+/* ---- 仪表条（第 2 样）---- */
+.meter { display: flex; flex-direction: column; gap: 4px; }
+.meter-top {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 11px; color: var(--muted);
+}
+.meter-val { font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+.track {
+  height: var(--meter-h); border-radius: 999px; overflow: hidden;
+  background: var(--line-soft);   /* color-mix 不被支持时的兜底，轨道别整条看不见 */
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+  box-shadow: var(--glow);
+}
+.bar { height: 100%; border-radius: 999px; background: var(--accent); transition: width .28s ease; }
+.bar.is-ok { background: var(--ok); }
+.bar.is-warn { background: var(--warn); }
+.bar.is-err { background: var(--err); }
+.bar.is-zero { background: var(--zero); }
+/* 映射说明必须跟着仪表条一起出现：-2~+2 不是百分比，不许装成百分比 */
+.meter-axis {
+  display: flex; justify-content: space-between;
+  font-size: 9px; color: var(--fg-faint); margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.ov-meters {
+  display: grid; gap: 14px; margin-bottom: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+/* ---- bento 不等宽网格（第 5 样）：只给「总览」和「数据」用 ---- */
+.bento {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(4, 1fr);
+  grid-auto-rows: minmax(0, auto);
+}
+.bento > .bento-wide { grid-column: span 2; }
+.bento > .bento-full { grid-column: 1 / -1; }
+@media (max-width: 720px) {
+  .bento { grid-template-columns: 1fr; }
+  .bento > .bento-wide, .bento > .bento-full { grid-column: 1 / -1; }
+}
+
+/* ---- 纸感（第 6 样）：日记页的"纸" ---- */
+.notebook {
+  background: var(--card-soft);
+  box-shadow: var(--shadow-soft), var(--glow);
+}
+.np-p { color: var(--ink-soft); }
+.np-foot, .np-datestamp { color: var(--ink-soft); }
+/* 选中态用描边，不只用底色块——底色块在浅色纸上几乎看不出来 */
+.cal-cell.is-pick { box-shadow: inset 0 0 0 2px var(--accent); }
+.np-pagehead { border-bottom-color: var(--line-strong); }
+
+/* ===== 第 7 步 · 启用范围三段切换 =====
+   一个控件两处用：顶栏（点一下即存）+ 设置页 editor==="scope"（走草稿）。
+   只用边框/底色表达选中态，**不加常驻动画**（用户明确否掉粒子与动效）。 */
+.scope-bar { display: flex; align-items: center; }
+.seg {
+  display: inline-flex; align-items: stretch; padding: 2px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--bg-soft);
+}
+.seg-btn {
+  appearance: none; border: 0; cursor: pointer;
+  padding: 4px 12px; border-radius: 999px;
+  background: transparent; color: var(--fg-dim);
+  font: inherit; font-size: 12px; line-height: 1.6;
+  white-space: nowrap;
+}
+.seg-btn:hover { color: var(--fg); }
+.seg-btn.is-on {
+  background: var(--accent); color: #fff;
+  box-shadow: var(--glow);
+}
+.set-row .seg { width: 100%; }
+.set-row .seg-btn { flex: 1; }
+
+/* ===== 第 9 步 · 「起个名」内联编辑器 =====
+   克制：小按钮 + 展开才出现的输入行，不抢「对谁」下拉的位置。 */
+.who-rename { align-self: flex-start; margin-top: 6px; }
+.who-name-edit {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-top: 6px;
+}
+.who-name-edit .set-input { flex: 1 1 120px; min-width: 0; }
+.who-name-edit[hidden] { display: none !important; }
+
+/* ===== 第 9 步修正 · dict 字段的「一行一格」编辑器 =====
+   代替手写 JSON：左边是谁、右边怎么称呼、后面一个删。窄屏自动折行。 */
+.set-kv { display: flex; flex-direction: column; gap: 6px; }
+.set-kv-rows { display: flex; flex-direction: column; gap: 6px; }
+.set-kv-row {
+  display: flex; align-items: center; gap: 6px;
+}
+.set-kv-key { flex: 0 1 40%; min-width: 0; }
+.set-kv-arrow { flex: 0 0 auto; font-size: 12px; }
+.set-kv-val { flex: 1 1 0; min-width: 0; }
+.set-kv-add { align-self: flex-start; }
+@media (max-width: 720px) {
+  .set-kv-row { flex-wrap: wrap; }
+  .set-kv-key, .set-kv-val { flex: 1 1 100%; }
+}

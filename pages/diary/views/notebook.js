@@ -43,7 +43,7 @@
           UI.h("div", { class: "row-main" }, [
             UI.h("div", { class: "row-title" + (done ? " tag-done" : ""), text: item.text || "（空）" }),
             UI.h("div", { class: "row-sub",
-              text: "id " + (item.id || "?") + " · " + (item.about || "?") +
+              text: "编号 " + (item.id || "?") + " · " + (item.about || "?") +
                 (done ? " · 已完成 " + UI.shortTime(item.done_at) : "") +
                 (item.created_at ? " · 记于 " + UI.shortTime(item.created_at) : "") }),
           ]),
@@ -69,7 +69,7 @@
           UI.h("div", { class: "row-main" }, [
             UI.h("div", { class: "row-title", text: item.text || "（空）" }),
             UI.h("div", { class: "row-sub",
-              text: "id " + (item.id || "?") + (item.created_at ? " · " + UI.shortTime(item.created_at) : "") }),
+              text: "编号 " + (item.id || "?") + (item.created_at ? " · " + UI.shortTime(item.created_at) : "") }),
           ]),
           UI.h("div", { class: "row-actions" }, [
             UI.h("button", {
@@ -81,7 +81,7 @@
       });
       holder.appendChild(fBox);
       holder.appendChild(UI.h("div", { class: "sub",
-        text: "删除不是真消失：条目会进 notebook.json 的 trash（最多 50 条）。" }));
+        text: "删除不是真消失：条目会进回收站（最多 50 条，和小本本放同一个文件里）。" }));
     }
 
     return {
