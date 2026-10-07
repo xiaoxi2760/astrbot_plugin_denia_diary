@@ -15,7 +15,7 @@
 
 ```
 astrbot_plugin_denia_diary/
-├─ metadata.yaml / _conf_schema.json / README.md / DEVELOPMENT.md / logo.png
+├─ metadata.yaml / _conf_schema.json / README.md / DEVELOPMENT.md / logo.png / LICENSE
 ├─ main.py
 ├─ web_api/
 │  ├─ __init__.py       对外只暴露 register_all
@@ -61,11 +61,23 @@ astrbot_plugin_denia_diary/
 | `note_complete` | 把约定销账（写 `done_at`，完成即腾坑） |
 | `note_forget` | 删一条（先过归属判定，进 `trash` 回收站） |
 | `mood_report` | 心情自报（`word` 原词 + 可选 `valence` / `arousal` 字符串打分）；**没有 `affinity_*` 工具**，她不碰熟悉度数值 |
-| `on_llm_request`（priority=5） | 先 `affinity.touch`（私聊 private / 群聊 mention）+ `proactive.note_contact`（person→会话反查表），再把 `core.compose` 渲染的一段追加进 `system_prompt`；**主动轮不触发它**，那边走 `payload.note` |
+| `on_llm_request`（priority=5） | 先 `affinity.touch`（私聊 private / 群聊 mention）+ `proactive.note_contact`（person→会话反查表），再把 `core.compose` 渲染的一段挂进 `req.extra_user_content_parts`（见下）；**主动轮不触发它**，那边走 `payload.note` |
 | `on_using_llm_tool` | **确认点**：主动唤醒路径里她真调了 `send_message_to_user`（事件带 `cron_job` extra）→ 写 `last_sent_at`；被动轮同一工具不算 |
 | `initialize` / `terminate` | 生命周期。`initialize()` 重建巡检 job（basic handler 只在内存注册表，热重载即失效 → 按 name 查旧 job 一律 delete 再 add）；`terminate()` 冲熟悉度合并写窗口 |
 
 工具描述是**行为规范**（"别写成工作汇报"、"开头那行不动"、"只记两类"、"闲聊情绪玩笑不记"），不是注释——改文案等于改她的行为，`test/test_main.py` 逐条钉住了这些关键词。
+
+### 提示注入的挂载点
+
+随会话/时间/心情**每轮都变**的动态内容（`compose_prompt` 产物，≤400 字）挂 `req.extra_user_content_parts`（`TextPart(...).mark_as_temp()`，只参与本轮请求、不进会话历史）——**不拼 `req.system_prompt`**：system_prompt 是前缀缓存的关键部分，尾部每次都变会显著抬高 token 开销（上架审核第二条）。宿主过旧（拿不到 `TextPart`，< v4.24.2）或注入抛异常时，退回追加 `system_prompt`，不报错。主动轮拼进 `payload.note` 的做法不受影响。
+
+## 日志约定（logger）
+
+- 全插件 logger **唯一来源**是 `core/_log.py`：`core/` 内 `from ._log import logger`（或子包 `from .._log import logger`）；`web_api/` 用 try/except 双分支 `from ..core._log import logger` / `from core._log import logger`；`main.py` 直接 `from astrbot.api import llm_tool, logger`。
+- **严禁 `import logging` / `logging.getLogger(__name__)`**——上架审核的硬性规范。
+- `core/_log.py` 做的是"一次降级，全局复用"：真机上 `astrbot.api.logger` 是**按调用者解析的代理**（`_PluginContextLogger.__getattr__` 用 `sys._getframe(1)` 找调用方模块 → 落到插件专属 logger，行前缀 `[astrbot_plugin_denia_diary]` 由宿主自动加，core/ 里的调用同样正确落位）；离线（无 astrbot）降级成 `_NullLogger` 空壳，接口同形、什么都不做。
+- **裁定**：审核规范 A（只能 `astrbot.api` logger）高于本仓"core/ 零 astrbot import"的约定 B。`core/_log.py` 是**全仓唯一**允许出现 astrbot 字样的内核模块，那行 import 必须包在 try/except（只捕 `ImportError`）里；三处守卫按"唯独放行 `_log.py` 且验 try/except 形"的口径执行——`tools/webui_selfcheck.py` 的 core/ 扫描、`test/test_webui_data.py` 与 `test/test_outbound.py` 的 `test_core_has_no_astrbot_import`。别在本文件之外再引入 astrbot import。
+- 提示：消息文本里手写的 `[%s] PLUGIN_NAME` 前缀与宿主自动加的插件名前缀会重复（历史习惯，纯观感），后续轮次可统一去掉文本前缀。
 
 ## 日记系统
 
@@ -237,6 +249,7 @@ Dashboard → 插件管理 → `astrbot_plugin_denia_diary` → 插件页。**�
 1. **昵称落盘**：`proactive.json` 的 `contacts[<person_id>]` 加 **`name`** 键（加键不改名，不用迁移）——互动时从 `session.sender_name` 写入；**空名字一个字不动**（不写空串、不擦已有值），换新名字才覆盖。
 2. **显示串 = `名字(数字)`**：`display_name(settings, person, contacts)` 按 `name_preference[person] → contacts[person]["name"] → 空` 三级回落（与 `Session.label()` 同序），有名字且名字 ≠ id 就拼 `名字(id)`，否则就是 id 本身（**绝不出现** `1411638634(1411638634)`）。**不传 `contacts` 退回旧行为**（只认 `name_preference`，不加后缀）——熟悉度榜等没有联系人表的既有调用零破坏。`who_options*` 每项带 `name`（昵称本体，可能空）与 `label`（显示串），**`id` 恒为 person_id**（前端按 id 去重）。
 3. **候选跟档位标注（一个都不删）**：`who_options*` 每项加 `is_owner`（在 `love_peers` 里）与 `out_of_scope`（当前档下她不会在这个人的会话里工作；按 `scope.mode` 只有 `owner` 档会产生档位外的人），`owner` 档主人**置顶**（稳定排序）；三档候选数量相同。`status_payload` / `notebook_payload` 另加 **`scope_mode`**（前端显示"当前启用范围：只主人"）。
+4. **默认选中主人**（真机反馈 2026-10-07）：候选合并时若当前没有有效选择（没存过 / 存的 id 已不在候选里），前端自动落到 `is_owner` 第一人并持久化；没有主人可选才显示「（未选）」占位。总览「对谁」卡片读**前端选中态**而非回包 `who_name` 回显——首屏取数发生在默认值落定之前，读回显会把默认主人顶回「未选」。
 
 ### 路由表
 
@@ -369,6 +382,15 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 
 `verify_schema_alignment(schema) -> [problems]`：`_conf_schema.json` 与 `core/settings.py` 默认值表**双向**核对——顶层键集合、组内键集合、`dict` 叶子与分组的形状、`int` 项有没有 `INT_LIMITS` 取值范围、大类归属是否覆盖/越界。`initialize()` 启动时跑一次，有就**逐条写 warning 日志**；`GET settings` 的 `problems` 数组原样带出。AstrBot 会剔除 schema 里不存在的键，两边不一致时用户保存的值会在重载时静默丢失——这就是自检必须存在的原因。
 
+## 元数据（metadata.yaml）
+
+字段集与顺序以工作区 `dev-examples/metadata.example.yaml` 为准：必填 `name` / `display_name` / `short_desc` / `desc` / `version` / `author` / `repo`，可选 `astrbot_version` / `support_platforms` / `tags`。宿主只解析这几个键，多余字段不认——`license` 就因此删掉了，许可证以仓库根的 `LICENSE`（MIT）为准。本仓定稿：
+
+- `astrbot_version: ">=4.24.2"`：`TextPart(...).mark_as_temp()` 临时内容块注入的最低版本（< 4.24.2 本来也注册不了插件页 API）。不满足时宿主拒绝加载（WebUI 安装可「无视警告」跳过）——宁可让版本不够的人明确装不上，也不悄悄退回拼 `system_prompt` 的降级路径（上架审核第二条要治的病）。
+- `support_platforms: [aiocqhttp]`：只声明真机验证过的平台；该字段只作展示不拦载，测过新平台再往里加。
+- `author: "xiaoxi2760"`（git 名，与仓库 owner 一致）；`metadata.yaml` 与 `main.py` 的 `@register` 第二参两处同步。若值是纯数字形式，必须带引号：裸写会被 YAML 解析成 int，宿主校验要求字符串，加载直接报「插件元数据校验失败」。
+- `short_desc` 是市场卡片短描述，缺省回退 `desc`；`tags` / `social_link` 只被插件市场源 JSON 消费，宿主本体不读。
+
 ## 品牌化与立绘
 
 插件显示名是**情绪日记**（`metadata.yaml` 的 `display_name`）。注意 `name:` 仍是 `astrbot_plugin_denia_diary`——它同时是**目录名与模块名**，改它等于换安装目录，已经装过的用户点「更新」会变成又装一份。仓库名同理。
@@ -481,7 +503,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | :--- | :--- | :--- |
 | `enabled` | true | 总开关；关闭时所有子系统不可用 |
 | `timezone` | `Asia/Shanghai` | 任何 IANA 时区；无效则回落 |
-| `data_dir` | 空 | 空 = 用宿主给的目录 |
+| `data_dir` | 空 | 空 = 用宿主给的目录；非空 = **只接受宿主插件数据目录本身或它里面的子目录**，越界（含绝对路径指别处）启动时记 warning 并退回默认目录 |
 | `panel.brand` | `情绪日记` | 面板左上角标题（也是浏览器标签页标题）；留空＝那行不显示；>60 字截断 |
 | `panel.brand_sub` | `观察面板` | 标题下面那行小字；留空＝那行不显示 |
 | `subsystems.{diary,notebook,state,proactive}` | 全 true | 子系统开关 |

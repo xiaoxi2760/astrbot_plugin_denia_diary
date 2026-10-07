@@ -7,7 +7,8 @@
   ``mood_report``（心情自报，参数全字符串——AstrBot 不生成 ``required``，
   数字类型 + 默认值会把"没提供"写成 0）；
 - 提示挂载点：``on_llm_request`` → 互动计数（``affinity.touch``）→ ``core.compose``
-  渲染结果追加进 ``req.system_prompt``；
+  渲染结果挂进 ``req.extra_user_content_parts``（临时内容块，**不拼 system_prompt**——
+  每轮都变的文本拼在 system_prompt 尾部会打掉前缀缓存）；
 - 主动消息（第 4 步）：``initialize()`` 重建巡检 job（basic handler 只在内存注册表，
   热重载即失效 → 必须删旧建新）；巡检 handler 里闸门与触发器都在 core 判定，这里只
   负责出站——``add_active_job`` 唤醒她本人 / ``StarTools.send_message`` 直发暗号；
@@ -22,12 +23,11 @@
 from __future__ import annotations
 
 import copy
-import logging
 import re
 from datetime import datetime
 from pathlib import Path
 
-from astrbot.api import llm_tool
+from astrbot.api import llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.provider import ProviderRequest
@@ -51,7 +51,10 @@ from .core.state import Affinity, State
 from .core.state.store import AffinityStore, StateStore
 from .web_api import register_all
 
-logger = logging.getLogger(__name__)
+try:  # pragma: no cover - 取决于 AstrBot 版本（``extra_user_content_parts`` 的内容块类型）
+    from astrbot.core.agent.message import TextPart
+except Exception:  # noqa: BLE001 - 旧版本没有这个模块：注入退回 system_prompt
+    TextPart = None  # type: ignore[assignment, misc]
 
 PLUGIN_NAME = "astrbot_plugin_denia_diary"
 
@@ -82,7 +85,7 @@ ACTIVE_JOB_NAME = f"{PLUGIN_NAME}#proactive-wake"
 
 @register(
     PLUGIN_NAME,
-    "50841",
+    "xiaoxi2760",
     "给她一本自己的纯文本日记、一个小本本，和情绪 / 作息 / 熟悉度，她会主动找你说话",
     _plugin_version(),
 )
@@ -342,16 +345,44 @@ class DeniaDiary(Star):
 
     # ---- 内部 ----------------------------------------------------------------
 
-    def _resolve_data_dir(self) -> Path:
-        """数据目录：配置优先，其次宿主给（AstrBot 的插件数据目录），最后兜底。"""
-        if self.settings.data_dir:
-            return Path(self.settings.data_dir)
+    def _host_data_dir(self) -> Path:
+        """宿主给的插件数据目录；取不到就退回 ``data/plugin_data/<插件名>``。"""
         try:
             return Path(StarTools.get_data_dir(PLUGIN_NAME))
         except Exception as error:  # noqa: BLE001 - 宿主实现可能没有这个方法
             fallback = Path.cwd() / "data" / "plugin_data" / PLUGIN_NAME
             logger.warning("[%s] 取不到插件数据目录（%s），改用 %s", PLUGIN_NAME, error, fallback)
             return fallback
+
+    def _resolve_data_dir(self) -> Path:
+        """数据目录：**只接受宿主插件数据目录本身或它里面的子目录**。
+
+        为什么不给"任意路径"：审计要求持久化数据落在 ``data/plugin_data/<插件名>``。
+        让 ``data_dir`` 能写到插件数据目录之外，这条保证就形同虚设——备份、
+        卸载清理、权限隔离全都依赖"数据只在插件目录里"这个前提。所以 ``data_dir``
+        只作"换个子目录"用；越界（含绝对路径指向别处）就记 warning 并**退回默认目录**，
+        而不是照着写出去。留空（默认）＝用宿主给的目录。
+        """
+        default = self._host_data_dir()
+        configured = str(self.settings.data_dir or "").strip()
+        if not configured:
+            return default
+        try:
+            target = Path(configured).expanduser().resolve()
+            root = default.resolve()
+        except OSError:  # pragma: no cover - 路径异常（非法字符等）时按未配置处理
+            target, root = Path(configured).expanduser(), default
+        if target == root or root in target.parents:
+            return target
+        logger.warning(
+            "[%s] data_dir=%s 不在插件数据目录 %s 里面，已退回默认目录。"
+            "持久化数据只允许落在 data/plugin_data/%s 里。",
+            PLUGIN_NAME,
+            configured,
+            default,
+            PLUGIN_NAME,
+        )
+        return default
 
     def _session(self, event: AstrMessageEvent) -> Session:
         return Session.from_event(event)
@@ -692,12 +723,14 @@ Args:
     async def inject_diary_hint(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
-        """先记一次互动（``affinity.touch``），再把 ``core.compose`` 渲染的短段追加进 system_prompt。
+        """先记一次互动（``affinity.touch``），再把 ``core.compose`` 渲染的短段挂进本次请求。
 
         主动轮（cron 唤醒）**不会**触发这个钩子：那边由插件把同一份渲染结果拼进
         ``payload.note``（见方案 §三 与 §4.4）。``touch`` 只在她被叫醒的这一刻计数
         （群聊普通发言没有信号，复核 #4）：私聊记 private，群聊记 mention。
         ``note_contact`` 顺手记下"这个人平时在哪找我说话"（第 4 步触发器的目标反查表）。
+
+        挂载点见 ``_attach_hint``：**不碰 ``system_prompt``**，走临时内容块。
         """
         if req is None:
             return
@@ -719,7 +752,38 @@ Args:
         )
         if not text:
             return
-        req.system_prompt = (req.system_prompt or "") + text
+        self._attach_hint(req, text)
+
+    def _attach_hint(self, req: ProviderRequest, text: str) -> None:
+        """把渲染结果挂进本次请求——**绝不拼 ``system_prompt``**。
+
+        ``system_prompt`` 是前缀缓存的关键部分，而这段渲染随会话 / 时间 / 心情**每轮都变**：
+        拼在它尾部等于每次请求都让前缀缓存失效，代价是实打实的 token 与首字延迟。
+        所以走 ``extra_user_content_parts``——那是"每轮临时内容"的位置，不参与前缀缓存；
+        再标 ``mark_as_temp()`` 让它不落进会话历史（这段是"她此刻的状态"，不是用户说过的话，
+        攒进历史只会越滚越长地挤掉真对话）。
+
+        兜底：宿主版本没有该字段或 ``TextPart`` 时退回拼 ``system_prompt``——
+        丢缓存只是慢一点，不能不让她看见这段状态。
+        """
+        if TextPart is None:  # pragma: no cover - 取决于宿主版本
+            req.system_prompt = (req.system_prompt or "") + text
+            return
+        try:
+            parts = getattr(req, "extra_user_content_parts", None)
+            if not isinstance(parts, list):
+                parts = []
+                req.extra_user_content_parts = parts
+            part = TextPart(text=text)
+            marker = getattr(part, "mark_as_temp", None)
+            if callable(marker):
+                part = marker()
+            parts.append(part)
+        except Exception as error:  # noqa: BLE001 - 兜底也不能把她的这轮带崩
+            logger.warning(
+                "[%s] 临时内容块注入失败，退回 system_prompt：%s", PLUGIN_NAME, error
+            )
+            req.system_prompt = (req.system_prompt or "") + text
 
     # ---- 确认点（主动轮） ------------------------------------------------------
 

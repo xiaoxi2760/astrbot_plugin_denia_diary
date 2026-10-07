@@ -17,23 +17,22 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Callable
 
 try:  # 包内上下文（AstrBot 加载插件 / 测试用 plugin_under_test 别名加载）
     from ..core import webui_data
     from ..core import webui_portrait
     from ..core import webui_settings
+    from ..core._log import logger
     from ..core.diary import format as fmt
 except ImportError:  # 顶层上下文（离线单测直接把插件目录放进 sys.path）
     from core import webui_data  # type: ignore[no-redef]
     from core import webui_portrait  # type: ignore[no-redef]
     from core import webui_settings  # type: ignore[no-redef]
+    from core._log import logger  # type: ignore[no-redef]
     from core.diary import format as fmt  # type: ignore[no-redef]
 
 from ._web import error_response, json_response, request
-
-logger = logging.getLogger(__name__)
 
 MAX_TAIL = 200
 """单次最多回多少条日记正文（防止一口气把整本塞进 iframe）。"""

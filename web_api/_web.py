@@ -41,10 +41,12 @@ error_response``。这里做两层事：
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
+try:  # 包内 / 顶层上下文都行（同一个 logger 模块，见 core/_log.py 的降级说明）
+    from ..core._log import logger
+except ImportError:  # pragma: no cover - 顶层上下文（离线单测）
+    from core._log import logger  # type: ignore[no-redef]
 
 try:  # pragma: no cover - 取决于运行环境有没有 astrbot
     from astrbot.api.web import json_response, request

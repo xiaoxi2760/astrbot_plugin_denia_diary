@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,8 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import storage
-
-logger = logging.getLogger(__name__)
+from .._log import logger
 
 HISTORY_KEEP_DAYS = 180
 """情绪历史的保留天数（任务书 §2.5#4：模块常量，不做配置项）。"""

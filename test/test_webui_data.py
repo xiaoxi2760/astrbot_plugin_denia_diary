@@ -657,14 +657,58 @@ class TestFrozenContract(WebuiDataCase):
             stripped = line.strip()
             if stripped.startswith(("import ", "from ")):
                 self.assertNotIn("astrbot", stripped, f"core/ 里不许 import astrbot：{stripped}")
+        # 唯一例外 core/_log.py（裁定见该文件 docstring：审核规范 A 高于本仓约定 B），
+        # 且例外要验形：astrbot import 行必须在 try: 之下缩进、文件里有 except 接住。
         for target in Path(__file__).resolve().parents[1].joinpath("core").rglob("*.py"):
             text = target.read_text(encoding="utf-8")
+            has_except = any(l.strip().startswith("except") for l in text.splitlines())
             for line in text.splitlines():
                 stripped = line.strip()
-                if stripped.startswith(("import ", "from ")):
-                    self.assertNotIn(
-                        "astrbot", stripped, f"core/ 里不许 import astrbot：{target.name} → {stripped}"
-                    )
+                if not stripped.startswith(("import ", "from ")) or "astrbot" not in stripped:
+                    continue
+                allowed = (
+                    target.name == "_log.py"
+                    and stripped.startswith("from astrbot.api import logger")
+                    and line[:1] in (" ", "\t")
+                    and has_except
+                )
+                self.assertTrue(
+                    allowed, f"core/ 里不许 import astrbot：{target.name} → {stripped}"
+                )
+
+    def test_log_module_degrades_offline(self) -> None:
+        """没有 astrbot 的环境里 import core._log 不炸，降级空壳可用（第 13 步验收自查）。"""
+
+        class _BlockAstrbot:
+            """临时 meta_path 钩子：把 astrbot* 的 import 变成 ImportError。"""
+
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "astrbot" or fullname.startswith("astrbot."):
+                    raise ImportError(f"blocked for offline test: {fullname}")
+                return None
+
+        import importlib
+
+        saved = {
+            name: module
+            for name, module in sys.modules.items()
+            if name == "astrbot" or name.startswith("astrbot.")
+        }
+        for name in saved:
+            sys.modules.pop(name, None)
+        previous_log = sys.modules.pop("core._log", None)
+        blocker = _BlockAstrbot()
+        sys.meta_path.insert(0, blocker)
+        try:
+            module = importlib.import_module("core._log")
+            self.assertIsInstance(module.logger, module._NullLogger, "没有 astrbot 要降级成空壳")
+            self.assertIsNone(module.logger.warning("x %s", 1), "空壳的 warning 不该抛异常")
+        finally:
+            sys.meta_path.remove(blocker)
+            sys.modules.update(saved)
+            sys.modules.pop("core._log", None)
+            if previous_log is not None:
+                sys.modules["core._log"] = previous_log
 
 
 class TestHandlerLayer(WebuiDataCase):

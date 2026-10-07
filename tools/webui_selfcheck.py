@@ -280,12 +280,23 @@ def main() -> int:
         check(b"\r\n" not in raw, f"{relative} 里有 CRLF（要纯 LF）")
         checked += 1
 
-    # core/ 零 astrbot
+    # core/ 零 astrbot——唯一例外 core/_log.py（裁定见该文件 docstring：审核规范 A
+    # 高于本仓约定 B），例外还要验形：astrbot import 行必须在 try: 之下缩进、文件里
+    # 有 except 接住（降级到 _NullLogger）。其余任何 core/ 模块出现 astrbot 一律判红。
     for py in (PLUGIN_DIR / "core").rglob("*.py"):
-        for line in py.read_text(encoding="utf-8").splitlines():
+        text = py.read_text(encoding="utf-8")
+        has_except = any(l.strip().startswith("except") for l in text.splitlines())
+        for line in text.splitlines():
             stripped = line.strip()
             if stripped.startswith(("import ", "from ")) and "astrbot" in stripped:
-                failures.append(f"core/ 里 import 了 astrbot：{py.name} → {stripped}")
+                allowed = (
+                    py.name == "_log.py"
+                    and stripped.startswith("from astrbot.api import logger")
+                    and line[:1] in (" ", "\t")
+                    and has_except
+                )
+                if not allowed:
+                    failures.append(f"core/ 里 import 了 astrbot：{py.name} → {stripped}")
             checked += 1
 
     # 只 import astrbot.api.web 的模块

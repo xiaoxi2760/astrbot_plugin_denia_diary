@@ -17,17 +17,15 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from .. import compose, scope, storage
+from .._log import logger
 from ..session import Session
 from . import gate, triggers
 from .store import ProactiveStore
-
-logger = logging.getLogger(__name__)
 
 PACK_MAX = 100
 """上下文包（触发上下文）的字数上限：注入本体走 compose 的 400 预算，这里只装

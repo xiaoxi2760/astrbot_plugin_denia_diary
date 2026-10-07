@@ -14,12 +14,14 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-from .handlers import build_handlers, logged_handler
+try:  # 包内 / 顶层上下文都行（同一个 logger 模块，见 core/_log.py 的降级说明）
+    from ..core._log import logger
+except ImportError:  # pragma: no cover - 顶层上下文（离线单测）
+    from core._log import logger  # type: ignore[no-redef]
 
-logger = logging.getLogger(__name__)
+from .handlers import build_handlers, logged_handler
 
 RouteSpec = tuple[str, str, tuple[str, ...], str]
 """``(endpoint, handler 名, 方法, 描述)``——``endpoint`` 是不带前缀、不带前导斜杠的。"""

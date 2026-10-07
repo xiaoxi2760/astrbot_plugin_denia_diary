@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import os
 import tempfile
 import time
@@ -26,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from ._log import logger
 
 # ---- 契约常量 ----------------------------------------------------------------
 

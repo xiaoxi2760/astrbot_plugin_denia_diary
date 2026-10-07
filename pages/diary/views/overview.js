@@ -225,6 +225,18 @@
         var n = Number(v);
         return (n >= 0 ? "+" : "−") + Math.abs(n).toFixed(2);
       };
+      /* 「对谁」卡片读**前端选中态**（ctx.who + 已合并的候选），不读回包的
+         who_name 回显：首屏取数发生在 applyWhoDefault 落定之前（who 还是空串
+         就发请求了），回显会让默认主人被"（未选）"顶掉——真机反馈 2026-10-07。
+         选中态才是这张卡的真相；回包 who_name 与它恒等（同一个 ctx.who 发的请求）。
+         大字只给**名字**，号码归副行——大字"希(508416913)"副行再"508416913"
+         是同一个号码说两遍（真机反馈 2026-10-07）。没名字时大字用 id，
+         副行就让回"面板按人组织"，别再重复一遍。 */
+      var whoId = ctx.who();
+      var whoHit = whoId ? ctx.state.options.filter(function (one) { return one.id === whoId; })[0] : null;
+      var whoName = (whoHit && whoHit.name) || "";
+      var whoTitle = whoId ? (whoName || whoId) : "（未选）";
+      var whoSub = whoId && whoName ? whoId : "面板按人组织";
       var wide = function (el) { el.className += " bento-wide"; return el; };
       var grid = UI.h("div", { class: "grid bento" }, [
         wide(UI.card("此刻心情", mood.word || "（还没情绪）",
@@ -234,7 +246,7 @@
         UI.card("基调", "最近一直是" + (Number(base.valence) >= 0 ? "偏暖" : "偏冷") + "的", signCoord(base.valence)),
         UI.card("今日主动", String(today.total || 0), "共 " + (today.by_session || 0) + " 个会话 · " + (today.date || "")),
         UI.card("累计主动记录", String(data.log_total === undefined ? 0 : data.log_total), "确认发出去的条数"),
-        UI.card("对谁", data.who_name || "（未选）", data.who || "面板按人组织"),
+        UI.card("对谁", whoTitle, whoSub),
       ]);
 
       /* 仪表条是**加**不是**替**：上面的原文字一个字没删。

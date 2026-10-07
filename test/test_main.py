@@ -68,6 +68,50 @@ def _install_stubs(default_data_dir: Path) -> dict:
             self.system_prompt = ""
             self.prompt = ""
             self.contexts: list = []
+            # 真实 ProviderRequest 自带这个字段：每轮临时内容，不参与前缀缓存、
+            # 标了 temp 的也不落会话历史。main.py 的注入走这里而不是 system_prompt。
+            self.extra_user_content_parts: list = []
+
+    class TextPart:
+        """``astrbot.core.agent.message.TextPart`` 的最小替身。"""
+
+        def __init__(self, text: str = "") -> None:
+            self.text = text
+            self.is_temp = False
+
+        def mark_as_temp(self) -> "TextPart":
+            self.is_temp = True
+            return self
+
+    class _RecordingLogger:
+        """``astrbot.api.logger`` 的替身：接口同形，顺便把内容留下来可断言。"""
+
+        def __init__(self) -> None:
+            self.records: list[tuple[str, str]] = []
+
+        def _record(self, level: str, msg: object, *args: object) -> None:
+            try:
+                self.records.append((level, str(msg) % args if args else str(msg)))
+            except Exception:  # noqa: BLE001 - 格式化失败也别把测试带崩
+                self.records.append((level, str(msg)))
+
+        def debug(self, msg: object, *args: object) -> None:
+            self._record("debug", msg, *args)
+
+        def info(self, msg: object, *args: object) -> None:
+            self._record("info", msg, *args)
+
+        def warning(self, msg: object, *args: object) -> None:
+            self._record("warning", msg, *args)
+
+        def error(self, msg: object, *args: object) -> None:
+            self._record("error", msg, *args)
+
+        def exception(self, msg: object, *args: object) -> None:
+            self._record("exception", msg, *args)
+
+        def critical(self, msg: object, *args: object) -> None:
+            self._record("critical", msg, *args)
 
     class Context:
         pass
@@ -117,6 +161,9 @@ def _install_stubs(default_data_dir: Path) -> dict:
     provider = types.ModuleType("astrbot.api.provider")
     star_module = types.ModuleType("astrbot.api.star")
     components = types.ModuleType("astrbot.api.message_components")
+    core_module = types.ModuleType("astrbot.core")
+    agent_module = types.ModuleType("astrbot.core.agent")
+    agent_message = types.ModuleType("astrbot.core.agent.message")
 
     event.AstrMessageEvent = AstrMessageEvent
     event.MessageChain = MessageChain
@@ -128,10 +175,15 @@ def _install_stubs(default_data_dir: Path) -> dict:
     star_module.StarTools = StarTools
     star_module.register = register
     components.Plain = Plain
+    agent_message.TextPart = TextPart
+    agent_module.message = agent_message
+    core_module.agent = agent_module
     api.llm_tool = event.filter.llm_tool
     api.star = star_module
     api.message_components = components
+    api.logger = _RecordingLogger()
     astrbot.api = api
+    astrbot.core = core_module
 
     sys.modules.update(
         {
@@ -141,6 +193,9 @@ def _install_stubs(default_data_dir: Path) -> dict:
             "astrbot.api.provider": provider,
             "astrbot.api.star": star_module,
             "astrbot.api.message_components": components,
+            "astrbot.core": core_module,
+            "astrbot.core.agent": agent_module,
+            "astrbot.core.agent.message": agent_message,
         }
     )
     return registry
@@ -217,6 +272,11 @@ class _FakeCronManager:
     async def add_active_job(self, **kwargs):
         self.active.append(kwargs)
         return SimpleNamespace(job_id="new-active")
+
+
+def _parts_text(req) -> str:
+    """注入内容的实际落点（第 13 步）：``extra_user_content_parts`` 各 part 的 text。"""
+    return "".join(getattr(part, "text", "") for part in req.extra_user_content_parts)
 
 
 class PluginCase(TmpDirCase):
@@ -392,12 +452,25 @@ class ToolFlowTest(PluginCase):
         self.assertIn("没写成", written)
         self.assertIn("已关闭", read)
 
-    def test_data_dir_from_config_wins(self) -> None:
-        custom = self.root / "custom"
+    def test_data_dir_inside_host_dir_wins(self) -> None:
+        """配置的 data_dir 只有落在宿主插件数据目录**之内**才生效（第 13 步越界守卫）。"""
+        custom = self.root / "data" / "custom"
         custom.mkdir(parents=True, exist_ok=True)
         plugin = self.make_plugin({"data_dir": str(custom)})
         self.assertEqual(plugin.layout.base_dir, custom)
         self.assertTrue((custom / "日记.txt").parent.is_dir())
+
+    def test_data_dir_outside_host_dir_falls_back(self) -> None:
+        """越界（宿主目录之外的任何路径）→ 记 warning 并退回宿主目录，不照着写出去。"""
+        outside = self.root / "custom"
+        outside.mkdir(parents=True, exist_ok=True)
+        plugin = self.make_plugin({"data_dir": str(outside)})
+        self.assertEqual(plugin.layout.base_dir, self.root / "data")
+        records = sys.modules["astrbot.api"].logger.records
+        self.assertTrue(
+            any(level == "warning" and "data_dir" in message for level, message in records),
+            f"越界要留一条 warning：{records!r}",
+        )
 
     def test_data_dir_defaults_to_host_plugin_dir(self) -> None:
         target = self.root / "host"
@@ -471,7 +544,7 @@ class NotebookToolFlowTest(PluginCase):
                 sender_id="20002",
             )
             await plugin.inject_diary_hint(other, req_other)
-            return added, req_private.system_prompt, req_group.system_prompt + "|" + req_other.system_prompt
+            return added, _parts_text(req_private), _parts_text(req_group) + "|" + _parts_text(req_other)
 
         added, private_prompt, others_prompt = asyncio.run(scenario())
         self.assertIn("记好了", added)
@@ -498,7 +571,7 @@ class NotebookToolFlowTest(PluginCase):
             await plugin.inject_diary_hint(event, req_private)
             req_group = provider.ProviderRequest()
             await plugin.inject_diary_hint(group_event, req_group)
-            return req_private.system_prompt, req_group.system_prompt
+            return _parts_text(req_private), _parts_text(req_group)
 
         private_prompt, group_prompt = asyncio.run(scenario())
         self.assertIn("帮他带书", private_prompt)
@@ -522,7 +595,7 @@ class NotebookToolFlowTest(PluginCase):
             provider = sys.modules["astrbot.api.provider"]
             req = provider.ProviderRequest()
             await plugin.inject_diary_hint(event, req)
-            return added, req.system_prompt
+            return added, _parts_text(req)
 
         added, prompt = asyncio.run(scenario())
         self.assertIn("已关闭", added)
@@ -530,7 +603,8 @@ class NotebookToolFlowTest(PluginCase):
 
 
 class PromptInjectionTest(PluginCase):
-    def test_injection_appends_diary_line_to_system_prompt(self) -> None:
+    def test_injection_hint_goes_to_extra_parts_not_system_prompt(self) -> None:
+        """审核第二条：动态内容不拼 system_prompt（打掉前缀缓存），走临时内容块。"""
         async def scenario():
             plugin = self.make_plugin()
             # ⚠️ 必须钉死时钟：这句状态词**凌晨和白天不一样**（D8：00:00~05:59 是
@@ -541,47 +615,55 @@ class PromptInjectionTest(PluginCase):
             req = sys.modules["astrbot.api.provider"].ProviderRequest()
             req.system_prompt = "你是她。"
             await plugin.inject_diary_hint(event, req)
-            return req.system_prompt
+            return req
 
-        text = asyncio.run(scenario())
-        self.assertTrue(text.startswith("你是她。"))
+        req = asyncio.run(scenario())
+        self.assertEqual(req.system_prompt, "你是她。", "system_prompt 必须原样不动")
+        text = _parts_text(req)
         self.assertIn("【日记】", text)
         self.assertIn("今天还没写", text)
+        self.assertTrue(
+            req.extra_user_content_parts[0].is_temp, "提示块要标临时（不进会话历史）"
+        )
 
     def test_injection_respects_budget(self) -> None:
-        async def scenario() -> int:
+        async def scenario() -> str:
             plugin = self.make_plugin()
             event = _FakeEvent()
             req = sys.modules["astrbot.api.provider"].ProviderRequest()
             await plugin.inject_diary_hint(event, req)
-            return len(req.system_prompt.strip("\n"))
+            return _parts_text(req).strip("\n")
 
-        self.assertLessEqual(asyncio.run(scenario()), self.module.compose.PROMPT_BUDGET)
+        text = asyncio.run(scenario())
+        self.assertTrue(text, "应该真的注入了内容")
+        self.assertLessEqual(len(text), self.module.compose.PROMPT_BUDGET)
 
     def test_injection_silent_when_diary_and_state_disabled(self) -> None:
-        async def scenario() -> str:
+        async def scenario() -> tuple[str, str]:
             plugin = self.make_plugin({"subsystems": {"diary": False, "state": False}})
             event = _FakeEvent()
             req = sys.modules["astrbot.api.provider"].ProviderRequest()
             req.system_prompt = "你是她。"
             await plugin.inject_diary_hint(event, req)
-            return req.system_prompt
+            return req.system_prompt, _parts_text(req)
 
-        self.assertEqual(asyncio.run(scenario()), "你是她。")
+        system_prompt, injected = asyncio.run(scenario())
+        self.assertEqual(system_prompt, "你是她。", "不该碰 system_prompt")
+        self.assertEqual(injected, "", "日记和状态都关了就什么都不注")
 
     def test_injection_keeps_state_lines_when_diary_disabled(self) -> None:
         """子系统开关互相独立：日记关了，状态（熟悉度档位词）照注。"""
 
-        async def scenario() -> str:
+        async def scenario() -> tuple[str, str]:
             plugin = self.make_plugin({"subsystems": {"diary": False}})
             event = _FakeEvent()
             req = sys.modules["astrbot.api.provider"].ProviderRequest()
             req.system_prompt = "你是她。"
             await plugin.inject_diary_hint(event, req)
-            return req.system_prompt
+            return req.system_prompt, _parts_text(req)
 
-        text = asyncio.run(scenario())
-        self.assertTrue(text.startswith("你是她。"))
+        system_prompt, text = asyncio.run(scenario())
+        self.assertEqual(system_prompt, "你是她。", "不碰 system_prompt")
         self.assertIn("陌生", text, "刚 touch 过一次的人是陌生档")
         self.assertNotIn("【日记】", text)
 
@@ -736,7 +818,7 @@ class ScopeGateTest(PluginCase):
                 if plugin.layout.proactive.exists()
                 else "{}"
             )
-            return req.system_prompt, json.loads(raw or "{}")
+            return _parts_text(req), json.loads(raw or "{}")
 
         prompt, proactive = asyncio.run(scenario())
         self.assertEqual(prompt, "", "范围外不注入")
@@ -748,7 +830,7 @@ class ScopeGateTest(PluginCase):
             provider = sys.modules["astrbot.api.provider"]
             req = provider.ProviderRequest()
             await plugin.inject_diary_hint(_FakeEvent(), req)
-            return req.system_prompt
+            return _parts_text(req)
 
         self.assertTrue(asyncio.run(scenario()), "默认档只挡群聊，私聊照常工作")
 

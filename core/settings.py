@@ -13,17 +13,15 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ._log import logger
 from .outbound import DEFAULT_MARKER_PATTERN
 from .scope import DEFAULT_MODE, normalize_mode
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 """默认时区。禁止裸 ``datetime.now()``：云端多为 UTC，会整体错 8 小时。"""

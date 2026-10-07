@@ -201,12 +201,23 @@ class TestOutboundSettings(unittest.TestCase):
         self.assertTrue(config.outbound["strip_meme_marks"])
 
     def test_core_has_no_astrbot_import(self) -> None:
-        for name in ("outbound.py", "settings.py"):
-            source = (Path(__file__).resolve().parents[1] / "core" / name).read_text(encoding="utf-8")
-            for line in source.splitlines():
+        # 全 core/ 扫描（与 tools/webui_selfcheck.py、test_webui_data.py 同一口径），
+        # 唯一例外 core/_log.py（裁定见该文件 docstring），且例外要验形：
+        # astrbot import 行必须在 try: 之下缩进、文件里有 except 接住。
+        for target in (Path(__file__).resolve().parents[1] / "core").rglob("*.py"):
+            text = target.read_text(encoding="utf-8")
+            has_except = any(l.strip().startswith("except") for l in text.splitlines())
+            for line in text.splitlines():
                 stripped = line.strip()
-                if stripped.startswith(("import ", "from ")):
-                    self.assertNotIn("astrbot", stripped, f"core/ 里不许 import astrbot：{name}")
+                if not stripped.startswith(("import ", "from ")) or "astrbot" not in stripped:
+                    continue
+                allowed = (
+                    target.name == "_log.py"
+                    and stripped.startswith("from astrbot.api import logger")
+                    and line[:1] in (" ", "\t")
+                    and has_except
+                )
+                self.assertTrue(allowed, f"core/ 里不许 import astrbot：{target.name} → {stripped}")
 
 
 class TestOutboundHook(TmpDirCase):

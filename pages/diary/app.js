@@ -119,9 +119,27 @@
       if (item.out_of_scope !== undefined) hit.out_of_scope = !!item.out_of_scope;
     });
     state.options.sort(function (a, b) { return a.id < b.id ? -1 : 1; });
+    applyWhoDefault();
     /* 候选可能在任意一次 view.refresh() 里才冒出来（/status 只给 love_peers∪contacts，
        完整集要等 /notebook），所以每次合并后都要重绘下拉，否则用户一直看到"没有可选项"。 */
     renderWhoPicker();
+  }
+
+  /* 默认选中主人（真机反馈 2026-10-07）：面板按人组织，「没选」不是个有用的状态——
+     有主人可选时就默认落在主人身上（已手动选过人、或存的选择仍然有效，则不动）。
+     只在候选合并时跑一次，不进 renderWhoPicker：否则 setWho("") 会被立刻
+     重新默认成主人，用户永远选不回「未选」。
+     存储的 id 已经不在候选里（名单改过 / 数据清了）也一并落到默认，防止
+     <select> 又把第一个选项假充选中。 */
+  function applyWhoDefault() {
+    if (!state.options.length) return;
+    if (state.who && currentOption()) return;
+    var owner = state.options.filter(function (one) { return one.is_owner; })[0];
+    var next = owner ? owner.id : "";
+    if (next !== state.who) {
+      state.who = next;
+      storeWho(state.who);
+    }
   }
 
   /* 显示文本：优先后端给的 label（名字(数字)），老后端没有就退回 name || id。
@@ -156,6 +174,13 @@
         value: item.id, text: optionText(item), title: optionTitle(item),
         selected: item.id === state.who,
       }));
+    }
+    /* 没选人时必须放一个占位项：<select> 在没有任何 option 标 selected 时
+       会悄悄把第一个选项显示成"已选中"——主人置顶，看起来就像选好了主人，
+       实际 state.who 还是空串，总览的「对谁」卡片如实显示「未选」，
+       用户以为选过了，怎么等都不更新（真机反馈 2026-10-07）。 */
+    if (!state.who && state.options.length) {
+      picker.appendChild(UI.h("option", { value: "", text: "（未选）", selected: true }));
     }
     list.filter(function (x) { return !x.out_of_scope; }).forEach(addOpt);
     var out = list.filter(function (x) { return x.out_of_scope; });
