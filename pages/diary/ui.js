@@ -118,8 +118,8 @@
     return h("div", { class: "err-box", text: "读取失败：" + String(message || "未知错误") });
   }
 
-  function card(title, value, sub) {
-    return h("div", { class: "card" }, [
+  function card(title, value, sub, extraClass) {
+    return h("div", { class: "card" + (extraClass ? " " + extraClass : "") }, [
       h("h3", { text: title }),
       h("div", { class: "big", text: String(value === undefined || value === null ? "—" : value) }),
       sub ? h("div", { class: "sub", text: String(sub) }) : null,

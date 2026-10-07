@@ -1075,3 +1075,112 @@ html[data-theme] {
   .set-kv-row { flex-wrap: wrap; }
   .set-kv-key, .set-kv-val { flex: 1 1 100%; }
 }
+
+/* ===== 第 14 步 · 总览 / 日记 视觉精修 · 追加区 =====
+   只动观感不动信息：颜色全部从既有 token 派生，五套预设自动跟随；
+   沿用前面的惯例——color-mix() 前一行给字面量/纯 token 兜底（老 Chromium
+   丢弃整条声明时至少不裸奔）。没有新增 keyframes：粒子与常驻动画已明确否掉。 */
+
+/* ---- 舞台底色：一层极淡的顶部染色，纸面有纵深、不晃眼 ---- */
+.stage-body {
+  background: var(--bg);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 3%, var(--bg)) 0%, var(--bg) 260px);
+}
+
+/* ---- 卡片标题的小色签：给"一排卡"建立统一节奏 ---- */
+.card h3 { display: flex; align-items: center; gap: 6px; }
+.card h3::before {
+  content: "";
+  width: 3px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: .5;
+  flex: 0 0 auto;
+}
+
+/* ---- 「此刻心情」宽卡：她是主角，给一层从左上角晕开的主题色薄雾 ---- */
+.card-mood {
+  background: var(--card);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 9%, var(--card)) 0%, var(--card) 62%);
+}
+.card-mood .big { font-size: 24px; letter-spacing: .04em; }
+.card-mood .sub { color: var(--ink-soft); }
+
+/* ---- 仪表条：默认档给一点"液面"渐变，语义档保持纯色（颜色即含义） ---- */
+.bar {
+  background: var(--accent);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 55%, transparent), var(--accent));
+}
+.bar.is-ok {
+  background: var(--ok);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--ok) 55%, transparent), var(--ok));
+}
+.bar.is-warn {
+  background: var(--warn);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--warn) 55%, transparent), var(--warn));
+}
+.bar.is-err {
+  background: var(--err);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--err) 55%, transparent), var(--err));
+}
+
+/* ---- 立绘：相片框——一圈卡纸内衬 + 圆角照片；占位块不给内衬 ---- */
+.portrait { padding: 7px; }
+.portrait img { border-radius: calc(var(--radius) - 7px); }
+.portrait.is-empty { padding: 0; }
+.portrait-empty {
+  background: repeating-linear-gradient(-45deg, transparent 0 10px, var(--line-soft) 10px 11px);
+}
+
+/* ---- 日历：格子更舒展，今天=主题色晕染，角标从"实心警示"改成"软签" ---- */
+.cal-cell {
+  min-height: 38px;
+  font-size: 12.5px;
+  transition: background .14s ease, color .14s ease, box-shadow .14s ease, transform .14s ease;
+}
+.cal-cell:hover { background: var(--card); box-shadow: var(--shadow-soft); }
+.cal-cell.is-today {
+  color: var(--accent);
+  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 11%, var(--bg-soft));
+  border-color: var(--accent-line);
+}
+.cal-cell.is-pick { background: var(--accent-soft); }
+.cal-dot {
+  min-width: 14px; height: 14px; line-height: 12px;
+  background: var(--accent-soft); color: var(--accent);
+  border: 1px solid var(--accent-line);
+}
+.cal-wd { letter-spacing: .2em; }
+
+/* ---- 日记本：正文上"横格线"（跟 1.95em 行高一道，真纸的行距），
+     日期戳变成主题色的章 ---- */
+.np-p {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0, transparent calc(1.95em - 1px),
+    var(--line-soft) calc(1.95em - 1px), var(--line-soft) 1.95em
+  );
+}
+.np-datestamp { color: var(--accent); letter-spacing: .1em; }
+.np-mood { font-weight: 600; }
+
+/* ---- 空态与提示：从"一行裸字"变成一张虚线便签，看得见"这里是留给内容的" ---- */
+.panel .empty,
+.notebook .empty {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  padding: 26px 0;
+}
+.cal-note {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  padding: 7px 11px;
+  color: var(--fg-dim);
+}
+@media (max-width: 720px) {
+  .stage-body { background: var(--bg); }
+}

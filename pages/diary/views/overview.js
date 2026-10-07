@@ -240,7 +240,8 @@
       var wide = function (el) { el.className += " bento-wide"; return el; };
       var grid = UI.h("div", { class: "grid bento" }, [
         wide(UI.card("此刻心情", mood.word || "（还没情绪）",
-          signCoord(mood.valence) + (mood.updated_at ? " · " + UI.shortTime(mood.updated_at) : ""))),
+          signCoord(mood.valence) + (mood.updated_at ? " · " + UI.shortTime(mood.updated_at) : ""),
+          "card-mood")),
         wide(UI.card(rhythm.word || "（这个点没什么特别）", rhythm.late_night ? "深夜档" : "清醒",
           "作息" + (rhythm.late_night ? "（免打扰可能生效）" : ""))),
         UI.card("基调", "最近一直是" + (Number(base.valence) >= 0 ? "偏暖" : "偏冷") + "的", signCoord(base.valence)),
