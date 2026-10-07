@@ -17,6 +17,10 @@
     status: "status",
     diaryList: "diary/list",
     diaryContent: "diary/content",
+    diaryRewrite: "diary/rewrite",
+    diaryDelete: "diary/delete",
+    diaryTrash: "diary/trash",
+    diaryRestore: "diary/restore",
     notebook: "notebook",
     notebookComplete: "notebook/complete",
     notebookDelete: "notebook/delete",
@@ -33,7 +37,7 @@
 
   var TABS = [
     { key: "overview", title: "总览", note: "此刻状态" },
-    { key: "diary", title: "日记", note: "只读" },
+    { key: "diary", title: "日记", note: "改 · 删 · 回收站" },
     { key: "notebook", title: "小本本", note: "事实与约定" },
     { key: "affinity", title: "熟悉度", note: "榜与档位" },
     { key: "proactive", title: "曲线与主动", note: "情绪曲线 + 主动消息" },

@@ -936,6 +936,33 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
 .np-tools { margin-top: 10px; }
 .np-tail { margin-top: 10px; }
 
+/* ---- 改 / 删 / 回收站（第 15 步）----
+   正文与按钮之间留一道虚线：那是"这一条的操作区"，不是正文的延续。
+   按钮一律排在正文**下面**，别做成悬在标题右侧的图标——悬停才显形的东西在
+   受限 iframe 里不好点，也不适合"删"这种不可逆的动作。 */
+.np-actions {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line-soft);
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.np-confirm { font-size: 12px; color: var(--err); }
+.np-locked { font-size: 11px; color: var(--fg-faint); line-height: 1.6; }
+.np-editor { display: flex; flex-direction: column; gap: 8px; }
+.np-editor-text {
+  width: 100%;
+  min-height: 140px;
+  padding: 12px 14px;
+  font: 14px/1.95 "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  color: var(--fg);
+  background: var(--card-hi);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+.np-editor-text:focus { outline: none; border-color: var(--accent); }
+
 /* ===== 第 6.3 步 视觉打磨 · 追加区 =====
    手法参考 astrbot_plugin_daily_life（MIT，作者 四次元未来）的 design token /
    meter / bento 三样，**不抄它的体量，也不用它的粒子层**（用户明确否掉）。 */

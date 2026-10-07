@@ -1,11 +1,17 @@
-/* 日记（只读，第 6.2 步）：日历 + 单页日记本。
+/* 日记（第 6.2 步）：日历 + 单页日记本；第 15 步加了改 / 删 / 回收站。
    恋爱日记默认收起（决策 #18，保留）：列表只显示"恋爱日记 · N 篇 · 最近更新"。
 
    这屏换掉了两处老设计：
      - 手打 YYYY-MM-DD 的输入框 → 月视图日历（有日记的日子一眼看得出）
      - 一坨 <pre> → "一页纸"日记本（按空行分段 + 分页）
 
-   **向后兼容**：后端没给 `entries`（老版本）时退回 `text`，绝不让面板白屏。 */
+   **向后兼容**：后端没给 `entries`（老版本）时退回 `text`，没给 `seg_id` /
+   `editable` / `edit_window` 时**一律不给改删按钮**——宁可没有按钮，也不要一个
+   按下去必失败的按钮（老后端没这些接口）。
+
+   **改删靠 seg_id 定位，不是靠正文里有哪几个字**：`seg_id` 是这一段的内容地址，
+   文件被人手改过或上一条改删已经动过它，id 就对不上，后端会回"这段已经变了"。
+   前端因此在每次写操作后**整屏重拉**，绝不拿本地旧内容接着改。 */
 (function (global) {
   "use strict";
 
@@ -44,6 +50,9 @@
     var state = {
       book: "normal", tail: 20, collapsed: {},
       per: { normal: { month: "", date: "", page: 0 }, love: { month: "", date: "", page: 0 } },
+      /* 改删的临时态：editing = 正在编辑的 seg_id，confirming = 待确认删除的 seg_id。
+       都不是 id 就不生效，所以点别的条目不会互相干扰。 */
+      editing: "", confirming: "", trashOpen: false, window: null,
     };
 
     function slot(book) {
@@ -68,10 +77,41 @@
     /* 整屏重画 + **立刻补回正文**。
        render() 自己不管内容区（它把 contentSlot 置空），所以谁调 render() 谁就必须
        紧接着 loadContent——否则正文面板凭空消失。收敛到这一个入口，杜绝再漏。
-       凡改了 st.date / st.month / 可见性 的地方都走它。 */
+       凡改了 st.date / st.month / 可见性 的地方都走它。
+       回收站也一起补：它在正文区后面，render 清空 holder 时一起被清掉了。 */
     function renderAndLoad(book) {
       render();
-      loadContent(book || state.book);
+      /* book 传 null = "两本都收起来了，正文区不加载"（老行为：那时只 render）。
+         传空串 / 不传 = 照 state.book 来。别把 null 一起兜进去 —— 那样全收起时
+         又会凭空冒出一本来。 */
+      if (book !== null) loadContent(book || state.book);
+      loadTrash();
+    }
+
+    /* ---- 改 / 删的写操作（第 15 步）--------------------------------------------
+       一律：POST → toast 报成败 → 整屏重拉。
+       **绝不**拿本地内容接着改：seg_id 是内容地址，改完 id 就变了，留在本页的
+       seg_id 全是过期的，再点一次必然"这段已经变了"。重拉一次最省心。 */
+    async function mutate(key, body, okMsg) {
+      try {
+        var result = await ctx.apiPost(key, body);
+        if (result && result.ok) {
+          ctx.toast(okMsg);
+          state.editing = "";
+          state.confirming = "";
+          await renderAndLoad(state.book);
+          return true;
+        }
+        ctx.toast(String((result && result.error) || "操作失败"), true);
+        /* 失败也重拉：多半是"找不到这一段"，本地那份已经是过期的画面了 */
+        state.editing = "";
+        state.confirming = "";
+        await renderAndLoad(state.book);
+        return false;
+      } catch (error) {
+        ctx.toast(String((error && error.message) || error), true);
+        return false;
+      }
     }
 
     /* ---- 昵称映射：who 是原字符串，映射不到就原样显示（绝不显示空） ----
@@ -187,12 +227,23 @@
     }
 
     /* ---- 单页日记本 ---- */
-    function renderEntry(UI, entry) {
+    function renderEntry(UI, book, entry, window_) {
       var head = [];
       if (entry.time) head.push(UI.h("span", { class: "np-time", text: entry.time }));
       if (entry.mood) head.push(UI.h("span", { class: "np-mood", text: entry.mood }));
       var who = whoName(entry.who);
       if (who) head.push(UI.h("span", { class: "np-who", text: "和 " + who }));
+
+      /* 后端说能改才给按钮：``seg_id`` / ``editable`` 缺一个就当"不能改"，
+           老后端（没这两个键）于是自动退回纯只读，不会画出按了必失败的按钮。 */
+      var editable = !!(window_ && window_.can_edit) && !!entry.seg_id && entry.editable !== false;
+      var node = UI.h("article", { class: "np-entry" });
+      if (head.length) node.appendChild(UI.h("div", { class: "np-meta" }, head));
+
+      if (editable && state.editing === entry.seg_id) {
+        node.appendChild(editorFor(UI, book, entry));
+        return node;
+      }
 
       var body = UI.h("div", { class: "np-body" });
       /* 按空行分段：她写日记是分段的，糊成一段就没法读 */
@@ -202,14 +253,95 @@
         body.appendChild(UI.h("p", { class: "np-p", text: t }));
       });
       if (!body.children.length) body.appendChild(UI.h("p", { class: "np-p muted", text: "（这条是空的）" }));
-
-      return UI.h("article", { class: "np-entry" }, [
-        head.length ? UI.h("div", { class: "np-meta" }, head) : null,
-        body,
-      ]);
+      node.appendChild(body);
+      node.appendChild(entryActions(UI, book, entry, editable, window_));
+      return node;
     }
 
-    function renderNotebook(UI, book, data, st) {
+    /* 不可改的原因：给 title 用，也是"为什么没有按钮"的解释。 */
+    function lockedReason(window_) {
+      if (!window_ || !window_.can_edit) return "这版后端还没有改删接口";
+      if (window_.unlimited) return "";
+      return "只能改最近 " + (window_.within_days || 0) + " 天的；要在面板里改任意一段，"
+        + "去「设置」打开「面板不受可改天数限制」";
+    }
+
+    function entryActions(UI, book, entry, editable, window_) {
+      var row = UI.h("div", { class: "row-actions np-actions" });
+      if (!editable) {
+        var why = lockedReason(window_);
+        if (why) row.appendChild(UI.h("span", { class: "np-locked", text: "🔒 " + why }));
+        return row;
+      }
+      var confirming = state.confirming === entry.seg_id;
+      row.appendChild(UI.h("button", {
+        class: "btn btn-sm", type: "button", text: "编辑",
+        title: "改这一段的正文（开头那行日期与心情不动）",
+        onclick: function () { state.editing = entry.seg_id; state.confirming = ""; renderAndLoad(book); },
+      }));
+      if (confirming) {
+        /* 两步确认：删除可还原（进回收站），但仍不做一个键直接抹掉。 */
+        row.appendChild(UI.h("span", { class: "np-confirm", text: "删掉这一段？" }));
+        row.appendChild(UI.h("button", {
+          class: "btn btn-sm btn-danger", type: "button", text: "确认删除",
+          onclick: function () { doDelete(book, entry); },
+        }));
+        row.appendChild(UI.h("button", {
+          class: "btn btn-sm", type: "button", text: "算了",
+          onclick: function () { state.confirming = ""; renderAndLoad(book); },
+        }));
+      } else {
+        row.appendChild(UI.h("button", {
+          class: "btn btn-sm btn-danger", type: "button", text: "删除",
+          title: "删掉这一段（先进回收站，可还原）",
+          onclick: function () { state.confirming = entry.seg_id; state.editing = ""; renderAndLoad(book); },
+        }));
+      }
+      return row;
+    }
+
+    /* 真删：确认态那颗按钮走这里。endpoint 写 ENDPOINTS 的**键**，不写路径。 */
+    function doDelete(book, entry) {
+      return mutate("diaryDelete", { book: book, seg_id: entry.seg_id }, "已删除（进了回收站，可还原）");
+    }
+
+    /* ---- 行内编辑器 ---- */
+    function editorFor(UI, book, entry) {
+      var area = UI.h("textarea", {
+        class: "np-editor-text", rows: "6", spellcheck: "false",
+        placeholder: "正文（空行分段；开头那行日期与心情不动）",
+      });
+      area.value = String(entry.text || "");
+      var saving = false;
+      function save() {
+        if (saving) return;              /* 连点两下别发两次 */
+        var text = area.value;
+        if (!text.trim()) { ctx.toast("正文不能为空（想删掉请用删除）", true); return; }
+        saving = true;
+        mutate("diaryRewrite", { book: book, seg_id: entry.seg_id, text: text }, "已改好（原文已备份）");
+      }
+      var box = UI.h("div", { class: "np-editor" }, [
+        area,
+        UI.h("div", { class: "row-actions np-actions" }, [
+          UI.h("button", { class: "btn btn-sm", type: "button", text: "保存", onclick: save }),
+          UI.h("button", {
+            class: "btn btn-sm", type: "button", text: "取消",
+            onclick: function () { state.editing = ""; renderAndLoad(book); },
+          }),
+          UI.h("span", { class: "np-locked", text: "只改正文；开头那行是历史，不动。" }),
+        ]),
+      ]);
+      /* Ctrl/Cmd+Enter 直接保存——写长一点的东西时少松一次鼠标 */
+      area.addEventListener("keydown", function (event) {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+          if (event.preventDefault) event.preventDefault();
+          save();
+        }
+      });
+      return box;
+    }
+
+    function renderNotebook(UI, book, data, st, window_) {
       var wrap = UI.h("div", { class: "notebook" });
       var entries = Array.isArray(data.entries) ? data.entries : null;
       if (!entries) entries = null;
@@ -245,7 +377,7 @@
         UI.h("span", { class: "np-datestamp", text: "— " + stamp + " " + weekdayCn(stamp) + " —" }),
         UI.h("span", { class: "np-count", text: "本次 " + (data.count || entries.length) + " 条 / 全书 " + (data.total || 0) + " 条" }),
       ]));
-      pageEntries.forEach(function (entry) { wrap.appendChild(renderEntry(UI, entry)); });
+      pageEntries.forEach(function (entry) { wrap.appendChild(renderEntry(UI, book, entry, window_)); });
       wrap.appendChild(UI.h("div", { class: "np-foot", text: "· · ·" }));
 
       if (totalPages > 1) {
@@ -275,8 +407,11 @@
         var data = await ctx.apiGet("diaryContent", {
           book: book, date: st.date, tail: st.date ? 0 : state.tail,
         });
+        /* 窗口口径以本次拉到的为准（别缓存：设置里那个开关一改就变了） */
+        var window_ = data.edit_window || null;
+        state.window = window_;
         UI.clear(box);
-        box.appendChild(renderNotebook(UI, book, data, st));
+        box.appendChild(renderNotebook(UI, book, data, st, window_));
         var tools = UI.h("div", { class: "row-actions np-tools" });
         if (st.date) {
           tools.appendChild(UI.h("button", { class: "btn btn-sm", type: "button", text: "看最近 " + state.tail + " 条",
@@ -289,11 +424,77 @@
       }
     }
 
+    /* ---- 回收站（第 15 步）--------------------------------------------------
+       放在日记 tab 底部而不是另开一页：删完一条就得马上能看见它、马上能还原，
+       换 tab 去找等于把"可撤销"这件事藏起来。
+       只列面板删掉的那些**单段**记录（``seg-*.json``）；聊天侧 ``diary_edit`` 留的
+       整本快照不在这里——整本回写会连带抹掉这之后的写入，按钮上写"还原"就是骗人。 */
+    var trashSlot = null;
+    async function loadTrash() {
+      var UI = ctx.UI;
+      if (trashSlot) trashSlot.remove();
+      var box = UI.h("div", { class: "panel np-panel" }, [UI.h("div", { class: "muted", text: "读取回收站…" })]);
+      trashSlot = box;
+      holder.appendChild(box);
+      try {
+        var data = await ctx.apiGet("diaryTrash", {});
+        UI.clear(box);
+        var items = data.items || [];
+        var head = UI.h("div", { class: "row" }, [
+          UI.h("div", { class: "row-main" }, [
+            UI.h("div", { class: "row-title", text: "🗑 回收站 · " + (data.count || 0) + " 条" }),
+            UI.h("div", { class: "row-sub",
+              text: "面板删掉的日记先落在这里（上限 " + (data.cap || 0) + " 条，超了丢最旧的）；还原会插回它原本的时间位置" }),
+          ]),
+          UI.h("div", { class: "row-actions" }, [
+            UI.h("button", {
+              class: "btn btn-sm", type: "button", text: state.trashOpen ? "收起" : "展开",
+              onclick: function () { state.trashOpen = !state.trashOpen; renderAndLoad(state.book); },
+            }),
+          ]),
+        ]);
+        box.appendChild(head);
+        if (!items.length) {
+          box.appendChild(UI.empty("回收站是空的"));
+        } else if (state.trashOpen) {
+          items.forEach(function (item) {
+            box.appendChild(trashRow(UI, item));
+          });
+        }
+      } catch (error) {
+        UI.clear(box);
+        box.appendChild(UI.errorBox(String(error && error.message ? error.message : error)));
+      }
+    }
+
+    function trashRow(UI, item) {
+      var who = whoName(item.who);
+      var when = item.deleted_at ? " · 删于 " + UI.shortTime(item.deleted_at) : "";
+      return UI.h("div", { class: "row" }, [
+        UI.h("div", { class: "row-main" }, [
+          UI.h("div", { class: "row-title", text: (item.is_love ? "💗 " : "📖 ") + item.book_display + " · " + item.date + " " + item.time }),
+          UI.h("div", { class: "row-sub",
+            text: (item.mood ? "（" + item.mood + "）" : "") + (who ? " 和 " + who + " · " : "")
+              + (item.preview || "（空）") + when }),
+        ]),
+        UI.h("div", { class: "row-actions" }, [
+          UI.h("button", {
+            class: "btn btn-sm", type: "button", text: "还原",
+            title: "把这一段放回 " + item.book_display + " 里原本的时间位置",
+            onclick: function () {
+              mutate("diaryRestore", { id: item.id }, "已还原到 " + item.date);
+            },
+          }),
+        ]),
+      ]);
+    }
+
     /* ---- 整屏重画：书头 + 日历 + 正文 ---- */
     function render() {
       var UI = ctx.UI;
       UI.clear(holder);
       contentSlot = null;      /* 整屏重画后旧引用已失效 */
+      trashSlot = null;
       var books = state.books || [];
       books.forEach(function (info) {
         var st = slot(info.book);
@@ -315,7 +516,9 @@
                    **点哪张卡就加载哪本**（6.3 步改的：原来取"当前展开的第一本"，
                    点恋爱日记的展开却去读 normal，不顺）。都收起就不加载。 */
                 if (isOpen(info)) { state.book = info.book; renderAndLoad(info.book); }
-                else { var keep = firstOpen(); if (keep) { state.book = keep.book; renderAndLoad(keep.book); } else { render(); } }
+                /* 都收起就一本都不加载，但**回收站照常显示**——它是全局的，
+                   跟哪本展开没关系（走 renderAndLoad(null)，正文区自然空着）。 */
+                else { var keep = firstOpen(); renderAndLoad(keep ? keep.book : null); }
               } }),
             UI.h("button", { class: "btn btn-sm", type: "button", text: "看最近 " + state.tail + " 条",
               onclick: function () {
@@ -354,12 +557,13 @@
       state.books = data.books || [];
       render();
       await loadContent(state.book);
+      await loadTrash();
     }
 
     return {
       mount: function (target) { holder = target; },
       refresh: refresh,
-      unmount: function () { holder = null; },
+      unmount: function () { holder = null; trashSlot = null; },
     };
   };
 })(window);

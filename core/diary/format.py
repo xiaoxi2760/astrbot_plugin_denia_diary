@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
@@ -177,6 +178,39 @@ class EditResult:
     error: str = ""
 
 
+# ---- 段的身份（第 15 步）-------------------------------------------------------
+#
+# ``match``（正文里几个字）是**给 LLM 用**的模糊定位：她不知道偏移量，只能这么指。
+# 面板是另一回事——它在 DOM 上点了某一条，那一条必须被**精确**指到，不能"最近一段包含
+# 这几个字的"就算数（重名段会改错段，那比改不动更糟）。
+#
+# 所以段有**内容寻址的 id**：头行 + 正文一起哈希。选它而不是"行号 + 弱校验"的理由是
+# **它同时是并发护栏**：文件被人手改过、或者上一条改删已经动过这一段，id 就对不上，
+# 调用方据此报"这段已经变了，请刷新"，而不是照着旧内容盲改。
+
+
+SEG_ID_LEN = 12
+"""段 id 长度（十六进制字符数）。48 bit：十万段量级下碰撞概率已在 10⁻⁷ 以下，
+而段数上千的本子远远用不到这个量级——够用，且短到能直接塞进 URL 与日志。"""
+
+
+def seg_id(seg: Segment) -> str:
+    """段的内容地址。**同一段每次算出来都一样**（只依赖头行与正文，不依赖行号）。"""
+    raw = f"{seg.head_line}\n{seg.text}".encode("utf-8")
+    return hashlib.blake2b(raw, digest_size=SEG_ID_LEN // 2).hexdigest()[:SEG_ID_LEN]
+
+
+def find_by_id(segments: list[Segment], wanted: str) -> Segment | None:
+    """按 ``seg_id`` 精确找段；找不到返回 ``None``（**不**退化成"最近一段"）。"""
+    key = str(wanted or "").strip()
+    if not key:
+        return None
+    for seg in segments:
+        if seg_id(seg) == key:
+            return seg
+    return None
+
+
 def split_segments(text: str) -> list[Segment]:
     """整份文本 → 段列表（``end_idx`` 是下一段头行的前一行）。"""
     lines = str(text or "").split("\n")
@@ -224,6 +258,19 @@ def keep_trailing_newlines(joined: str, original: str) -> str:
     match = re.search(r"\n+$", str(original or ""))
     tail = match.group(0) if match else "\n\n"
     return re.sub(r"\n+$", "", str(joined or "")) + tail
+
+
+def already_happened(seg: Segment, now: datetime, tz: tzinfo) -> bool:
+    """段的时间已经过了（含 1 分钟时钟容差）。
+
+    **无论有没有豁免窗口都要过这一关**：面板能改任意一段，不等于能改一段"还没发生"的
+    日记——未来段是时钟没同步对，不是历史。与 ``within_window`` 前半段同一判据，
+    拆出来是为了让"不限时间"和"限 7 天"共用一条底线。
+    """
+    moment = seg.when(tz)
+    if moment is None:
+        return False
+    return now - moment >= timedelta(minutes=-1)
 
 
 def within_window(
@@ -280,18 +327,34 @@ def rewrite_segment(
     within_days: int,
     tz: tzinfo,
 ) -> EditResult:
-    """重写某一段的**正文**（头行原样保留）。"""
+    """重写某一段的**正文**（头行原样保留）。按 ``match`` 模糊定位。"""
     segments = split_segments(text)
     seg, error = find_segment(segments, match, now, within_days, tz)
     if seg is None:
         return EditResult(ok=False, error=error)
+    if not str(new_body or "").strip():
+        # 空正文在这里拦、用**工具自己的话**拦：``diary_edit`` 传的 action 关键字是
+        # ``delete``，提示她"用删除"等于要她猜参数名。面板那句是"用删除"（按钮叫删除）。
+        return EditResult(ok=False, error="新正文不能为空（想删掉这段就用 delete）")
+    return rewrite_segment_at(text, seg, new_body)
+
+
+def rewrite_segment_at(text: str, seg: Segment, new_body: str) -> EditResult:
+    """重写**已经定位到的那一段**的正文（面板路径；不再找段、也不看时间窗）。
+
+    头行原样保留——它是历史（``format`` 模块头的不变式 2），改只换正文。
+    """
     body = str(new_body or "").strip()
     if not body:
-        return EditResult(
-            ok=False, error="新正文不能为空（想删掉这段就用 delete）"
-        )
+        return EditResult(ok=False, error="新正文不能为空（想删掉这段就用删除）")
     lines = str(text or "").split("\n")
-    out = lines[: seg.head_idx + 1] + body.split("\n") + lines[seg.end_idx + 1 :]
+    tail = lines[seg.end_idx + 1 :]
+    block = body.split("\n")
+    # 段之间必须留一个空行（format 模块头的不变式 3）。正文整段替掉原范围时，原来那句
+    # 尾随空行会被一起吃掉 —— 不补回去，下一段的头行就贴着本段正文，文件看着粘连了。
+    if tail and not lines[seg.end_idx].strip():
+        block = block + [""]
+    out = lines[: seg.head_idx + 1] + block + tail
     return EditResult(
         ok=True,
         text=keep_trailing_newlines("\n".join(out), text),
@@ -303,11 +366,16 @@ def rewrite_segment(
 def delete_segment(
     text: str, *, match: str = "", now: datetime, within_days: int, tz: tzinfo
 ) -> EditResult:
-    """删掉某一段（含头行），并把它留下的连续空行收成一个。"""
+    """删掉某一段（含头行），并把它留下的连续空行收成一个。按 ``match`` 模糊定位。"""
     segments = split_segments(text)
     seg, error = find_segment(segments, match, now, within_days, tz)
     if seg is None:
         return EditResult(ok=False, error=error)
+    return delete_segment_at(text, seg)
+
+
+def delete_segment_at(text: str, seg: Segment) -> EditResult:
+    """删掉**已经定位到的那一段**（含头行），并把它留下的连续空行收成一个。"""
     lines = str(text or "").split("\n")
     start = seg.head_idx
     while start > 0 and not lines[start - 1].strip():
@@ -323,6 +391,59 @@ def delete_segment(
         seg=seg,
         before="\n".join(lines[seg.head_idx : seg.end_idx + 1]),
     )
+
+
+# ---- 回收站还原（第 15 步）----------------------------------------------------
+
+
+def segment_from_record(record: dict) -> Segment:
+    """从归档记录（``store`` 存的 JSON）还原成 ``Segment``，**行号占位**。
+
+    行下标在这里没意义——它只对"刚 split 出来的那份文本"有效。真正用得上的只有
+    头行四个字段与正文，还原时按它们重建头行（见 ``insert_segment``）。
+    """
+    return Segment(
+        head_line=make_head_line(
+            str(record.get("date") or ""),
+            str(record.get("time") or ""),
+            record.get("mood"),
+            record.get("who"),
+        ),
+        head_idx=-1,
+        end_idx=-1,
+        date=str(record.get("date") or ""),
+        time=str(record.get("time") or ""),
+        mood=str(record.get("mood") or ""),
+        who=str(record.get("who") or ""),
+        text=str(record.get("text") or "").strip(),
+    )
+
+
+def insert_segment(text: str, seg: Segment) -> str:
+    """把一段按**时间顺序**插回原文（回收站还原用）。
+
+    插在"第一个比它晚的段"之前；都不比它晚就追加到末尾。这样还原出来的本子仍按
+    日期时间排列，不会因为还原本是前天的就跑到最后一页去。
+    """
+    body_lines = seg.text.split("\n")
+    if not body_lines or not body_lines[0].strip():
+        body_lines = [line for line in body_lines if line.strip()]
+
+    existing = split_segments(text)
+    at = len(text.split("\n"))
+    for other in existing:
+        if other.stamp > seg.stamp:
+            at = other.head_idx
+            break
+
+    lines = str(text or "").split("\n")
+    block = [seg.head_line] + body_lines + [""]
+    if at < len(lines) and lines[at - 1].strip():
+        block = [""] + block  # 被手改过的文件：上一段没留空行，补一个，别把两段粘一起
+    joined = "\n".join(lines[:at] + block + lines[at:])
+    joined = re.sub(r"\n{3,}", "\n\n", joined)
+    return keep_trailing_newlines(joined, text)
+
 
 
 # ---- 渲染（读出来给她看的文本） ------------------------------------------------
@@ -363,6 +484,7 @@ __all__ = [
     "MOOD_MAX",
     "MOOD_WORDS",
     "NORMAL",
+    "SEG_ID_LEN",
     "TAG_MAX",
     "TIME_FMT",
     "EditResult",
@@ -371,7 +493,10 @@ __all__ = [
     "clock_of",
     "day_of",
     "delete_segment",
+    "delete_segment_at",
+    "find_by_id",
     "find_segment",
+    "insert_segment",
     "keep_trailing_newlines",
     "make_head_line",
     "normalize_body",
@@ -379,9 +504,12 @@ __all__ = [
     "parse_stamp",
     "render",
     "rewrite_segment",
+    "rewrite_segment_at",
     "sanitize_mood",
     "sanitize_tag",
     "scope_of",
+    "seg_id",
+    "segment_from_record",
     "split_segments",
     "within_window",
 ]

@@ -527,5 +527,362 @@ class ReadDayTest(TmpDirCase):
         self.assertFalse(diary2.read_day_for(private_session("10001"), date="2026-2-30")["ok"])
 
 
+# ------------------------------------------------- 第 15 步：按段改删 / 回收站
+
+
+TWO_SEG = (
+    "2026-10-01 09:00（开心）〔和甲〕\n第一条。\n\n"
+    "2026-10-03 21:30（难过）〔群·乙〕\n第二条。\n\n"
+    "2026-10-04 08:00（平静）\n第三条。\n\n"
+)
+
+
+class SegmentIdentityTest(unittest.TestCase):
+    """``seg_id`` 是面板改删的唯一定位方式：稳定 + 精确 + 会被内容变化顶掉。"""
+
+    def test_id_is_stable_for_the_same_content(self) -> None:
+        segs = fmt.split_segments(TWO_SEG)
+        self.assertEqual(fmt.seg_id(segs[1]), fmt.seg_id(segs[1]))
+        self.assertEqual(len(fmt.seg_id(segs[1])), fmt.SEG_ID_LEN)
+
+    def test_id_is_stable_across_a_reparse(self) -> None:
+        """同一段重新 parse 一次（等于文件没动）必须还是同一个 id。"""
+        first = fmt.split_segments(TWO_SEG)
+        second = fmt.split_segments(TWO_SEG)
+        self.assertEqual([fmt.seg_id(s) for s in first], [fmt.seg_id(s) for s in second])
+
+    def test_ids_differ_per_segment(self) -> None:
+        ids = [fmt.seg_id(s) for s in fmt.split_segments(TWO_SEG)]
+        self.assertEqual(len(set(ids)), len(ids))
+
+    def test_editing_the_body_changes_the_id(self) -> None:
+        """内容变了 id 就变——这是并发护栏，不是缺陷：文件被人手改过就该对不上。"""
+        seg = fmt.split_segments(TWO_SEG)[1]
+        result = fmt.rewrite_segment_at(TWO_SEG, seg, "改了。")
+        self.assertTrue(result.ok)
+        after = fmt.find_by_id(fmt.split_segments(result.text), fmt.seg_id(seg))
+        self.assertIsNone(after)
+
+    def test_find_by_id_is_exact_not_nearest(self) -> None:
+        """按 id 找**不许**退化成"最后一段"——那是 ``match`` 那条路径的行为。"""
+        segs = fmt.split_segments(TWO_SEG)
+        self.assertIs(fmt.find_by_id(segs, fmt.seg_id(segs[0])), segs[0])
+        self.assertIsNone(fmt.find_by_id(segs, "deadbeef00"))
+        self.assertIsNone(fmt.find_by_id(segs, ""))
+        self.assertIsNone(fmt.find_by_id(segs, None))
+
+
+class RewriteBySegmentTest(unittest.TestCase):
+    """按段改删：头行不动、段间空行还在、聊天侧那条路走同一份实现。"""
+
+    def test_rewrite_keeps_the_head_line(self) -> None:
+        seg = fmt.split_segments(TWO_SEG)[1]
+        result = fmt.rewrite_segment_at(TWO_SEG, seg, "新正文。")
+        self.assertTrue(result.ok)
+        self.assertIn("2026-10-03 21:30（难过）〔群·乙〕\n新正文。", result.text)
+        self.assertEqual(result.before, "第二条。")
+
+    def test_rewrite_keeps_one_blank_line_between_segments(self) -> None:
+        """回归 P1-b 那一类：正文整段替掉时**不能**把段间空行一起吃掉。"""
+        seg = fmt.split_segments(TWO_SEG)[1]
+        result = fmt.rewrite_segment_at(TWO_SEG, seg, "新正文。")
+        self.assertIn("新正文。\n\n2026-10-04", result.text)
+        self.assertEqual(len(fmt.split_segments(result.text)), 3)
+
+    def test_rewrite_preserves_paragraphs(self) -> None:
+        seg = fmt.split_segments(TWO_SEG)[1]
+        result = fmt.rewrite_segment_at(TWO_SEG, seg, "第一段。\n\n第二段。")
+        entries = fmt.parse_entries(result.text)
+        self.assertEqual(entries[1].text, "第一段。\n\n第二段。")
+
+    def test_rewrite_rejects_empty_body(self) -> None:
+        seg = fmt.split_segments(TWO_SEG)[1]
+        result = fmt.rewrite_segment_at(TWO_SEG, seg, "   ")
+        self.assertFalse(result.ok)
+        self.assertIn("删除", result.error)
+
+    def test_delete_by_segment_removes_head_and_body(self) -> None:
+        seg = fmt.split_segments(TWO_SEG)[1]
+        result = fmt.delete_segment_at(TWO_SEG, seg)
+        self.assertTrue(result.ok)
+        self.assertNotIn("第二条。", result.text)
+        self.assertNotIn("2026-10-03", result.text)
+        self.assertEqual(len(fmt.split_segments(result.text)), 2)
+
+    def test_match_path_shares_the_same_implementation(self) -> None:
+        """``match`` 那条路（聊天工具）必须保持原有行为，包括"空正文提示用 delete"。"""
+        result = fmt.rewrite_segment(
+            TWO_SEG, match="第一条", new_body="X", now=NOW, within_days=7, tz=TZ
+        )
+        self.assertTrue(result.ok)
+        self.assertIn("2026-10-01 09:00（开心）〔和甲〕\nX\n\n2026-10-03", result.text)
+        empty = fmt.rewrite_segment(
+            TWO_SEG, match="第一条", new_body=" ", now=NOW, within_days=7, tz=TZ
+        )
+        self.assertFalse(empty.ok)
+        self.assertIn("delete", empty.error)
+
+
+class InsertSegmentTest(unittest.TestCase):
+    """回收站还原：插回**原本的时间位置**，不是甩到末尾。"""
+
+    def _record(self, seg: fmt.Segment) -> dict:
+        return {"date": seg.date, "time": seg.time, "mood": seg.mood,
+                "who": seg.who, "text": seg.text}
+
+    def test_round_trip_is_byte_identical(self) -> None:
+        seg = fmt.split_segments(TWO_SEG)[1]
+        gone = fmt.delete_segment_at(TWO_SEG, seg)
+        back = fmt.insert_segment(gone.text, fmt.segment_from_record(self._record(seg)))
+        self.assertEqual(back, TWO_SEG)
+
+    def test_inserts_in_chronological_order(self) -> None:
+        """删的是第一条，还原后它必须回到最前面，而不是追加到末尾。"""
+        first = fmt.split_segments(TWO_SEG)[0]
+        gone = fmt.delete_segment_at(TWO_SEG, first)
+        back = fmt.insert_segment(gone.text, fmt.segment_from_record(self._record(first)))
+        self.assertEqual(fmt.parse_entries(back)[0].date, "2026-10-01")
+
+    def test_appends_when_it_is_the_newest(self) -> None:
+        last = fmt.split_segments(TWO_SEG)[2]
+        later = dict(self._record(last), date="2026-12-01", time="10:00")
+        out = fmt.insert_segment(TWO_SEG, fmt.segment_from_record(later))
+        self.assertEqual(fmt.parse_entries(out)[-1].date, "2026-12-01")
+
+    def test_rebuilds_the_head_line_verbatim(self) -> None:
+        """心情与标注要一起回来，不能还原成一个光秃秃的日期行。"""
+        seg = fmt.split_segments(TWO_SEG)[1]
+        gone = fmt.delete_segment_at(TWO_SEG, seg)
+        back = fmt.insert_segment(gone.text, fmt.segment_from_record(self._record(seg)))
+        self.assertIn("2026-10-03 21:30（难过）〔群·乙〕", back)
+
+
+class AlreadyHappenedTest(unittest.TestCase):
+    """未来段不管有没有豁免窗口都不可改——豁免的是"多久以前"，不是"没发生"。"""
+
+    def _seg(self, stamp: str) -> fmt.Segment:
+        date, clock = stamp.split(" ")
+        return fmt.segment_from_record({"date": date, "time": clock, "text": "x"})
+
+    def test_past_is_allowed(self) -> None:
+        self.assertTrue(fmt.already_happened(self._seg("2026-10-01 09:00"), NOW, TZ))
+
+    def test_future_is_rejected(self) -> None:
+        self.assertFalse(fmt.already_happened(self._seg("2026-10-20 09:00"), NOW, TZ))
+
+    def test_one_minute_clock_skew_is_tolerated(self) -> None:
+        near = NOW - timedelta(seconds=30)
+        seg = fmt.segment_from_record(
+            {"date": near.strftime("%Y-%m-%d"), "time": near.strftime("%H:%M"), "text": "x"}
+        )
+        self.assertTrue(fmt.already_happened(seg, NOW, TZ))
+
+    def test_unparsable_stamp_is_rejected(self) -> None:
+        self.assertFalse(fmt.already_happened(self._seg("2026-10-01 99:99"), NOW, TZ))
+
+
+class StoreApplyByIdTest(TmpDirCase):
+    """文件层：按 id 改删、窗口判定、回收站归档与还原。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.diary = make_diary(self.root)
+        self.store = self.diary.store
+        storage.atomic_write_text(self.diary.layout.diary, TWO_SEG)
+        self.seeded = self.store.read(fmt.NORMAL)
+        self.segs = fmt.split_segments(self.seeded)
+
+    def _by_id(self, index: int) -> str:
+        return fmt.seg_id(self.segs[index])
+
+    def _seed_extra(self, head_line: str, body: str) -> str:
+        """把一条**追加到文件末尾**并返回它的 id（id 必须从真实文件内容算）。"""
+        storage.atomic_write_text(self.diary.layout.diary, self.store.read(fmt.NORMAL) + f"{head_line}\n{body}\n\n")
+        return fmt.seg_id(fmt.split_segments(self.store.read(fmt.NORMAL))[-1])
+
+    # ---- 改 / 删 ----
+
+    def test_rewrite_by_id_hits_exactly_that_segment(self) -> None:
+        result = run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=self._by_id(1), action="rewrite",
+            new_body="改过的。", now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertTrue(result.ok)
+        texts = [e.text for e in fmt.parse_entries(self.store.read(fmt.NORMAL))]
+        self.assertEqual(texts, ["第一条。", "改过的。", "第三条。"])
+
+    def test_unknown_id_is_reported_not_guessed(self) -> None:
+        before = self.store.read(fmt.NORMAL)
+        result = run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id="0123456789ab", action="delete",
+            now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertFalse(result.ok)
+        self.assertIn("找不到", result.error)
+        self.assertEqual(self.store.read(fmt.NORMAL), before)  # 一个字节都没动
+
+    def test_bad_action_is_rejected(self) -> None:
+        result = run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=self._by_id(0), action="archive",
+            now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertFalse(result.ok)
+
+    def test_love_book_is_addressed_separately(self) -> None:
+        """两本是两个文件：删恋爱日记那本，普通本一个字节都不动。"""
+        love = make_diary(self.root, {"love_peers": ["10001"]})
+        run(love.write_async(private_session("10001"), text="恋爱那条。", now=NOW))
+        love_segs = fmt.split_segments(self.store.read(fmt.LOVE))
+        result = run(self.store.apply_by_id(
+            fmt.LOVE, seg_id=fmt.seg_id(love_segs[0]), action="delete",
+            now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertTrue(result.ok)
+        self.assertIn("第一条。", self.store.read(fmt.NORMAL))  # 普通本没被动过
+        self.assertEqual(fmt.split_segments(self.store.read(fmt.LOVE)), [])
+
+    # ---- 窗口 ----
+
+    def test_old_segment_is_rejected_inside_the_window(self) -> None:
+        old_id = self._seed_extra("2026-06-01 09:00", "很久以前。")
+        result = run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=old_id, action="delete",
+            now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertFalse(result.ok)
+        self.assertIn("太旧", result.error)
+
+    def test_window_error_points_at_the_switch(self) -> None:
+        """窗口拒了要告诉主人"去哪打开"——否则他只会以为坏了。"""
+        old_id = self._seed_extra("2026-06-01 09:00", "很久以前。")
+        result = run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=old_id, action="delete",
+            now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertIn("面板不受可改天数限制", result.error)
+
+    def test_zero_window_means_unlimited(self) -> None:
+        old_id = self._seed_extra("2026-06-01 09:00", "很久以前。")
+        result = run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=old_id, action="rewrite",
+            new_body="豁免改的。", now=NOW, within_days=0, tz=TZ,
+        ))
+        self.assertTrue(result.ok)
+        self.assertIn("豁免改的。", self.store.read(fmt.NORMAL))
+
+    def test_future_segment_is_rejected_even_when_unlimited(self) -> None:
+        future_id = self._seed_extra("2026-12-24 09:00", "还没发生。")
+        result = run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=future_id, action="rewrite",
+            new_body="x", now=NOW, within_days=0, tz=TZ,
+        ))
+        self.assertFalse(result.ok)
+        self.assertIn("还没到", result.error)
+
+    # ---- 回收站 ----
+
+    def test_delete_archives_exactly_one_segment(self) -> None:
+        run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=self._by_id(1), action="delete",
+            now=NOW, within_days=7, tz=TZ,
+        ))
+        items = self.store.trash_items()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], "第二条。")
+        self.assertEqual(items[0]["date"], "2026-10-03")
+        self.assertEqual(items[0]["book"], fmt.NORMAL)
+
+    def test_trash_uses_a_distinct_file_kind(self) -> None:
+        """回收站是**单段**记录（seg-*.json）；聊天侧那份整本快照是另一类文件。"""
+        run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=self._by_id(1), action="delete",
+            now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertTrue(list(self.diary.layout.trash_dir.glob("seg-*.json")))
+        self.assertTrue(list(self.diary.layout.trash_dir.glob("*-delete-normal.txt")))
+
+    def test_rewrite_does_not_touch_the_trash(self) -> None:
+        run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=self._by_id(1), action="rewrite",
+            new_body="改过的。", now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertEqual(self.store.trash_items(), [])
+
+    def test_trash_items_are_newest_first(self) -> None:
+        segs = fmt.split_segments(self.seeded)
+        run(self.store.apply_by_id(fmt.NORMAL, seg_id=fmt.seg_id(segs[0]), action="delete",
+                                    now=NOW, within_days=7, tz=TZ))
+        run(self.store.apply_by_id(fmt.NORMAL, seg_id=fmt.seg_id(segs[2]), action="delete",
+                                    now=NOW + timedelta(seconds=5), within_days=7, tz=TZ))
+        items = self.store.trash_items()
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["text"], "第三条。")   # 后删的在前面
+
+    def test_trash_skips_broken_files(self) -> None:
+        run(self.store.apply_by_id(fmt.NORMAL, seg_id=self._by_id(0), action="delete",
+                                    now=NOW, within_days=7, tz=TZ))
+        storage.atomic_write_text(self.diary.layout.trash_dir / "seg-broken.json", "{ 不是 json")
+        storage.atomic_write_text(self.diary.layout.trash_dir / "seg-empty.json", "{}")
+        self.assertEqual(len(self.store.trash_items()), 1)   # 坏的不让整页打不开
+
+    def test_restore_puts_the_segment_back_in_place(self) -> None:
+        run(self.store.apply_by_id(fmt.NORMAL, seg_id=self._by_id(0), action="delete",
+                                    now=NOW, within_days=7, tz=TZ))
+        trash_id = self.store.trash_items()[0]["id"]
+        ok, why = run(self.store.restore_segment(trash_id, now=NOW))
+        self.assertTrue(ok, why)
+        self.assertEqual(self.store.read(fmt.NORMAL), self.seeded)
+        self.assertEqual(self.store.trash_items(), [])   # 还原过就从回收站消失
+
+    def test_restore_is_idempotent(self) -> None:
+        run(self.store.apply_by_id(fmt.NORMAL, seg_id=self._by_id(1), action="delete",
+                                    now=NOW, within_days=7, tz=TZ))
+        trash_id = self.store.trash_items()[0]["id"]
+        run(self.store.restore_segment(trash_id, now=NOW))
+        # 归档文件被清掉了，这里手动放回去模拟"清归档失败"
+        import json
+        item = {"book": fmt.NORMAL, "date": "2026-10-03", "time": "21:30",
+                "mood": "难过", "who": "群·乙", "text": "第二条。"}
+        storage.atomic_write_text(
+            self.diary.layout.trash_dir / f"{trash_id}.json", json.dumps(item, ensure_ascii=False)
+        )
+        ok, why = run(self.store.restore_segment(trash_id, now=NOW))
+        self.assertFalse(ok)
+        self.assertIn("已经在本子里", why)
+        self.assertEqual(len(fmt.split_segments(self.store.read(fmt.NORMAL))), 3)  # 没插重
+
+    def test_restore_rejects_unknown_id(self) -> None:
+        ok, why = run(self.store.restore_segment("seg-不存在", now=NOW))
+        self.assertFalse(ok)
+        self.assertIn("找不到", why)
+
+    def test_restore_rejects_path_traversal(self) -> None:
+        """id 是前端回传的，必须钉死在回收站目录里。"""
+        for evil in ("../../secrets", "..\\..\\secrets", "seg-x/../../y", "notseginit"):
+            ok, _ = run(self.store.restore_segment(evil, now=NOW))
+            self.assertFalse(ok, evil)
+
+    def test_restore_skips_record_with_no_body(self) -> None:
+        import json
+        storage.atomic_write_text(
+            self.diary.layout.trash_dir / "seg-nobody-normal.json",
+            json.dumps({"book": fmt.NORMAL, "date": "2026-10-03", "time": "21:30", "text": ""}),
+        )
+        ok, why = run(self.store.restore_segment("seg-nobody-normal", now=NOW))
+        self.assertFalse(ok)
+        self.assertIn("没有正文", why)
+
+    def test_trash_is_capped(self) -> None:
+        from core.diary.store import TRASH_SEGMENT_CAP
+        for index in range(TRASH_SEGMENT_CAP + 3):
+            seg = fmt.split_segments(f"2026-10-04 08:{index % 60:02d}\n第 {index} 段。\n\n")
+            storage.atomic_write_text(self.diary.layout.diary, f"2026-10-04 08:{index % 60:02d}\n第 {index} 段。\n\n")
+            run(self.store.apply_by_id(
+                fmt.NORMAL, seg_id=fmt.seg_id(seg[0]), action="delete",
+                now=NOW + timedelta(seconds=index), within_days=7, tz=TZ,
+            ))
+        self.assertLessEqual(len(self.store.trash_items()), TRASH_SEGMENT_CAP)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

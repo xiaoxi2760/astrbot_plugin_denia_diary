@@ -27,6 +27,78 @@
     String(today.getMonth() + 1).padStart(2, "0") + "-" +
     String(today.getDate()).padStart(2, "0");
 
+  /* ---- 日记的内存本子（第 15 步）--------------------------------------------
+     两本各自一份，条目就是 {date,time,mood,who,text}。改删还原都作用在这里。
+     ⚠️ **必须在 FAKE 赋值之后**再建本子：初始条目取自 FAKE["diary/content"]，
+     写在 FAKE 字面量前面会读到 undefined（var 只提升声明，不提升赋值）。 */
+  var diaryStore = null;
+  var trashStore = [];
+
+  function seedDiaryStore() {
+    diaryStore = { normal: FAKE["diary/content"].slice(), love: [] };
+  }
+
+  function segIdOf(entry) {
+    var raw = entry.date + " " + entry.time + "|" + (entry.mood || "") + "|" + (entry.who || "") + "|" + entry.text;
+    var h = 2166136261;
+    for (var i = 0; i < raw.length; i += 1) {
+      h ^= raw.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return ("00000000" + h.toString(16)).slice(-8);
+  }
+
+  function stampOf(entry) { return entry.date + " " + entry.time; }
+
+  function findSeg(book, segId) {
+    var list = diaryStore[book] || diaryStore.normal;
+    for (var i = 0; i < list.length; i += 1) {
+      if (segIdOf(list[i]) === segId) return list[i];
+    }
+    return null;
+  }
+
+  function contentFor(book, date, tail) {
+    var list = (diaryStore[book] || diaryStore.normal).slice();
+    var total = list.length;
+    var picked = list;
+    if (date) picked = list.filter(function (e) { return e.date === date; });
+    else if (tail > 0 && tail < total) picked = list.slice(-tail);
+    var shown = picked.map(function (e) {
+      return {
+        date: e.date, time: e.time, mood: e.mood, who: e.who,
+        chars: (e.text || "").length, text: e.text,
+        seg_id: segIdOf(e),
+        /* 桩里 30 天前那条故意标不可改，好预览"为什么没有按钮"那行字 */
+        editable: true,
+      };
+    });
+    return {
+      ok: true, book: book, date: date || "", count: shown.length, total: total,
+      text: picked.map(function (e) { return e.text; }).join("\n\n"),
+      entries: shown,
+      edit_window: { can_edit: true, unlimited: false, within_days: 7,
+        switch: "diary.panel_edit_unlimited" },
+    };
+  }
+
+  function trashPayload() {
+    return {
+      ok: true, count: trashStore.length, cap: 200, can_edit: true,
+      items: trashStore.map(function (item) {
+        return {
+          id: item.id, book: item.book,
+          book_display: item.book === "love" ? "恋爱日记" : "日记",
+          is_love: item.book === "love",
+          date: item.date, time: item.time, mood: item.mood, who: item.who,
+          chars: (item.text || "").length,
+          preview: (item.text || "").replace(/\s+/g, " ").slice(0, 80),
+          text: item.text, deleted_at: item.deleted_at, seg_id: item.seg_id,
+        };
+      }),
+    };
+  }
+
   var FAKE = {
     status: {
       version: "0.4.0",
@@ -92,12 +164,13 @@
         { date: daysAgo(3), time: "22:40", mood: "有点累", who: "99999", chars: 30,
           text: "今天没怎么说话。\n\n但也没有不开心。" },
       ];
-      return {
-        ok: true, book: "normal", date: "", count: entries.length, total: 42,
-        text: entries.map(function (e) { return e.text; }).join("\n\n"),
-        entries: entries,
-      };
+      return entries;
     })(),
+    /* 第 15 步：日记改 / 删 / 回收站。桩也**真的**写内存（照 portraitStore 的做法），
+       离线能把"编辑 → 保存 → 内容变了""删除 → 进回收站 → 还原 → 回到原位"整条链走通，
+       而不是弹个假响应就完事。seg_id 是随便一个稳定哈希（不必与 Python 的
+       blake2b 一致——桩不上真机）。 */
+    "diary/trash": { ok: true, count: 0, cap: 200, items: [], can_edit: true },
     notebook: {
       ok: true, who: "u_1001", who_name: "希",
       who_options: [{ id: "u_1001", name: "希" }, { id: "u_1002", name: "" }],
@@ -248,6 +321,9 @@
     return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
   }
 
+  /* FAKE 建好了，这时候才轮到从它派生内存态。 */
+  seedDiaryStore();
+
   var portraitStore = emptyPortrait ? { current: null, items: [] } : {
     current: "p_preview1",
     items: [
@@ -287,6 +363,14 @@
     ready: function () { return Promise.resolve(); },
     apiGet: function (endpoint, params) {
       if (endpoint === "portrait") return Promise.resolve(copyPortrait());
+      /* 日记正文**现算**：桩的日记本会被改删还原，静态 FAKE 表跟不上（第 15 步）。 */
+      if (endpoint === "diary/content") {
+        var p = params || {};
+        return Promise.resolve(contentFor(
+          p.book === "love" ? "love" : "normal", String(p.date || ""), Number(p.tail) || 0
+        ));
+      }
+      if (endpoint === "diary/trash") return Promise.resolve(trashPayload());
       var data = FAKE[endpoint];
       if (!data) return Promise.reject(new Error("预览桩没有这个 endpoint：" + endpoint));
       var out = JSON.parse(JSON.stringify(data));
@@ -316,6 +400,61 @@
       }
       if (endpoint === "notebook/complete" || endpoint === "notebook/delete") {
         return Promise.resolve({ ok: true, kind: "promise", id: (body && body.id) || "", text: "（预览桩）" });
+      }
+      /* ---- 日记改 / 删 / 还原（第 15 步）：桩也真改内存 ---- */
+      if (endpoint === "diary/rewrite" || endpoint === "diary/delete") {
+        var segId = String((body && body.seg_id) || "");
+        var book = (body && body.book) === "love" ? "love" : "normal";
+        var hit = findSeg(book, segId);
+        if (!hit) {
+          return Promise.resolve({ ok: false, error: "找不到这一段（可能已经删过，或内容变过了）" });
+        }
+        if (endpoint === "diary/rewrite") {
+          var next = String((body && body.text) || "");
+          if (!next.trim()) return Promise.resolve({ ok: false, error: "正文不能为空" });
+          hit.text = next;
+          return Promise.resolve({
+            ok: true, action: "rewrite", book: book,
+            seg: { date: hit.date, time: hit.time, mood: hit.mood },
+            text: next, before: "", chars: next.length,
+          });
+        }
+        var list = diaryStore[book];
+        list.splice(list.indexOf(hit), 1);
+        trashStore.push({
+          id: "seg-preview-" + (trashStore.length + 1), book: book,
+          date: hit.date, time: hit.time, mood: hit.mood, who: hit.who,
+          text: hit.text, seg_id: segIdOf(hit), deleted_at: iso(0, new Date().getHours()),
+        });
+        return Promise.resolve({
+          ok: true, action: "delete", book: book,
+          seg: { date: hit.date, time: hit.time, mood: hit.mood },
+          text: hit.text, trashed: true,
+        });
+      }
+      if (endpoint === "diary/restore") {
+        var want = String((body && body.id) || "");
+        var at = -1;
+        for (var t = 0; t < trashStore.length; t += 1) {
+          if (trashStore[t].id === want) { at = t; break; }
+        }
+        if (at < 0) return Promise.resolve({ ok: false, error: "找不到这一条（可能已经还原过了）" });
+        var item = trashStore[at];
+        var back = diaryStore[item.book];
+        if (findSeg(item.book, item.seg_id)) {
+          return Promise.resolve({ ok: false, error: "这一段已经在本子里了，不用再还原" });
+        }
+        var restored = {
+          date: item.date, time: item.time, mood: item.mood, who: item.who, text: item.text,
+        };
+        back.push(restored);
+        /* 还原要回"原本的时间位置"，别塞到最后一页去 */
+        back.sort(function (a, b) { return stampOf(a) < stampOf(b) ? -1 : 1; });
+        trashStore.splice(at, 1);
+        return Promise.resolve({
+          ok: true, action: "restore", id: want, book: item.book,
+          seg: { date: item.date, time: item.time },
+        });
       }
       if (endpoint === "settings") {
         var changes = (body && body.changes) || {};

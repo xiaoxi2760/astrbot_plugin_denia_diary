@@ -366,7 +366,9 @@ class TestPortraitHandlers(TmpDirCase):
             ["portrait", "portrait/upload", "portrait/select", "portrait/delete"],
         )
         self.assertEqual([spec[2] for spec in portrait_routes], [("GET",), ("POST",), ("POST",), ("POST",)])
-        self.assertEqual(len(routes.ROUTES), 16, "12 条既有 + 立绘 4 条")
+        self.assertEqual(
+            len(routes.ROUTES), 20, "12 条既有 + 立绘 4 条 + 日记改删/回收站 4 条"
+        )
 
 
 async def _async_value(value):

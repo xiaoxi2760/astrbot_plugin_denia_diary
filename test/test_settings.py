@@ -305,5 +305,58 @@ class DiaryCardChoiceTest(unittest.TestCase):
         self.assertEqual(diary["card_style"], "paper")
 
 
+class PanelEditUnlimitedTest(unittest.TestCase):
+    """``diary.panel_edit_unlimited``：默认**关**（面板与聊天同口径），非法值回落 + warning。
+
+    默认值选 False 不是保守——是"装完的人不会莫名其妙发现自己的老日记在面板里能改"。
+    打开它只放宽**面板**，``diary_edit`` 工具照旧守 ``edit_within_days``。
+    """
+
+    def test_defaults_to_off(self) -> None:
+        result = settings_mod.load_settings(None)
+        self.assertFalse(result.diary["panel_edit_unlimited"])
+        self.assertEqual(result.warnings, ())
+        self.assertFalse(settings_mod.default_config()["diary"]["panel_edit_unlimited"])
+
+    def test_true_is_kept(self) -> None:
+        result = settings_mod.load_settings({"diary": {"panel_edit_unlimited": True}})
+        self.assertTrue(result.diary["panel_edit_unlimited"])
+        self.assertEqual(result.warnings, ())
+
+    def test_false_is_kept(self) -> None:
+        result = settings_mod.load_settings({"diary": {"panel_edit_unlimited": False}})
+        self.assertFalse(result.diary["panel_edit_unlimited"])
+        self.assertEqual(result.warnings, ())
+
+    def test_non_bool_falls_back_with_warning(self) -> None:
+        """字符串 "true" 不算数——面板传上来的就该是 JSON 布尔。"""
+        result = settings_mod.load_settings({"diary": {"panel_edit_unlimited": "yes"}})
+        self.assertFalse(result.diary["panel_edit_unlimited"])
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("diary.panel_edit_unlimited", result.warnings[0])
+
+    def test_zero_and_one_are_accepted_as_bool(self) -> None:
+        """``_as_bool`` 一贯认 0/1（subsystems / outbound 都用它，不在这里另立一套）。"""
+        on = settings_mod.load_settings({"diary": {"panel_edit_unlimited": 1}})
+        off = settings_mod.load_settings({"diary": {"panel_edit_unlimited": 0}})
+        self.assertTrue(on.diary["panel_edit_unlimited"])
+        self.assertFalse(off.diary["panel_edit_unlimited"])
+        self.assertEqual(on.warnings, ())
+        self.assertEqual(off.warnings, ())
+
+    def test_other_numbers_are_rejected(self) -> None:
+        result = settings_mod.load_settings({"diary": {"panel_edit_unlimited": 2}})
+        self.assertFalse(result.diary["panel_edit_unlimited"])
+        self.assertEqual(len(result.warnings), 1)
+
+    def test_it_lives_beside_edit_within_days(self) -> None:
+        """两个键同属 diary 组：豁免的是"窗口"，窗口本身还在。"""
+        result = settings_mod.load_settings(
+            {"diary": {"edit_within_days": 30, "panel_edit_unlimited": True}}
+        )
+        self.assertEqual(result.diary["edit_within_days"], 30)
+        self.assertTrue(result.diary["panel_edit_unlimited"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -17,6 +17,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 _HERE = Path(__file__).resolve().parent
 for _path in (_HERE, _HERE.parent):
@@ -620,11 +621,230 @@ class TestProactivePayload(WebuiDataCase):
         self.assertEqual(payload["sessions"], [])
 
 
+class TestDiaryEditAndTrash(WebuiDataCase):
+    """第 15 步：面板改 / 删 / 回收站 / 还原，以及「面板豁免窗」那个开关。"""
+
+    NOW = datetime(2026, 10, 5, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    def seed(self) -> None:
+        storage.atomic_write_text(
+            self.layout.diary,
+            "2026-06-01 09:00（开心）〔u_1001〕\n很旧的一条。\n\n"
+            "2026-10-04 20:00（难过）\n新的一条。\n\n",
+        )
+
+    def ids(self, settings=None):
+        payload = webui_data.diary_content_payload(
+            diary_store=self.diary_store, book=fmt.NORMAL,
+            settings=settings or self.settings, now=self.NOW,
+        )
+        return payload, [entry["seg_id"] for entry in payload["entries"]]
+
+    def rewrite(self, seg_id, text, settings=None, book=fmt.NORMAL):
+        return self.run_async(webui_data.rewrite_diary_entry(
+            diary_store=self.diary_store, settings=settings or self.settings,
+            book=book, seg_id=seg_id, text=text, now=self.NOW,
+        ))
+
+    def delete(self, seg_id, settings=None, book=fmt.NORMAL):
+        return self.run_async(webui_data.delete_diary_entry(
+            diary_store=self.diary_store, settings=settings or self.settings,
+            book=book, seg_id=seg_id, now=self.NOW,
+        ))
+
+    def unlimited(self):
+        return make_settings(diary={"edit_within_days": 7, "panel_edit_unlimited": True})
+
+    # ---- 读侧：seg_id / editable / edit_window ----
+
+    def test_content_carries_seg_id_and_editable(self) -> None:
+        self.seed()
+        payload, ids = self.ids()
+        self.assertEqual(payload["edit_window"], {
+            "can_edit": True, "unlimited": False, "within_days": 7,
+            "switch": "diary.panel_edit_unlimited",
+        })
+        self.assertTrue(all(ids))
+        self.assertEqual(payload["entries"][0]["editable"], False)  # 六月那条太旧
+        self.assertEqual(payload["entries"][1]["editable"], True)
+
+    def test_seg_id_is_stable_across_reads(self) -> None:
+        self.seed()
+        self.assertEqual(self.ids()[1], self.ids()[1])
+
+    def test_future_entry_is_not_editable(self) -> None:
+        storage.atomic_write_text(self.layout.diary, "2026-12-24 09:00\n还没发生。\n\n")
+        payload, _ = self.ids()
+        self.assertFalse(payload["entries"][0]["editable"])
+
+    def test_future_entry_is_not_editable_even_when_unlimited(self) -> None:
+        storage.atomic_write_text(self.layout.diary, "2026-12-24 09:00\n还没发生。\n\n")
+        payload, _ = self.ids(settings=self.unlimited())
+        self.assertFalse(payload["entries"][0]["editable"], "豁免的是多久以前，不是没发生")
+
+    def test_unlimited_switch_opens_old_entries(self) -> None:
+        self.seed()
+        payload, ids = self.ids(settings=self.unlimited())
+        self.assertTrue(payload["edit_window"]["unlimited"])
+        self.assertEqual(payload["edit_window"]["within_days"], 0)
+        self.assertTrue(payload["entries"][0]["editable"])
+
+    def test_without_settings_nothing_is_editable(self) -> None:
+        """拿不到 settings 就不给按钮——前端据此画不出可按的按钮。"""
+        self.seed()
+        payload = webui_data.diary_content_payload(
+            diary_store=self.diary_store, book=fmt.NORMAL, now=self.NOW
+        )
+        self.assertFalse(payload["edit_window"]["can_edit"])
+        self.assertTrue(all(not e["editable"] for e in payload["entries"]))
+        self.assertTrue(all(e["seg_id"] for e in payload["entries"]))  # id 照给
+
+    # ---- 写侧 ----
+
+    def test_rewrite_changes_only_that_entry(self) -> None:
+        self.seed()
+        _, (old_id, new_id) = self.ids()
+        result = self.rewrite(new_id, "改过的正文。")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["text"], "改过的正文。")     # 回的是**新**正文
+        self.assertEqual(result["before"], "新的一条。")     # 原文单列一份
+        texts = [e.text for e in fmt.parse_entries(self.diary_store.read(fmt.NORMAL))]
+        self.assertEqual(texts, ["很旧的一条。", "改过的正文。"])
+
+    def test_rewrite_respects_max_chars(self) -> None:
+        """面板不能绕过 ``diary.max_chars``——否则能写进一条聊天侧永远写不出的正文。"""
+        self.seed()
+        _, (_, new_id) = self.ids()
+        tight = make_settings(diary={"max_chars": 200})
+        result = self.rewrite(new_id, "长" * 5000, settings=tight)
+        self.assertEqual(result["chars"], 200)
+
+    def test_rewrite_rejects_blank_body(self) -> None:
+        self.seed()
+        _, (_, new_id) = self.ids()
+        result = self.rewrite(new_id, "   \n  ")
+        self.assertFalse(result["ok"])
+        self.assertIn("不能为空", result["error"])
+
+    def test_rewrite_needs_a_seg_id(self) -> None:
+        self.assertIn("seg_id", self.rewrite("", "x")["error"])
+
+    def test_unknown_seg_id_is_a_business_error_not_an_exception(self) -> None:
+        self.seed()
+        before = self.diary_store.read(fmt.NORMAL)
+        result = self.rewrite("0123456789ab", "x")
+        self.assertFalse(result["ok"])
+        self.assertIn("找不到", result["error"])
+        self.assertEqual(self.diary_store.read(fmt.NORMAL), before)
+
+    def test_old_entry_is_rejected_with_a_pointer_to_the_switch(self) -> None:
+        self.seed()
+        _, (old_id, _) = self.ids()
+        result = self.rewrite(old_id, "x")
+        self.assertFalse(result["ok"])
+        self.assertIn("太旧", result["error"])
+        self.assertIn("面板不受可改天数限制", result["error"])
+
+    def test_unlimited_switch_allows_the_old_entry(self) -> None:
+        self.seed()
+        settings = self.unlimited()
+        _, (old_id, _) = self.ids(settings=settings)
+        self.assertTrue(self.rewrite(old_id, "旧的那条改了。", settings=settings)["ok"])
+
+    def test_bad_book_falls_back_to_normal(self) -> None:
+        self.seed()
+        _, (_, new_id) = self.ids()
+        self.assertTrue(self.rewrite(new_id, "x", book="不存在的书")["ok"])
+        self.assertEqual(fmt.parse_entries(self.diary_store.read(fmt.NORMAL))[1].text, "x")
+
+    # ---- 回收站 ----
+
+    def test_trash_is_empty_to_start(self) -> None:
+        self.seed()
+        payload = webui_data.diary_trash_payload(diary_store=self.diary_store)
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(payload["cap"], 200)
+
+    def test_delete_archives_and_reports_it(self) -> None:
+        self.seed()
+        _, (_, new_id) = self.ids()
+        result = self.delete(new_id)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["trashed"])
+        payload = webui_data.diary_trash_payload(diary_store=self.diary_store)
+        self.assertEqual(payload["count"], 1)
+        item = payload["items"][0]
+        self.assertEqual(item["text"], "新的一条。")
+        self.assertEqual(item["date"], "2026-10-04")
+        self.assertEqual(item["book_display"], "日记")
+        self.assertFalse(item["is_love"])
+        self.assertTrue(item["preview"])
+
+    def test_rewrite_leaves_the_trash_alone(self) -> None:
+        self.seed()
+        _, (_, new_id) = self.ids()
+        self.rewrite(new_id, "改过的。")
+        self.assertEqual(webui_data.diary_trash_payload(diary_store=self.diary_store)["count"], 0)
+
+    def test_restore_brings_the_entry_back(self) -> None:
+        self.seed()
+        _, (_, new_id) = self.ids()
+        self.delete(new_id)
+        trash_id = webui_data.diary_trash_payload(diary_store=self.diary_store)["items"][0]["id"]
+        result = self.run_async(webui_data.restore_diary_entry(
+            diary_store=self.diary_store, settings=self.settings, trash_id=trash_id, now=self.NOW,
+        ))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["seg"], {"date": "2026-10-04", "time": "20:00"})
+        texts = [e.text for e in fmt.parse_entries(self.diary_store.read(fmt.NORMAL))]
+        self.assertEqual(texts, ["很旧的一条。", "新的一条。"])
+        self.assertEqual(webui_data.diary_trash_payload(diary_store=self.diary_store)["count"], 0)
+
+    def test_restore_of_the_newest_goes_back_to_the_end(self) -> None:
+        """还原要按时间插回去，别甩到最后一页——那是主人读不顺的地方。"""
+        storage.atomic_write_text(
+            self.layout.diary,
+            "2026-09-01 09:00\n九月那条。\n\n2026-10-04 20:00\n十月那条。\n\n",
+        )
+        _, ids = self.ids()
+        self.delete(ids[1])                       # 删最后一条
+        trash_id = webui_data.diary_trash_payload(diary_store=self.diary_store)["items"][0]["id"]
+        self.run_async(webui_data.restore_diary_entry(
+            diary_store=self.diary_store, settings=self.settings, trash_id=trash_id, now=self.NOW,
+        ))
+        dates = [e.date for e in fmt.parse_entries(self.diary_store.read(fmt.NORMAL))]
+        self.assertEqual(dates, ["2026-09-01", "2026-10-04"])
+
+    def test_restore_needs_an_id(self) -> None:
+        self.assertIn("id", self.run_async(webui_data.restore_diary_entry(
+            diary_store=self.diary_store, settings=self.settings, trash_id="", now=self.NOW,
+        ))["error"])
+
+    def test_restore_unknown_id_is_a_business_error(self) -> None:
+        result = self.run_async(webui_data.restore_diary_entry(
+            diary_store=self.diary_store, settings=self.settings, trash_id="seg-没有这条", now=self.NOW,
+        ))
+        self.assertFalse(result["ok"])
+        self.assertIn("找不到", result["error"])
+
+    def test_love_book_entry_keeps_its_own_identity(self) -> None:
+        storage.atomic_write_text(self.layout.love_diary, "2026-10-04 21:00（想念）\n只对他说。\n\n")
+        payload = webui_data.diary_content_payload(
+            diary_store=self.diary_store, book=fmt.LOVE, settings=self.settings, now=self.NOW
+        )
+        entry = payload["entries"][0]
+        self.assertTrue(entry["editable"])
+        self.assertTrue(self.rewrite(entry["seg_id"], "改了。", book=fmt.LOVE)["ok"])
+        self.assertIn("改了。", self.diary_store.read(fmt.LOVE))
+
+
 class TestFrozenContract(WebuiDataCase):
     def test_function_names(self) -> None:
         for name in ("status_payload", "diary_list_payload", "diary_content_payload",
                      "notebook_payload", "affinity_payload", "history_payload", "proactive_payload",
-                     "complete_note", "forget_note"):
+                     "complete_note", "forget_note", "rewrite_diary_entry",
+                     "delete_diary_entry", "diary_trash_payload", "restore_diary_entry"):
             self.assertTrue(callable(getattr(webui_data, name, None)), f"缺函数：{name}")
 
     def test_payload_params_are_keyword_only(self) -> None:

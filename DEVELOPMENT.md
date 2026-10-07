@@ -87,9 +87,11 @@ astrbot_plugin_denia_diary/
 
 | 层 | 文件 | 只做这些 |
 | :--- | :--- | :--- |
-| 格式契约 | `core/diary/format.py` | 头行正则、分段、**改/删的纯文本手术**、渲染。无文件 IO、无配置、不认识平台 |
-| 文件层 | `core/diary/store.py` | 两本的位置、追加、局部替换、改删前备份、每文件一把 `asyncio.Lock` |
+| 格式契约 | `core/diary/format.py` | 头行正则、分段、**改/删/还原的纯文本手术**、`seg_id`、渲染。无文件 IO、无配置、不认识平台 |
+| 文件层 | `core/diary/store.py` | 两本的位置、追加、局部替换、改删前备份、**回收站归档与还原**、每文件一把 `asyncio.Lock` |
 | 语义入口 | `core/diary/api.py` | `read_for` / `write_for` / `edit_for` / `prompt_line` / `event_hint`；**`enabled` 与可见性判定都在这里** |
+
+第 15 步新增的一层在 store 上：`apply_by_id`（按 `seg_id` 改删，面板用）、`archive_segment` / `trash_items` / `trash_record` / `restore_segment`（回收站）。`match` 那条老路（`rewrite_segment` / `delete_segment`）保留，它现在**委托**给按段的实现（`rewrite_segment_at` / `delete_segment_at`）——两条路共用一份纯文本手术，免得以后改一边忘了另一边。
 
 已落地的约定（原包 `qq-bridge-diary` 实测过的坑，见该包分析报告的 P 编号）：
 
@@ -98,7 +100,7 @@ astrbot_plugin_denia_diary/
 3. **`enabled=false` 时读也读不到**（原包只挡了写，P2-b）。
 4. **群聊标注带显式 `群·` 前缀**：读取侧不再靠"以『和』开头"猜（旧条目仍兼容旧启发式）。
 5. **头行是历史不可改**，改只换正文；改/删**先备份原文**到 `diary-trash/`。
-6. **未来日期与"太旧"口径一致**：`list` 说不可改的，`edit` 也不会改（P3-b）。
+6. **未来日期与"太旧"口径一致**：`list` 说不可改的，`edit` 也不会改（P3-b）；面板的豁免开关**只豁免"太旧"，不豁免"未来"**。
 7. **凌晨那句措辞不怪人**：`prompt_line` 的状态词在 `00:00~05:59` 说「新的一天刚开头，还没写」，其余时间才说「今天还没写」——凌晨日历已经翻页，但她的一天还没开始（默认作息表第一段就是 `06:00|刚醒`）。
    ⚠️ **没有引入"逻辑日"**：`day_of` / 条目归属 / `slots_today` / 配额 / 熟悉度衰减一律照旧按日历日算，`EARLY_HOURS_END` 只决定那句话怎么写（有测试钉住"凌晨写的日记仍归当天"）。
 
@@ -220,7 +222,7 @@ Dashboard → 插件管理 → `astrbot_plugin_denia_diary` → 插件页。**�
 | tab | 数据 | 读写 |
 | :--- | :--- | :--- |
 | 总览（她此刻） | 当下情绪 + 基调 + 作息词 + 今日主动计数 + 四个子系统开关 + 每个数据文件 `{exists, bytes, mtime}` + 版本 | 读 |
-| 日记 | 两本的篇数/字数/最近更新；按日期或"最近 N 条"读正文。**恋爱日记默认收起** | 只读 |
+| 日记 | 两本的篇数/字数/最近更新；按日期或"最近 N 条"读正文。**恋爱日记默认收起** | 读 + 写（第 15 步：改 / 删 / 回收站还原） |
 | 小本本 | 事实与约定（按顶栏"对谁"过滤）+ 上限；可标记完成 / 删除 | 读 + 写 |
 | 熟悉度 | 榜（衰减后分数降序）+ 档位词 + `last_ts` + **当前 `love_peers`（只显示）** | 读 |
 | 曲线与主动 | 手写 SVG 折线（valence / arousal，当下令 + 基调点）+ 主动消息计数与发送记录（倒序） | 读 |
@@ -232,6 +234,47 @@ Dashboard → 插件管理 → `astrbot_plugin_denia_diary` → 插件页。**�
 **读与写都走 `store` 层，不走门面。** 门面方法全都吃一个 `Session`，而面板是 Dashboard 登录态、**没有会话上下文**；聊天里的可见性规则与归属判定是**对话安全规则**，套到面板上会让主人自己反而看不到、改不了。所以 `core/webui_data.py` 直接读 `DiaryStore` / `NotebookStore` / `StateStore` / `AffinityStore` / `ProactiveStore`，**不需要 `umo` 也能画出全部内容**。
 
 衰减与档位**不自算**：情绪与作息照抄 `State.snapshot()` 的 `mood`/`rhythm` 子表，榜与档位词照抄 `Affinity.top()` / `Affinity.band()`。
+
+### 面板改 / 删日记（第 15 步）
+
+日记页不再是只读。每段正文下面有「编辑 / 删除」，删掉的段落进**回收站**，可一键还原。
+
+**为什么用 `seg_id` 而不是 `match`。** `diary_edit` 工具靠"正文里有这几个字"定位，那是给 LLM 用的模糊手段——重名的段会指错，指错了比指不到更糟。面板是在 DOM 上点了**某一条**，必须精确指到它。`seg_id` 是**内容地址**（头行 + 正文的 blake2b 前 48 bit，`format.seg_id`）：
+
+- 同一段反复算都是同一个 id（只依赖内容，不依赖行号）；
+- 内容一变 id 就变 —— 这一条顺便当**并发护栏**：文件被人手改过、或上一条改删已经动过它，id 对不上，后端回"这段已经变了，请刷新"，而不是照着旧内容盲改；
+- `find_by_id` **不许**退化成"最近一段"（那是 `match` 那条路径的行为，两条路各司其职）。
+
+因此前端在**每次写操作后整屏重拉**：留在页面上的 seg_id 全是过期的，接着改必然失败。
+
+**两种备份，两种语义**（别混）：
+
+| | 什么文件 | 谁写 | 能一键还原吗 |
+| :--- | :--- | :--- | :--- |
+| 整本快照 | `diary-trash/{stamp}-{action}-{book}.txt` | `diary_edit` 工具 | ❌ 整本回写会连带抹掉这之后的写入 |
+| 单段记录 | `diary-trash/seg-{stamp}-{book}.json` | 面板删除 | ✅ 按时间顺序插回原位 |
+
+回收站**只列单段记录**。整本快照还在同一个目录里，但不摆进回收站——按钮上写"还原"就是在骗人。
+
+**时间窗与豁免开关。** `diary.edit_within_days`（默认 7 天）本来是**她的性格规则**（"老日记是历史"），不是数据权限。所以另给面板一个开关 `diary.panel_edit_unlimited`：
+
+| | `panel_edit_unlimited: false`（默认） | `true` |
+| :--- | :--- | :--- |
+| 面板 | 只能改最近 N 天 | 任意一段 |
+| `diary_edit` 工具 | 只能改最近 N 天 | **仍然**只能改最近 N 天 |
+| 未来日期的段 | 不可改 | **仍然**不可改 |
+
+两条底线不变：**头行是历史，改只换正文**；**未来段两种模式都拒**（豁免的是"多久以前"，不是"没发生"——未来段是时钟没同步对）。判据是 `fmt.already_happened`（底线，两种模式共用）+ `fmt.within_window`（限期）。
+
+**面板的写入守同两把尺子**（不然面板能造出聊天侧永远写不出来的东西）：正文先过 `fmt.normalize_body(text, max_chars)`；改 / 删都先写整本快照再原子落盘，顺序不能反。
+
+**其它几条钉死的口径**：
+
+- **恋爱日记面板照改不误** —— 面板是主人视角，不套聊天里的可见性规则（同 §数据面裁定）；
+- **回收站上限 200 条**，超了丢最旧的；坏文件跳过不让整页打不开；
+- **还原幂等**：同一份记录还原两次，第二次回"这一段已经在本子里了"，绝不插出两条一样的；
+- **`trash_id` 钉死在回收站目录内**（`Path(key).name != key` 就拒），挡目录穿越；
+- 面板改删**不受 `subsystems.diary` 门控** —— 那是"她能不能记"，与主人能不能改自己的本子无关（读侧本来也不门控）。
 
 ### 日历清单与结构化条目
 
@@ -261,7 +304,11 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | :--- | :--- | :--- |
 | `status` | GET | 总览；`?who=` 可选 |
 | `diary/list` | GET | 两本概览 |
-| `diary/content` | GET | `?book=&date=&tail=` |
+| `diary/content` | GET | `?book=&date=&tail=`；每条另带 `seg_id` 与 `editable`，顶层带 `edit_window` |
+| `diary/rewrite` | POST | `{"book", "seg_id", "text"}` 改一段的**正文**（头行不动；正文先过 `max_chars`） |
+| `diary/delete` | POST | `{"book", "seg_id"}` 删一段（**先进回收站**） |
+| `diary/trash` | GET | 回收站：删掉的那些**单段**记录（倒序） |
+| `diary/restore` | POST | `{"id"}` 从回收站还原一段（幂等） |
 | `notebook` | GET | `?who=` 过滤 |
 | `notebook/complete` | POST | `{"id": "..."}` |
 | `notebook/delete` | POST | `{"id": "..."}`（先进 `notebook.json` 的 `trash`） |

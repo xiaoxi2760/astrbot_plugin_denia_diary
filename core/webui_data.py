@@ -29,6 +29,7 @@ from typing import Any
 from . import settings as settings_mod
 from . import storage
 from .diary import format as fmt
+from .diary.store import TRASH_SEGMENT_CAP
 from .state import Affinity, State
 from .state.store import LAYER_BASELINE, LAYER_NOW
 
@@ -276,6 +277,29 @@ def who_options_full(
 # ---- 日记（只读）--------------------------------------------------------------
 
 
+def _panel_edit_window(settings: settings_mod.Settings | None) -> dict[str, Any]:
+    """面板的改删窗口（天）。``within_days <= 0`` 表示**不限**。
+
+    唯一读 ``diary.panel_edit_unlimited`` 这个开关的地方；判据（多旧算"太旧"）
+    仍然是 ``fmt.within_window``，这里只把"几天"翻译成数字。
+
+    **拿不到 settings 就按不能改**（``can_edit=False``）——宁可不给按钮，也不能让前端
+    在不知道窗口的情况下画出一个按下去必失败的按钮。
+    """
+    limits = dict(getattr(settings, "diary", {}) or {})
+    unlimited = bool(limits.get("panel_edit_unlimited"))
+    try:
+        within = max(int(limits.get("edit_within_days") or 0), 0)
+    except (TypeError, ValueError):
+        within = 0
+    return {
+        "can_edit": settings is not None,
+        "unlimited": unlimited,
+        "within_days": 0 if unlimited else within,
+        "switch": "diary.panel_edit_unlimited",
+    }
+
+
 def diary_list_payload(*, diary_store: Any, now: datetime | None = None) -> dict[str, Any]:
     """两本日记的概览。``love_collapsed`` 恒 ``true``（决策 #18：恋爱日记默认收起）。
 
@@ -337,6 +361,7 @@ def diary_content_payload(
     date: str = "",
     tail: int = 0,
     now: datetime | None = None,
+    settings: settings_mod.Settings | None = None,
 ) -> dict[str, Any]:
     """读一段日记正文。**只读，不重写正文**。
 
@@ -346,6 +371,11 @@ def diary_content_payload(
     是同一批条目的**结构化视图**——顺序与 ``picked`` 完全一致、条数等于 ``count``，
     ``mood`` / ``who`` 原样透传（昵称替换是前端拿 ``who_options`` 干的活）。
     非空 ``picked`` 时恒有 ``"\\n\\n".join(e["text"]) == text``（测试钉住）。
+
+    第 15 步**只增不改**每个条目加两个键：``seg_id``（改 / 删时指名哪一段，见
+    ``format.seg_id``）与 ``editable``（这一段现在能不能改，窗口 + 豁免开关的结论）。
+    顶层另加 ``edit_window``，让前端能把"为什么这段不能改"说清楚，也能在设置里
+    找到那个开关——**不给它猜第二套规则**。
     """
     target = book if book in fmt.BOOKS else fmt.NORMAL
     entries = fmt.parse_entries(diary_store.read(target), target)
@@ -358,6 +388,9 @@ def diary_content_payload(
         limit = max(int(tail or 0), 0)
         if 0 < limit < total:
             picked = entries[-limit:]
+    window = _panel_edit_window(settings)
+    moment = now or (datetime.now(settings.zone()) if settings is not None else None)
+    zone = settings.zone() if settings is not None else None
     return {
         "ok": True,
         "book": target,
@@ -373,10 +406,205 @@ def diary_content_payload(
                 "who": entry.who,
                 "chars": len(entry.text),
                 "text": entry.text,
+                "seg_id": fmt.seg_id(
+                    fmt.Segment(
+                        head_line=fmt.make_head_line(
+                            entry.date, entry.time, entry.mood, entry.who
+                        ),
+                        head_idx=-1,
+                        end_idx=-1,
+                        date=entry.date,
+                        time=entry.time,
+                        mood=entry.mood,
+                        who=entry.who,
+                        text=entry.text,
+                    )
+                ),
+                "editable": bool(
+                    window["can_edit"]
+                    and moment is not None
+                    and zone is not None
+                    and _entry_editable(entry, moment, window["within_days"], zone)
+                ),
             }
             for entry in picked
         ],
+        "edit_window": window,
     }
+
+
+def _entry_editable(entry: fmt.Entry, now: datetime, within_days: int, tz: Any) -> bool:
+    """这一段现在能不能改。``within_days<=0`` = 不限**多久以前**，但未来段照旧不可改。
+
+    判据与 ``DiaryStore.apply_by_id`` 里那句一字不差（``already_happened`` 是共用
+    底线，``within_window`` 是限定期），免得前端把按钮画成能按、后端却说"太旧"。
+    """
+    seg = fmt.segment_from_record(
+        {
+            "date": entry.date,
+            "time": entry.time,
+            "mood": entry.mood,
+            "who": entry.who,
+            "text": entry.text,
+        }
+    )
+    if not fmt.already_happened(seg, now, tz):
+        return False
+    return within_days <= 0 or fmt.within_window(seg, now, within_days, tz)
+
+
+async def rewrite_diary_entry(
+    *,
+    diary_store: Any,
+    settings: settings_mod.Settings,
+    book: str,
+    seg_id: str,
+    text: object,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """改一段的**正文**（头行不动）。返回 ``{ok: True, ...}`` 或 ``{ok: False, error}``。
+
+    正文先过 ``fmt.normalize_body(..., max_chars)`` —— 与 ``diary_write`` 同一把尺子，
+    免得面板能塞进一条 10 万字正文而聊天侧永远写不出来。
+
+    判据、备份与原子写全在 ``DiaryStore.apply_by_id``（每文件一把锁），这里只做
+    形状检查与结果翻译；**不抛异常**（任务书 §2.2）。
+    """
+    target = book if book in fmt.BOOKS else fmt.NORMAL
+    if not str(seg_id or "").strip():
+        return {"ok": False, "error": "缺少参数 seg_id"}
+    limits = dict(getattr(settings, "diary", {}) or {})
+    window = _panel_edit_window(settings)
+    body = fmt.normalize_body(text, int(limits.get("max_chars") or 1200))
+    if not body:
+        return {"ok": False, "error": "正文不能为空（想删掉这一段请用删除）"}
+    moment = now or datetime.now(settings.zone())
+    result = await diary_store.apply_by_id(
+        target,
+        seg_id=str(seg_id).strip(),
+        action="rewrite",
+        new_body=body,
+        now=moment,
+        within_days=int(window["within_days"]),
+        tz=settings.zone(),
+    )
+    if not result.ok or result.seg is None:
+        return {"ok": False, "error": str(result.error or "没改成")}
+    return {
+        "ok": True,
+        "action": "rewrite",
+        "book": target,
+        "seg": {"date": result.seg.date, "time": result.seg.time, "mood": result.seg.mood},
+        # 回**新**正文（``result.seg`` 是落盘前那一段的快照，回它等于把旧内容又报一遍）
+        "text": body,
+        "before": result.before[:300],
+        "chars": len(body),
+    }
+
+
+async def delete_diary_entry(
+    *,
+    diary_store: Any,
+    settings: settings_mod.Settings,
+    book: str,
+    seg_id: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """删一段（**先进回收站**，可一键还原）。返回 ``{ok, error}``。
+
+    正文落盘前 ``DiaryStore.apply_by_id`` 会把这一段归档成 ``diary-trash/seg-*.json``；
+    还原只把它按时间顺序插回去，不动其余内容。
+    """
+    target = book if book in fmt.BOOKS else fmt.NORMAL
+    if not str(seg_id or "").strip():
+        return {"ok": False, "error": "缺少参数 seg_id"}
+    window = _panel_edit_window(settings)
+    moment = now or datetime.now(settings.zone())
+    result = await diary_store.apply_by_id(
+        target,
+        seg_id=str(seg_id).strip(),
+        action="delete",
+        now=moment,
+        within_days=int(window["within_days"]),
+        tz=settings.zone(),
+    )
+    if not result.ok or result.seg is None:
+        return {"ok": False, "error": str(result.error or "没删掉")}
+    return {
+        "ok": True,
+        "action": "delete",
+        "book": target,
+        "seg": {"date": result.seg.date, "time": result.seg.time, "mood": result.seg.mood},
+        "text": result.before[:300],
+        "trashed": True,
+    }
+
+
+def diary_trash_payload(*, diary_store: Any, settings: Any = None) -> dict[str, Any]:
+    """回收站（删掉的单段记录），**倒序**：刚删的在最上面。
+
+    这里只列 ``seg-*.json``。``diary_edit`` 工具留的整本快照（``*.txt``）**不列**——
+    整本回写会连带抹掉这之后的写入，按钮上写"还原"就是在骗人。它还在目录里，
+    需要的话自己去捞。
+    """
+    items: list[dict[str, Any]] = []
+    for record in diary_store.trash_items():
+        book = str(record.get("book") or "")
+        text = str(record.get("text") or "")
+        items.append(
+            {
+                "id": str(record.get("id") or ""),
+                "book": book,
+                "book_display": BOOK_DISPLAY.get(book, book or "未知"),
+                "is_love": book == fmt.LOVE,
+                "date": str(record.get("date") or ""),
+                "time": str(record.get("time") or ""),
+                "mood": str(record.get("mood") or ""),
+                "who": str(record.get("who") or ""),
+                "chars": len(text),
+                "preview": " ".join(text.split())[:80],
+                "text": text,
+                "deleted_at": str(record.get("deleted_at") or ""),
+                "seg_id": str(record.get("seg_id") or ""),
+            }
+        )
+    return {
+        "ok": True,
+        "count": len(items),
+        "cap": TRASH_SEGMENT_CAP,
+        "items": items,
+        "can_edit": settings is not None,
+    }
+
+
+async def restore_diary_entry(
+    *,
+    diary_store: Any,
+    settings: settings_mod.Settings,
+    trash_id: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """从回收站还原一段（**幂等**：已经在本子里就拒绝，绝不插重）。"""
+    key = str(trash_id or "").strip()
+    if not key:
+        return {"ok": False, "error": "缺少参数 id"}
+    moment = now or datetime.now(settings.zone())
+    # 记录必须**先**读：还原成功后那条 JSON 就被清掉了，事后再读只会拿到空。
+    record = diary_store.trash_record(key) or {}
+    ok, why = await diary_store.restore_segment(key, now=moment)
+    if not ok:
+        return {"ok": False, "error": why or "还原失败"}
+    return {
+        "ok": True,
+        "action": "restore",
+        "id": key,
+        "book": str(record.get("book") or ""),
+        "seg": {
+            "date": str(record.get("date") or ""),
+            "time": str(record.get("time") or ""),
+        },
+    }
+
 
 
 # ---- 小本本 -------------------------------------------------------------------
@@ -662,8 +890,10 @@ __all__ = [
     "MAX_CALENDAR_DAYS",
     "affinity_payload",
     "complete_note",
+    "delete_diary_entry",
     "diary_content_payload",
     "diary_list_payload",
+    "diary_trash_payload",
     "display_name",
     "file_report",
     "forget_note",
@@ -671,6 +901,8 @@ __all__ = [
     "notebook_payload",
     "proactive_payload",
     "raw_name",
+    "restore_diary_entry",
+    "rewrite_diary_entry",
     "status_payload",
     "who_options",
     "who_options_full",

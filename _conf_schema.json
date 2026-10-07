@@ -90,6 +90,12 @@
         "description": "可改天数",
         "hint": "1-60；更早的是历史，只读"
       },
+      "panel_edit_unlimited": {
+        "type": "bool",
+        "default": false,
+        "description": "面板不受可改天数限制",
+        "hint": "关（默认）＝面板与聊天同一口径，只能改最近这些天；开＝只有 WebUI 面板能改任何一段，聊天侧仍然守 7 天"
+      },
       "max_chars": {
         "type": "int",
         "default": 1200,

@@ -48,6 +48,10 @@ def build_handlers(deps: Any) -> dict[str, Callable[..., Any]]:
         "status": _make_status(deps),
         "diary_list": _make_diary_list(deps),
         "diary_content": _make_diary_content(deps),
+        "diary_rewrite": _make_diary_rewrite(deps),
+        "diary_delete": _make_diary_delete(deps),
+        "diary_trash": _make_diary_trash(deps),
+        "diary_restore": _make_diary_restore(deps),
         "notebook": _make_notebook(deps),
         "notebook_complete": _make_notebook_complete(deps),
         "notebook_delete": _make_notebook_delete(deps),
@@ -97,11 +101,105 @@ def _make_diary_content(deps: Any) -> Callable[..., Any]:
         book = _query_str(request, "book", fmt.NORMAL)
         date = _query_str(request, "date", "")
         tail = _query_int(request, "tail", 20, low=0, high=MAX_TAIL)
+        # 传 settings：正文要带上每段的 seg_id 与 editable（第 15 步），
+        # 这两样都要 settings 里的时区与「面板豁免窗」开关才算得出来。
         return json_response(
             webui_data.diary_content_payload(
-                diary_store=deps.diary.store, book=book, date=date, tail=tail
+                diary_store=deps.diary.store,
+                book=book,
+                date=date,
+                tail=tail,
+                settings=deps.settings,
             )
         )
+
+    return handler
+
+
+# ---- 日记改 / 删 / 回收站（第 15 步）--------------------------------------------
+#
+# 依旧薄壳：**能不能改**（时间窗 + 面板豁免开关）、备份、原子写全在 core 里。
+# 这里只把 body 的 ``book`` / ``seg_id`` / ``text`` 取出来交给它。
+#
+# 错误约定照旧：**只有形状不对**（body 不是对象、缺 seg_id / id）才 400；
+# "这段太旧了"、"找不到这一段" 都是**业务结果**，走 200 + ``{ok: false, error}`` ——
+# 它们是主人会正常撞上的状态，不是接口写错了。
+
+
+def _diary_entry_body(deps: Any, *, endpoint: str, action: Any, need_text: bool = False) -> Any:
+    """``rewrite`` / ``delete`` 共用的壳：取 body → 校验形状 → 调 core → 200 / 400。
+
+    ``need_text`` 同时决定**传不传** ``text``：``delete_diary_entry`` 压根没这个参数，
+    无条件塞进去就是 ``TypeError`` → 500 → iframe 里只剩一句"服务端处理失败"（真机踩过的
+    那种坑，静态契约测试抓不到）。所以"要不要这个键"由一处说了算。
+    """
+
+    async def handler() -> Any:
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400, endpoint=endpoint)
+        seg_id = str(body.get("seg_id") or "").strip()
+        if not seg_id:
+            return error_response("缺少参数 seg_id", 400, endpoint=endpoint)
+        book = str(body.get("book") or fmt.NORMAL).strip() or fmt.NORMAL
+        kwargs: dict[str, Any] = {
+            "diary_store": deps.diary.store,
+            "settings": deps.settings,
+            "book": book,
+            "seg_id": seg_id,
+            "now": deps._now(),
+        }
+        if need_text:
+            text = str(body.get("text") or "")
+            if not text.strip():
+                return error_response("缺少参数 text（要改的正文）", 400, endpoint=endpoint)
+            kwargs["text"] = text
+        return json_response(await action(**kwargs))
+
+    return handler
+
+
+def _make_diary_rewrite(deps: Any) -> Callable[..., Any]:
+    return _diary_entry_body(
+        deps,
+        endpoint="diary/rewrite",
+        action=webui_data.rewrite_diary_entry,
+        need_text=True,
+    )
+
+
+def _make_diary_delete(deps: Any) -> Callable[..., Any]:
+    return _diary_entry_body(
+        deps, endpoint="diary/delete", action=webui_data.delete_diary_entry
+    )
+
+
+def _make_diary_trash(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        return json_response(
+            webui_data.diary_trash_payload(
+                diary_store=deps.diary.store, settings=deps.settings
+            )
+        )
+
+    return handler
+
+
+def _make_diary_restore(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400, endpoint="diary/restore")
+        trash_id = str(body.get("id") or "").strip()
+        if not trash_id:
+            return error_response("缺少参数 id", 400, endpoint="diary/restore")
+        result = await webui_data.restore_diary_entry(
+            diary_store=deps.diary.store,
+            settings=deps.settings,
+            trash_id=trash_id,
+            now=deps._now(),
+        )
+        return json_response(result)
 
     return handler
 

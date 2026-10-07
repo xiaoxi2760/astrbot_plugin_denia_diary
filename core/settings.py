@@ -58,6 +58,14 @@ _DIARY_DEFAULTS: dict[str, int] = {
     "exchange_window_min": 30,
 }
 
+PANEL_EDIT_UNLIMITED_DEFAULT = False
+"""面板改删是否豁免 ``diary.edit_within_days``（第 15 步）。
+
+**默认 False**：面板与聊天同一口径，只能动最近这些天。打开后**只有 WebUI 面板**
+不受窗口约束——``diary_edit`` 工具照旧守 7 天。理由与 P1-a 同源：可改天数是**她的
+性格规则**（"老日记是历史"），不是数据权限；主人对自己的本子该不该受这条管，是两回事。
+"""
+
 # /看日记 图片卡（第 14 步）的两个字符串档位。语义的唯一解释住在 main.py 的
 # 渲染降级链——这里只管"取值合不合法"，和 scope.mode 一样的分权方式。
 CARD_RENDER_CHOICES: tuple[str, ...] = ("pretty", "plain", "off")
@@ -136,7 +144,12 @@ def default_config() -> dict[str, Any]:
         "subsystems": dict.fromkeys(SUBSYSTEMS, True),
         "scope": dict(_SCOPE_DEFAULTS),
         "panel": dict(_PANEL_DEFAULTS),
-        "diary": {**dict(_DIARY_DEFAULTS), "card_render": CARD_RENDER_DEFAULT, "card_style": CARD_STYLE_DEFAULT},
+        "diary": {
+            **dict(_DIARY_DEFAULTS),
+            "card_render": CARD_RENDER_DEFAULT,
+            "card_style": CARD_STYLE_DEFAULT,
+            "panel_edit_unlimited": PANEL_EDIT_UNLIMITED_DEFAULT,
+        },
         "notebook": dict(_NOTEBOOK_DEFAULTS),
         "state": dict(_STATE_DEFAULTS),
         "proactive": dict(_PROACTIVE_DEFAULTS),
@@ -157,7 +170,10 @@ class Settings:
     scope: Mapping[str, str] = field(default_factory=lambda: dict(_SCOPE_DEFAULTS))
     panel: Mapping[str, str] = field(default_factory=lambda: dict(_PANEL_DEFAULTS))
     diary: Mapping[str, Any] = field(default_factory=lambda: {
-        **dict(_DIARY_DEFAULTS), "card_render": CARD_RENDER_DEFAULT, "card_style": CARD_STYLE_DEFAULT,
+        **dict(_DIARY_DEFAULTS),
+        "card_render": CARD_RENDER_DEFAULT,
+        "card_style": CARD_STYLE_DEFAULT,
+        "panel_edit_unlimited": PANEL_EDIT_UNLIMITED_DEFAULT,
     })
     notebook: Mapping[str, int] = field(default_factory=lambda: dict(_NOTEBOOK_DEFAULTS))
     state: Mapping[str, str] = field(default_factory=lambda: dict(_STATE_DEFAULTS))
@@ -228,6 +244,13 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
     diary["card_style"] = _as_choice(
         raw_diary.get("card_style") if isinstance(raw_diary, Mapping) else None,
         CARD_STYLE_CHOICES, CARD_STYLE_DEFAULT, "diary.card_style", warnings,
+    )
+    # 面板改删豁免窗（bool）：缺键静默用默认 False，写了非 bool 才 warning。
+    diary["panel_edit_unlimited"] = _as_bool(
+        raw_diary.get("panel_edit_unlimited") if isinstance(raw_diary, Mapping) else None,
+        PANEL_EDIT_UNLIMITED_DEFAULT,
+        "diary.panel_edit_unlimited",
+        warnings,
     )
 
     raw_notebook = src.get("notebook")

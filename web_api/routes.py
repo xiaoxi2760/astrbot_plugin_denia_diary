@@ -29,7 +29,11 @@ RouteSpec = tuple[str, str, tuple[str, ...], str]
 ROUTES: tuple[RouteSpec, ...] = (
     ("status", "status", ("GET",), "总览：情绪、作息、今日主动计数与文件体检"),
     ("diary/list", "diary_list", ("GET",), "两本日记的篇数、字数与最近更新"),
-    ("diary/content", "diary_content", ("GET",), "读日记正文"),
+    ("diary/content", "diary_content", ("GET",), "读日记正文（含每段的 seg_id 与可否改）"),
+    ("diary/rewrite", "diary_rewrite", ("POST",), "改一段日记的正文（头行不动）"),
+    ("diary/delete", "diary_delete", ("POST",), "删一段日记（先进回收站）"),
+    ("diary/trash", "diary_trash", ("GET",), "回收站：删掉的那些段"),
+    ("diary/restore", "diary_restore", ("POST",), "从回收站还原一段（幂等）"),
     ("notebook", "notebook", ("GET",), "小本本：事实与约定（按人过滤）"),
     ("notebook/complete", "notebook_complete", ("POST",), "把一条约定标记为完成"),
     ("notebook/delete", "notebook_delete", ("POST",), "删一条（先进回收站）"),
