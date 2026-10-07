@@ -125,6 +125,18 @@
         "default": 30,
         "description": "“刚聊过”时间窗（分钟）",
         "hint": "5-1440；判断刚才有没有来回对话"
+      },
+      "card_render": {
+        "type": "string",
+        "default": "pretty",
+        "description": "日记卡渲染方式（/看日记）",
+        "hint": "pretty=精美卡片（经文转图服务，需联网）；plain=朴素图（本地可离线）；off=只发文本。非法值回落 pretty"
+      },
+      "card_style": {
+        "type": "string",
+        "default": "paper",
+        "description": "日记卡款式",
+        "hint": "paper=纸感（默认，与面板同款）；ink=墨信；postcard=明信片。非法值回落 paper"
       }
     }
   },

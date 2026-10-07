@@ -1,0 +1,83 @@
+<!-- /看日记 · postcard 款：明信片——顶部主题色横幅 + 右上"邮票"，正文紧凑。
+     数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fdf8f3;
+    font: 14px/1.8 "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    color: #463b32;
+    padding: 28px;
+  }
+  .card {
+    background: #fffdf9;
+    border: 1px solid #eadfce;
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(120,96,56,.08), 0 10px 26px rgba(120,96,56,.12);
+    max-width: 560px;
+  }
+  .band {
+    background: linear-gradient(135deg, #e8b56e, #d99a4e);
+    color: #fff;
+    padding: 18px 24px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .band .date { font-size: 18px; font-weight: 600; letter-spacing: .06em; }
+  .band .weekday { font-size: 12px; opacity: .92; margin-top: 3px; letter-spacing: .2em; }
+  .stampbox {
+    border: 2px dashed rgba(255,255,255,.85);
+    border-radius: 8px;
+    padding: 5px 12px;
+    font-size: 11px;
+    text-align: center;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+  .body { padding: 20px 24px 16px; }
+  .entry + .entry { margin-top: 16px; padding-top: 14px; border-top: 1px dashed #f0e5d3; }
+  .meta { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .time { font-size: 12px; font-weight: 600; color: #a08a68; font-variant-numeric: tabular-nums; }
+  .mood { font-size: 11px; padding: 1px 9px; border-radius: 999px; background: #fbeeda; color: #b7853c; border: 1px solid rgba(217,154,78,.36); }
+  .who { font-size: 11px; color: #b5a691; }
+  p { font-size: 14px; line-height: 1.85; color: #4a4033; white-space: pre-wrap; word-break: break-word; }
+  .foot {
+    padding: 10px 24px 16px;
+    text-align: right;
+    font-size: 11px;
+    color: #b5a691;
+    letter-spacing: .1em;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="band">
+      <div>
+        <div class="date">{{ date }}</div>
+        <div class="weekday">{{ weekday }}</div>
+      </div>
+      <div class="stampbox">{{ book_name }}<br />{{ count }} 段</div>
+    </div>
+    <div class="body">
+      {% for e in entries %}
+      <div class="entry">
+        <div class="meta">
+          <span class="time">{{ e.time }}</span>
+          {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
+          {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+        </div>
+        {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    <div class="foot">— 写给今天的便签</div>
+  </div>
+</body>
+</html>

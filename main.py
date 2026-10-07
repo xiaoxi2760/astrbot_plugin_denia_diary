@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import copy
+import html
 import re
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from .core import outbound as outbound_mod
 from .core import scope
 from .core import settings as settings_mod
 from .core import storage
+from .core import webui_data
 from .core import webui_portrait
 from .core import webui_settings
 from .core.diary import format as fmt
@@ -81,6 +83,61 @@ PROACTIVE_JOB_NAME = f"{PLUGIN_NAME}#proactive-patrol"
 ACTIVE_JOB_NAME = f"{PLUGIN_NAME}#proactive-wake"
 """cron job 命名：``initialize()`` 按 name 找旧 job 删掉重建（僵尸一律清，
 不留"库里还有同名 job 但 handler 已失效"的残骸）。"""
+
+CARD_TEMPLATE_DIR = Path(__file__).resolve().parent / "template"
+"""/看日记 的 Jinja2 模板目录（纸感 / 墨信 / 明信片）。模板在**插件目录**而不是数据目录：
+它是随版本发布的产品文件，用户不需要改；读不到按"模板缺失"走降级链，不炸。"""
+
+CARD_WEEK_CN = "一二三四五六日"
+"""星期几的中文字（Monday=0 对齐 ``date.weekday()``）。"""
+
+
+def _card_weekday(date: str) -> str:
+    try:
+        return "星期" + CARD_WEEK_CN[datetime.strptime(date, "%Y-%m-%d").weekday()]
+    except ValueError:
+        return ""
+
+
+def _normalize_card_date(raw: str, today: datetime) -> str | None:
+    """把用户在指令里敲的日期规整成 YYYY-MM-DD；规整不出来回 None（上层回人话）。
+
+    接受三种写法：空串＝今天；``MM-DD``／``M-D``＝当年；``YYYY-MM-DD``＝完整。
+    只认真实存在的日期（2 月 30 日这类会被 strptime 拒掉）。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return today.strftime("%Y-%m-%d")
+    short = re.fullmatch(r"(\d{1,2})-(\d{1,2})", text)
+    if short:
+        text = f"{today.year:04d}-{int(short.group(1)):02d}-{int(short.group(2)):02d}"
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _card_book_name(entries: list[dict]) -> str:
+    """卡片的抬头书名：全是恋爱日记那本才叫「恋爱日记」，混着/普通都叫「日记」。"""
+    if entries and all(e.get("book") == fmt.LOVE for e in entries):
+        return "恋爱日记"
+    return "日记"
+
+
+def _card_markdown(date: str, weekday: str, book_name: str, entries: list[dict]) -> str:
+    """降级链的兜底内容（Markdown，同时是 off 档的纯文本）。与图片卡同一份数据。"""
+    lines = [f"**{date} {weekday}**（{book_name} · 共 {len(entries)} 段）", ""]
+    for e in entries:
+        head = f"**{e.get('time') or '--:--'}**"
+        if e.get("mood"):
+            head += f"（{e['mood']}）"
+        if e.get("who"):
+            head += f" 和 {e['who']}"
+        lines.append(head)
+        for para in e.get("paragraphs") or []:
+            lines.append(para)
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 @register(
@@ -716,6 +773,116 @@ Args:
         if saved_word:
             return f"记下了：{saved_word}。"
         return "记下了（这会儿说不清，只记了打分）。"
+
+    # ---- 用户指令（不是 LLM 工具：人主动敲 /看日记 才跑） ----------------------
+
+    def _card_cfg(self) -> tuple[str, str]:
+        """当前生效的渲染档位与款式。load_settings 已校验过，这里兜一层
+        防"手改配置文件绕过校验"的极端情况（非法值按默认档走，不报错）。"""
+        diary_cfg = dict(self.settings.diary)
+        render = str(diary_cfg.get("card_render") or settings_mod.CARD_RENDER_DEFAULT)
+        style = str(diary_cfg.get("card_style") or settings_mod.CARD_STYLE_DEFAULT)
+        if render not in settings_mod.CARD_RENDER_CHOICES:
+            render = settings_mod.CARD_RENDER_DEFAULT
+        if style not in settings_mod.CARD_STYLE_CHOICES:
+            style = settings_mod.CARD_STYLE_DEFAULT
+        return render, style
+
+    @filter.command("看日记", alias={"日记卡"})
+    async def diary_card(self, event: AstrMessageEvent, date: str = "") -> None:
+        """把一天写成一张日记卡片发给你（/看日记 或 /看日记 10-06）
+
+Args:
+            date(string): 哪一天（YYYY-MM-DD 或 MM-DD），不填＝今天。
+        """
+        session = self._session(event)
+        denied = self._scope_denied_reason(session)
+        if denied:
+            yield event.plain_result(f"这个会话不在启用范围内，我不在这里记。({denied})")
+            return
+        if not session.is_private:
+            # 日记是私事：群里不落正文，口径与小本本"群聊只报数"一致
+            yield event.plain_result("日记要来我的私聊看哦，群里人多耳杂。")
+            return
+
+        now = self._now()
+        day = _normalize_card_date(date, now)
+        if day is None:
+            yield event.plain_result(
+                "日期没看懂。这样发：/看日记，或 /看日记 10-06，或 /看日记 2026-10-06"
+            )
+            return
+        result = self.diary.read_day_for(session, date=day)
+        if not result.get("ok"):
+            yield event.plain_result(str(result.get("error") or "翻不了"))
+            return
+        entries = list(result.get("entries") or [])
+        if not entries:
+            yield event.plain_result(f"{day} 这天还没写。想让她写，跟她提一句就好。")
+            return
+
+        # 昵称与面板同源：name_preference → contacts[person]["name"]；没有就原样
+        try:
+            contacts = self.proactive.store.contacts()
+        except Exception:  # noqa: BLE001 - 联系人表坏了不能带累看日记
+            contacts = {}
+        for e in entries:
+            who = str(e.get("who") or "")
+            if who:
+                try:
+                    e["who"] = webui_data.raw_name(self.settings, who, contacts)
+                except Exception:  # noqa: BLE001 - 昵称解析失败就显示原值
+                    pass
+
+        render, style = self._card_cfg()
+        book_name = _card_book_name(entries)
+        weekday = _card_weekday(day)
+        markdown = _card_markdown(day, weekday, book_name, entries)
+
+        if render == "off":
+            yield event.plain_result(markdown)
+            return
+        if render == "pretty":
+            # ⚠️ 日记正文是她的原话：进模板前一律 HTML 转义（autoescape 在这条
+            # 渲染链上不生效），她写的 < > & 不能变成标签。
+            data = {
+                "date": day,
+                "weekday": weekday,
+                "book_name": book_name,
+                "count": len(entries),
+                "entries": [
+                    {
+                        "time": html.escape(str(e.get("time") or ""), quote=False),
+                        "mood": html.escape(str(e.get("mood") or ""), quote=False),
+                        "who": html.escape(str(e.get("who") or ""), quote=False),
+                        "paragraphs": [
+                            html.escape(str(p), quote=False)
+                            for p in (e.get("paragraphs") or [])
+                        ],
+                    }
+                    for e in entries
+                ],
+            }
+            try:
+                tmpl = (CARD_TEMPLATE_DIR / f"diary_card_{style}.html.j2").read_text(
+                    encoding="utf-8"
+                )
+                path = await self.html_render(tmpl, data, return_url=False)
+                yield event.image_result(path)
+                return
+            except Exception as error:  # noqa: BLE001 - 端点不通/模板缺失都走降级
+                logger.warning(
+                    "[%s] 日记卡 HTML 渲染失败，降级 Markdown：%s", PLUGIN_NAME, error
+                )
+        try:
+            path = await self.text_to_image(markdown)
+            yield event.image_result(path)
+            return
+        except Exception as error:  # noqa: BLE001 - 本地 Pillow 也失败就发纯文本
+            logger.warning(
+                "[%s] 日记卡 Markdown 渲染失败，发纯文本：%s", PLUGIN_NAME, error
+            )
+        yield event.plain_result(markdown)
 
     # ---- 提示挂载点（被动轮） --------------------------------------------------
 

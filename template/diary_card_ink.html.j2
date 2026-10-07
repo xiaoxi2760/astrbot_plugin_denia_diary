@@ -1,0 +1,61 @@
+<!-- /看日记 · ink 款：一封墨写信——米色纸、衬线字、无横线，抬头一条双细线。
+     数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #f4efe6;
+    font: 15px/2.05 "Songti SC", "SimSun", "Noto Serif SC", serif;
+    color: #3a3226;
+    padding: 28px;
+  }
+  .letter {
+    background: #fbf7ee;
+    border: 1px solid #e4dac6;
+    border-radius: 8px;
+    padding: 34px 38px 26px;
+    box-shadow: 0 1px 2px rgba(90,74,48,.08), 0 10px 28px rgba(90,74,48,.10);
+    max-width: 560px;
+  }
+  .head {
+    text-align: center;
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+    border-bottom: 3px double #cbbfa4;
+  }
+  .date { font-size: 17px; letter-spacing: .18em; color: #3a3226; }
+  .weekday { font-size: 12px; color: #8a7a5c; margin-top: 4px; letter-spacing: .3em; }
+  .entry + .entry { margin-top: 26px; padding-top: 22px; border-top: 1px solid #e8dfc9; }
+  .meta { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+  .time { font-size: 12.5px; color: #8a7a5c; font-variant-numeric: tabular-nums; }
+  .mood { font-size: 13px; color: #9a6b4f; }
+  .mood::before { content: "◦ "; }
+  .who { font-size: 12px; color: #a5987a; }
+  p { font-size: 15.5px; line-height: 2.05; color: #43392a; white-space: pre-wrap; word-break: break-word; }
+  p + p { margin-top: 14px; text-indent: 2em; }
+  .foot { text-align: center; color: #a5987a; margin-top: 22px; font-size: 12px; letter-spacing: .4em; }
+</style>
+</head>
+<body>
+  <div class="letter">
+    <div class="head">
+      <div class="date">{{ date }}</div>
+      <div class="weekday">{{ weekday }} · {{ book_name }}</div>
+    </div>
+    {% for e in entries %}
+    <div class="entry">
+      <div class="meta">
+        <span class="time">{{ e.time }}</span>
+        {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
+        {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+      </div>
+      {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+    </div>
+    {% endfor %}
+    <div class="foot">✦</div>
+  </div>
+</body>
+</html>

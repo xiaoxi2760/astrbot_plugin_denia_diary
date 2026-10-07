@@ -58,6 +58,15 @@ _DIARY_DEFAULTS: dict[str, int] = {
     "exchange_window_min": 30,
 }
 
+# /看日记 图片卡（第 14 步）的两个字符串档位。语义的唯一解释住在 main.py 的
+# 渲染降级链——这里只管"取值合不合法"，和 scope.mode 一样的分权方式。
+CARD_RENDER_CHOICES: tuple[str, ...] = ("pretty", "plain", "off")
+"""pretty=HTML 模板（要联网走文转图端点）；plain=Markdown 渲染（可离线）；off=只发文本。"""
+CARD_RENDER_DEFAULT = "pretty"
+CARD_STYLE_CHOICES: tuple[str, ...] = ("paper", "ink", "postcard")
+"""pretty 档的模板款式：paper=纸感（面板同款，默认）；ink=墨信；postcard=明信片。"""
+CARD_STYLE_DEFAULT = "paper"
+
 _NOTEBOOK_DEFAULTS: dict[str, int] = {
     "promise_limit": 20,  # 约定上限（每人，按未完成计）
     "fact_limit": 15,  # 事实上限（每人）
@@ -127,7 +136,7 @@ def default_config() -> dict[str, Any]:
         "subsystems": dict.fromkeys(SUBSYSTEMS, True),
         "scope": dict(_SCOPE_DEFAULTS),
         "panel": dict(_PANEL_DEFAULTS),
-        "diary": dict(_DIARY_DEFAULTS),
+        "diary": {**dict(_DIARY_DEFAULTS), "card_render": CARD_RENDER_DEFAULT, "card_style": CARD_STYLE_DEFAULT},
         "notebook": dict(_NOTEBOOK_DEFAULTS),
         "state": dict(_STATE_DEFAULTS),
         "proactive": dict(_PROACTIVE_DEFAULTS),
@@ -147,7 +156,9 @@ class Settings:
     subsystems: Mapping[str, bool] = field(default_factory=lambda: dict.fromkeys(SUBSYSTEMS, True))
     scope: Mapping[str, str] = field(default_factory=lambda: dict(_SCOPE_DEFAULTS))
     panel: Mapping[str, str] = field(default_factory=lambda: dict(_PANEL_DEFAULTS))
-    diary: Mapping[str, int] = field(default_factory=lambda: dict(_DIARY_DEFAULTS))
+    diary: Mapping[str, Any] = field(default_factory=lambda: {
+        **dict(_DIARY_DEFAULTS), "card_render": CARD_RENDER_DEFAULT, "card_style": CARD_STYLE_DEFAULT,
+    })
     notebook: Mapping[str, int] = field(default_factory=lambda: dict(_NOTEBOOK_DEFAULTS))
     state: Mapping[str, str] = field(default_factory=lambda: dict(_STATE_DEFAULTS))
     proactive: Mapping[str, Any] = field(default_factory=lambda: dict(_PROACTIVE_DEFAULTS))
@@ -209,6 +220,15 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
         )
         for key, default in _DIARY_DEFAULTS.items()
     }
+    # /看日记 图片卡的两个档位（字符串）：缺键静默用默认，写了不合法的值才 warning
+    diary["card_render"] = _as_choice(
+        raw_diary.get("card_render") if isinstance(raw_diary, Mapping) else None,
+        CARD_RENDER_CHOICES, CARD_RENDER_DEFAULT, "diary.card_render", warnings,
+    )
+    diary["card_style"] = _as_choice(
+        raw_diary.get("card_style") if isinstance(raw_diary, Mapping) else None,
+        CARD_STYLE_CHOICES, CARD_STYLE_DEFAULT, "diary.card_style", warnings,
+    )
 
     raw_notebook = src.get("notebook")
     if raw_notebook is not None and not isinstance(raw_notebook, Mapping):
@@ -325,6 +345,23 @@ def _as_scope(value: Any, warnings: list[str]) -> dict[str, str]:
     if warning:
         warnings.append(warning)
     return {"mode": mode}
+
+
+def _as_choice(
+    value: Any,
+    allowed: tuple[str, ...],
+    default: str,
+    name: str,
+    warnings: list[str],
+) -> str:
+    """枚举字符串的通用校验：命中返回原值；空/缺静默回落默认（缺键不是错误）；
+    写了不合法的值回落默认并记 warning。与 ``normalize_mode`` 的口径一致。"""
+    text = str(value).strip() if isinstance(value, str) else ""
+    if text in allowed:
+        return text
+    if text:
+        warnings.append(f"{name} 非法（{text}），回落 {default}")
+    return default
 
 
 def _as_panel(value: Any, warnings: list[str]) -> dict[str, str]:

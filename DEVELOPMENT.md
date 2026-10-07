@@ -6,7 +6,7 @@
 
 | 路径 | 职责 |
 | :--- | :--- |
-| `main.py` | 适配层之一：9 个工具 + 提示挂载点 + 生命周期 + WebUI 注册 |
+| `main.py` | 适配层之一：9 个工具 + `/看日记` 指令 + 提示挂载点 + 生命周期 + WebUI 注册 |
 | `web_api/` | WebUI 的 HTTP 适配层（在 `core/` 之外） |
 | `core/` | 内核：零 AstrBot 依赖，纯函数，可离线测试 |
 | `pages/diary/` | 插件页：单目录自包含，零构建零依赖 |
@@ -16,6 +16,7 @@
 ```
 astrbot_plugin_denia_diary/
 ├─ metadata.yaml / _conf_schema.json / README.md / DEVELOPMENT.md / logo.png / LICENSE
+├─ template/            /看日记 图片卡的 Jinja2 模板（paper / ink / postcard）
 ├─ main.py
 ├─ web_api/
 │  ├─ __init__.py       对外只暴露 register_all
@@ -61,6 +62,7 @@ astrbot_plugin_denia_diary/
 | `note_complete` | 把约定销账（写 `done_at`，完成即腾坑） |
 | `note_forget` | 删一条（先过归属判定，进 `trash` 回收站） |
 | `mood_report` | 心情自报（`word` 原词 + 可选 `valence` / `arousal` 字符串打分）；**没有 `affinity_*` 工具**，她不碰熟悉度数值 |
+| `@filter.command("看日记")`（别名 /日记卡） | **唯一的用户指令**（第 14 步）：把一天渲染成图片卡。读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（`text_to_image`，本地 Pillow 可离线）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape） |
 | `on_llm_request`（priority=5） | 先 `affinity.touch`（私聊 private / 群聊 mention）+ `proactive.note_contact`（person→会话反查表），再把 `core.compose` 渲染的一段挂进 `req.extra_user_content_parts`（见下）；**主动轮不触发它**，那边走 `payload.note` |
 | `on_using_llm_tool` | **确认点**：主动唤醒路径里她真调了 `send_message_to_user`（事件带 `cron_job` extra）→ 写 `last_sent_at`；被动轮同一工具不算 |
 | `initialize` / `terminate` | 生命周期。`initialize()` 重建巡检 job（basic handler 只在内存注册表，热重载即失效 → 按 name 查旧 job 一律 delete 再 add）；`terminate()` 冲熟悉度合并写窗口 |
@@ -514,6 +516,8 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `diary.event_hint_cooldown_min` | 30 | 5–1440 |
 | `diary.fallback_hint_cooldown_min` | 90 | 15–1440 |
 | `diary.exchange_window_min` | 30 | 5–1440 |
+| `diary.card_render` | `pretty` | `/看日记` 的渲染方式：`pretty`（HTML 模板，经文转图服务）/ `plain`（Markdown，本地可离线）/ `off`（只发文本）；非法回落 pretty。pretty 档会把日记正文 POST 给渲染端点（README 有声明） |
+| `diary.card_style` | `paper` | pretty 档的模板款式：`paper`（纸感，面板同款）/ `ink`（墨信）/ `postcard`（明信片）；非法回落 paper |
 | `notebook.promise_limit` | 20 | 1–200；约定上限（每人，按未完成计） |
 | `notebook.fact_limit` | 15 | 1–200；事实上限（每人） |
 | `state.rhythm` | 5 段默认表 | 每行「HH:MM\|状态词」；到点的最近一段生效，凌晨归入最后一段；留空＝不出作息行 |

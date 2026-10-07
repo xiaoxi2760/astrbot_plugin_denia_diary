@@ -231,10 +231,13 @@ class SchemaConsistencyTest(unittest.TestCase):
         )
 
     def test_every_diary_int_field_has_a_documented_range(self) -> None:
-        for key in self.schema["diary"]["items"]:
-            self.assertIn(f"diary.{key}", settings_mod.INT_LIMITS)
-        for key in self.schema["notebook"]["items"]:
-            self.assertIn(f"notebook.{key}", settings_mod.INT_LIMITS)
+        # 只约束 int 叶子（第 14 步起 diary 组有两个枚举字符串叶子，走 choices 提示）
+        for key, item in self.schema["diary"]["items"].items():
+            if item["type"] == "int":
+                self.assertIn(f"diary.{key}", settings_mod.INT_LIMITS)
+        for key, item in self.schema["notebook"]["items"].items():
+            if item["type"] == "int":
+                self.assertIn(f"notebook.{key}", settings_mod.INT_LIMITS)
         for key, item in self.schema["proactive"]["items"].items():
             if item["type"] == "int":
                 self.assertIn(f"proactive.{key}", settings_mod.INT_LIMITS)
@@ -267,6 +270,39 @@ class SchemaConsistencyTest(unittest.TestCase):
             "name_preference": {},
         }
         self.assertEqual(settings_mod.load_settings(raw).warnings, ())
+
+
+class DiaryCardChoiceTest(unittest.TestCase):
+    """/看日记 的两个字符串档位：合法保留、非法回落 + warning、缺键静默默认。"""
+
+    def test_defaults(self) -> None:
+        result = settings_mod.load_settings(None)
+        self.assertEqual(result.diary["card_render"], "pretty")
+        self.assertEqual(result.diary["card_style"], "paper")
+        self.assertEqual(result.warnings, ())
+
+    def test_legal_values_are_kept(self) -> None:
+        result = settings_mod.load_settings(
+            {"diary": {"card_render": "off", "card_style": "ink"}}
+        )
+        self.assertEqual(result.diary["card_render"], "off")
+        self.assertEqual(result.diary["card_style"], "ink")
+        self.assertEqual(result.warnings, ())
+
+    def test_illegal_values_fall_back_with_warning(self) -> None:
+        result = settings_mod.load_settings(
+            {"diary": {"card_render": "html", "card_style": "neon"}}
+        )
+        self.assertEqual(result.diary["card_render"], "pretty")
+        self.assertEqual(result.diary["card_style"], "paper")
+        self.assertEqual(len(result.warnings), 2, result.warnings)
+        self.assertIn("diary.card_render", result.warnings[0])
+        self.assertIn("diary.card_style", result.warnings[1])
+
+    def test_default_config_carries_the_two_keys(self) -> None:
+        diary = settings_mod.default_config()["diary"]
+        self.assertEqual(diary["card_render"], "pretty")
+        self.assertEqual(diary["card_style"], "paper")
 
 
 if __name__ == "__main__":

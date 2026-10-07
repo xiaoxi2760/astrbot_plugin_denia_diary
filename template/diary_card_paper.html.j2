@@ -1,0 +1,81 @@
+<!-- /看日记 · paper 款（默认）：与面板日记页同一套纸感——
+     横格线跟 1.95em 行高一道、主题粉日期章、心情小签。
+     数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fff6f9;
+    font: 15px/1.95 "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    color: #4b3743;
+    padding: 28px;
+  }
+  .paper {
+    background: #ffffff;
+    border: 1px solid #f7dee7;
+    border-radius: 18px;
+    padding: 26px 30px 20px;
+    box-shadow: 0 2px 5px rgba(228,152,178,.10), 0 10px 30px rgba(228,152,178,.16);
+    max-width: 560px;
+  }
+  .stamp {
+    text-align: center;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    color: #f2789f;
+    padding-bottom: 12px;
+    margin-bottom: 18px;
+    border-bottom: 1px solid #fceff3;
+  }
+  .book {
+    display: block;
+    text-align: center;
+    font-size: 11px;
+    letter-spacing: .4em;
+    color: #b7a1ab;
+    margin-bottom: 6px;
+  }
+  .entry + .entry { margin-top: 22px; padding-top: 18px; border-top: 1px dashed #fceff3; }
+  .meta { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .time { font-size: 12.5px; font-weight: 600; color: #8b7480; font-variant-numeric: tabular-nums; }
+  .mood {
+    font-size: 11px; padding: 2px 10px; border-radius: 999px;
+    background: #ffe6ef; color: #f2789f; border: 1px solid rgba(242,120,159,.38);
+  }
+  .who { font-size: 11px; color: #b7a1ab; }
+  p {
+    font-size: 15px;
+    line-height: 1.95;
+    color: #5c4650;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background-image: repeating-linear-gradient(
+      to bottom, transparent 0, transparent calc(1.95em - 1px),
+      #fceff3 calc(1.95em - 1px), #fceff3 1.95em);
+  }
+  p + p { margin-top: 1.95em; }
+  .foot { text-align: center; color: #b7a1ab; letter-spacing: .5em; margin-top: 18px; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div class="paper">
+    <span class="book">{{ book_name }} · 共 {{ count }} 段</span>
+    <div class="stamp">— {{ date }} {{ weekday }} —</div>
+    {% for e in entries %}
+    <div class="entry">
+      <div class="meta">
+        <span class="time">{{ e.time }}</span>
+        {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
+        {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+      </div>
+      {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+    </div>
+    {% endfor %}
+    <div class="foot">· · ·</div>
+  </div>
+</body>
+</html>

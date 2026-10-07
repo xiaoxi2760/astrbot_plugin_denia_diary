@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -92,6 +93,36 @@ class Diary:
         return list(entries)
 
     # ---- 读：唯一入口 ---------------------------------------------------------
+
+    def read_day_for(self, session: Session, *, date: str, book: str = "") -> dict:
+        """结构化读一天（给 /看日记 的图片卡用）：返回条目而不是渲染文本。
+
+        可见性与 ``read_for`` **完全同源**（同一套 ``visible`` / ``_filter_book``）——
+        恋爱日记的口子不会因为换了个入口而放宽；调用方拿到的就是"这个会话能看的那部分"。
+        """
+        if not self._enabled():
+            return {"ok": False, "error": DISABLED}
+        if not _is_day(date):
+            return {"ok": False, "error": "date 格式应为 YYYY-MM-DD"}
+        shown_all = _filter_book(self.visible(self.entries(), session), book)
+        day = [e for e in shown_all if e.date == date]
+        return {
+            "ok": True,
+            "date": date,
+            "count": len(day),
+            "total": len(shown_all),
+            "entries": [
+                {
+                    "time": e.time,
+                    "mood": e.mood,
+                    "who": e.who,
+                    "book": e.book,
+                    # 分段口径与面板一致：按空行切段（段内保留换行）
+                    "paragraphs": [p for p in re.split(r"\n\s*\n", e.text) if p.strip()],
+                }
+                for e in day
+            ],
+        }
 
     def read_for(
         self,

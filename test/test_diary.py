@@ -494,5 +494,38 @@ class DiaryApiTest(TmpDirCase):
         self.assertEqual(result["chars"], 200)
 
 
+class ReadDayTest(TmpDirCase):
+    """/看日记 图片卡的结构化读法：可见性与 read_for 同源，返回条目而不是文本。"""
+
+    def test_returns_structured_entries_with_paragraphs(self) -> None:
+        diary = make_diary(self.root)
+        run(diary.write_async(private_session("10001"), text="第一段。\n\n第二段。", mood="开心", now=NOW))
+        result = diary.read_day_for(private_session("10001"), date="2026-10-04")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["date"], "2026-10-04")
+        self.assertEqual(result["count"], 1)
+        entry = result["entries"][0]
+        self.assertEqual(entry["mood"], "开心")
+        self.assertEqual(entry["book"], fmt.NORMAL)
+        self.assertEqual(entry["paragraphs"], ["第一段。", "第二段。"])
+
+    def test_love_visibility_same_as_read_for(self) -> None:
+        """/看日记 不开恋爱的口子：别人拿到 0 条，本人才拿得到。"""
+        diary = make_diary(self.root, {"love_peers": ["10001"]})
+        run(diary.write_async(private_session("10001"), text="秘密", now=NOW))
+        other = diary.read_day_for(private_session("20002", "另一个人"), date="2026-10-04")
+        self.assertEqual(other["count"], 0)
+        self.assertEqual(other["entries"], [])
+        peer = diary.read_day_for(private_session("10001"), date="2026-10-04")
+        self.assertEqual(peer["count"], 1)
+        self.assertEqual(peer["entries"][0]["book"], fmt.LOVE)
+
+    def test_disabled_and_bad_date(self) -> None:
+        diary = make_diary(self.root, {"subsystems": {"diary": False}})
+        self.assertFalse(diary.read_day_for(private_session("10001"), date="2026-10-04")["ok"])
+        diary2 = make_diary(self.root)
+        self.assertFalse(diary2.read_day_for(private_session("10001"), date="2026-2-30")["ok"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

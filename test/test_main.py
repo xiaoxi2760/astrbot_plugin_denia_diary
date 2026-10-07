@@ -21,7 +21,7 @@ PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import NOW, TmpDirCase  # noqa: E402
+from support import NOW, TmpDirCase, private_session  # noqa: E402
 
 SUPPORTED_TYPES = {"string", "number", "boolean", "object", "array"}
 MODULE_NAME = "plugin_under_test.main"
@@ -1039,6 +1039,159 @@ class ProactiveCronTest(PluginCase):
 
         doc = asyncio.run(scenario())
         self.assertEqual(doc["contacts"]["10001"]["kind"], "private")
+
+
+class DiaryCardTest(PluginCase):
+    """/看日记 指令：注册、降级链、群聊口径、日期规整。
+
+    handler 是 async generator：用 _collect 把 yield 的结果收成列表再断言。
+    html_render / text_to_image 在用例里用实例属性顶掉基类方法——
+    桩里的 Star 基类没有这两个方法，天然等价于"渲染器不可用"。
+    """
+
+    def _collect(self, coro):
+        async def run_all():
+            out = []
+            async for item in coro:
+                out.append(item)
+            return out
+
+        return asyncio.run(run_all())
+
+    def _event(self, **kwargs):
+        class _CardEvent(_FakeEvent):
+            def __init__(self) -> None:
+                super().__init__(**kwargs)
+                self.plains: list = []
+                self.images: list = []
+
+            def plain_result(self, text):
+                self.plains.append(str(text))
+                return ("plain", text)
+
+            def image_result(self, path):
+                self.images.append(str(path))
+                return ("image", path)
+
+        return _CardEvent()
+
+    def test_command_registered_with_alias_and_docstring(self) -> None:
+        commands = [
+            (name, kwargs, func)
+            for kind, name, func, kwargs in self.registry["hooks"]
+            if kind == "command"
+        ]
+        self.assertEqual(len(commands), 1)
+        name, kwargs, func = commands[0]
+        self.assertEqual(name, "看日记")
+        self.assertEqual(kwargs.get("alias"), {"日记卡"})
+        self.assertTrue((func.__doc__ or "").strip())
+
+    def test_date_helpers(self) -> None:
+        module = self.module
+        today = module.datetime(2026, 10, 7)
+        self.assertEqual(module._normalize_card_date("", today), "2026-10-07")
+        self.assertEqual(module._normalize_card_date("10-06", today), "2026-10-06")
+        self.assertEqual(module._normalize_card_date("2-3", today), "2026-02-03")
+        self.assertEqual(module._normalize_card_date("2026-10-06", today), "2026-10-06")
+        self.assertIsNone(module._normalize_card_date("2-30", today))
+        self.assertIsNone(module._normalize_card_date("昨天", today))
+
+    def test_book_name_and_markdown_fallback_content(self) -> None:
+        module = self.module
+        mixed = [{"book": "love", "time": "09:00", "mood": "", "who": "", "paragraphs": ["a"]},
+                 {"book": "normal", "time": "21:00", "mood": "开心", "who": "希", "paragraphs": ["b"]}]
+        self.assertEqual(module._card_book_name(mixed), "日记")
+        self.assertEqual(module._card_book_name(mixed[:1]), "恋爱日记")
+        text = module._card_markdown("2026-10-06", "星期二", "日记", mixed)
+        self.assertIn("2026-10-06 星期二", text)
+        self.assertIn("**21:00**（开心） 和 希", text)
+        self.assertIn("b", text)
+
+    def test_off_sends_text_only(self) -> None:
+        plugin = self.make_plugin({"diary": {"card_render": "off"}})
+        asyncio.run(plugin.diary.write_async(
+            private_session("10001"), text="只发文本", mood="开心", now=NOW))
+        event = self._event()
+        results = self._collect(plugin.diary_card(event, "10-04"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "plain")
+        self.assertIn("只发文本", event.plains[0])
+        self.assertEqual(event.images, [])
+
+    def test_pretty_renders_html_and_escapes_content(self) -> None:
+        plugin = self.make_plugin()
+        asyncio.run(plugin.diary.write_async(
+            private_session("10001"), text="正文 <b>与 & 符号</b>", mood="开心", now=NOW))
+        captured: dict = {}
+
+        async def fake_render(tmpl, data, return_url=True, options=None):
+            captured["tmpl"] = tmpl
+            captured["data"] = data
+            return str(self.root / "card.png")
+
+        plugin.html_render = fake_render
+        event = self._event()
+        results = self._collect(plugin.diary_card(event, "10-04"))
+        self.assertEqual(results[0][0], "image")
+        self.assertIn("card.png", event.images[0])
+        self.assertIn("paper 款", captured["tmpl"])  # 默认款式选中的是 paper 模板
+        entry = captured["data"]["entries"][0]
+        self.assertNotIn("<b>", entry["paragraphs"][0])
+        self.assertIn("&lt;b&gt;", entry["paragraphs"][0])
+
+    def test_pretty_falls_back_to_markdown_when_render_fails(self) -> None:
+        plugin = self.make_plugin()
+        asyncio.run(plugin.diary.write_async(
+            private_session("10001"), text="降级也要出图", now=NOW))
+
+        async def broken_render(tmpl, data, return_url=True, options=None):
+            raise RuntimeError("All endpoints failed")
+
+        plugin.html_render = broken_render
+
+        async def fake_t2i(text):
+            return str(self.root / "md.png")
+
+        plugin.text_to_image = fake_t2i
+        event = self._event()
+        results = self._collect(plugin.diary_card(event, "10-04"))
+        self.assertEqual(results[0][0], "image")
+        self.assertIn("md.png", event.images[0])
+        self.assertEqual(event.plains, [])
+
+    def test_pretty_falls_back_to_plain_text_when_both_renderers_fail(self) -> None:
+        plugin = self.make_plugin()
+        asyncio.run(plugin.diary.write_async(
+            private_session("10001"), text="最后还有纯文本", now=NOW))
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("no renderer")
+
+        plugin.html_render = broken
+        plugin.text_to_image = broken
+        event = self._event()
+        results = self._collect(plugin.diary_card(event, "10-04"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "plain")
+        self.assertIn("最后还有纯文本", event.plains[0])
+
+    def test_group_gets_hint_without_content(self) -> None:
+        plugin = self.make_plugin()
+        asyncio.run(plugin.diary.write_async(
+            private_session("10001"), text="私事", now=NOW))
+        event = self._event(umo="aiocqhttp:GroupMessage:123456", group_id="123456")
+        results = self._collect(plugin.diary_card(event, "10-04"))
+        self.assertEqual(results[0][0], "plain")
+        self.assertIn("私聊", event.plains[0])
+        self.assertNotIn("私事", event.plains[0])
+
+    def test_bad_date_gets_usage_hint(self) -> None:
+        plugin = self.make_plugin()
+        event = self._event()
+        results = self._collect(plugin.diary_card(event, "昨天"))
+        self.assertEqual(results[0][0], "plain")
+        self.assertIn("/看日记", event.plains[0])
 
 
 if __name__ == "__main__":
