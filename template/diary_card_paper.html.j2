@@ -1,5 +1,14 @@
-<!-- /看日记 · paper 款（默认）：与面板日记页同一套纸感——
-     横格线跟 1.95em 行高一道、主题粉日期章、心情小签。
+<!-- /看日记 · paper 款（默认）：横线纸。
+     两条踩过的坑写在最前面，改之前先看：
+
+     ① 画布是**固定约 920px**（宿主自带 t2i 模板写的是 `width: min(100%, 920px)`），
+        截图取文档滚动宽度——把 body 收窄**裁不掉**，只会让纸挤在左边、右边一大片空
+        （旧版就是这样）。所以纸要做成接近满幅 + 居中，空白才是留白不是事故。
+     ② 横格线必须跟**行高网格**对齐：正文行高、段间距、段间距、每段的 meta 行高
+        全部取同一个 --lh 的整数倍。差半个行高，文字就骑到线上去了（旧版也是）。
+
+     纸纹用内联 SVG feTurbulence，不引外部图片——渲染发生在**远端**无头浏览器，
+     template/ 下的文件它根本读不到，只有 data URI / 公网 URL 才有效。
      数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -7,75 +16,110 @@
 <meta charset="utf-8" />
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+
   body {
-    background: #fff6f9;
-    font: 15px/1.95 "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
-    color: #4b3743;
-    padding: 28px;
+    /* --card-font-stack 是"这一款默认用什么字"。配置了 diary.card_font 时，
+       main.py 会在下面那个 <style> 里把 body 的 font-family 整体换成用户指定的，
+       换不掉就自动回落这一串。 */
+    --card-font-stack: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    width: 100%;
+    display: flex; justify-content: center;
+    padding: 40px 32px;
+    background: #efe7dc;
+    font: 16px/2 var(--card-font-stack);
+    color: #3c3a38;
+    -webkit-font-smoothing: antialiased;
   }
-  .paper {
-    background: #ffffff;
-    border: 1px solid #f7dee7;
-    border-radius: 18px;
-    padding: 26px 30px 20px;
-    box-shadow: 0 2px 5px rgba(228,152,178,.10), 0 10px 30px rgba(228,152,178,.16);
-    max-width: 560px;
+
+  .sheet {
+    --lh: 34px;               /* 纵向节奏的唯一基准，下面所有间距都是它的整数倍 */
+    position: relative;
+    display: flex; flex-direction: column;
+    width: 100%; max-width: 776px;
+    /* 截图高度取 max(内容高, 视口高)：卡片只有一段时，下面会空一大片。
+       撑满整页，空白就成了"这页没写完"，而不是没对齐的事故。 */
+    min-height: calc(100vh - 80px);
+    padding: 38px 52px 34px 96px;
+    background: #fffdf8;
+    box-shadow: 0 1px 3px rgba(80,64,48,.10), 0 14px 36px rgba(80,64,48,.12);
   }
-  .stamp {
-    text-align: center;
-    font-size: 16px;
-    font-weight: 600;
-    letter-spacing: .12em;
-    color: #f2789f;
-    padding-bottom: 12px;
-    margin-bottom: 18px;
-    border-bottom: 1px solid #fceff3;
+
+  /* 纸纹：3.5% 不透明度——看得见"是纸"，看不见"是滤镜" */
+  .sheet::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
   }
-  .book {
-    display: block;
-    text-align: center;
-    font-size: 11px;
-    letter-spacing: .4em;
-    color: #b7a1ab;
-    margin-bottom: 6px;
+
+  /* 装订孔 + 红边线：横线纸的"左"，没有它就只是一张带横线的白纸 */
+  .holes { position: absolute; left: 0; top: 0; bottom: 0; width: 96px; }
+  .holes::before { content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 1px; background: #f2bfcd; }
+  .holes i {
+    position: absolute; left: 26px; width: 14px; height: 14px; border-radius: 50%;
+    background: #f7f2ea; box-shadow: inset 0 1px 2px rgba(90,70,55,.30);
   }
-  .entry + .entry { margin-top: 22px; padding-top: 18px; border-top: 1px dashed #fceff3; }
-  .meta { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .time { font-size: 12.5px; font-weight: 600; color: #8b7480; font-variant-numeric: tabular-nums; }
-  .mood {
-    font-size: 11px; padding: 2px 10px; border-radius: 999px;
-    background: #ffe6ef; color: #f2789f; border: 1px solid rgba(242,120,159,.38);
-  }
-  .who { font-size: 11px; color: #b7a1ab; }
-  p {
-    font-size: 15px;
-    line-height: 1.95;
-    color: #5c4650;
-    white-space: pre-wrap;
-    word-break: break-word;
+  .holes i:nth-child(1) { top: 104px; }
+  .holes i:nth-child(2) { top: 50%; margin-top: -7px; }
+  .holes i:nth-child(3) { bottom: 104px; }
+
+  /* 日期只在**右上角**出现一次：页脚再抄一遍是冗余（旧版就这么写着，
+     一屏里同一个日期出现两次，显脏）。 */
+  .head { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid #ece3d7; }
+  .book { font-size: 12.5px; letter-spacing: .36em; color: #a89a90; padding-top: 7px; }
+  .when { text-align: right; }
+  .when b { display: block; font-size: 21px; font-weight: 600; letter-spacing: .05em; color: #2f2c2a; }
+  .when em { font-style: normal; font-size: 12.5px; color: #b09a8e; letter-spacing: .14em; }
+
+  /* 正文栏：横格线每 --lh 一条，落在每行的下沿。1px 太细，2px + 深一档才像"印在纸上"。
+     flex:1 —— 让它吃掉纸剩下的高度，短卡片也是整页纸，短句下面接着空白格线。 */
+  .body {
+    flex: 1;
     background-image: repeating-linear-gradient(
-      to bottom, transparent 0, transparent calc(1.95em - 1px),
-      #fceff3 calc(1.95em - 1px), #fceff3 1.95em);
+      to bottom,
+      transparent 0, transparent calc(var(--lh) - 2px),
+      #ddd2c0 calc(var(--lh) - 2px), #ddd2c0 var(--lh)
+    );
   }
-  p + p { margin-top: 1.95em; }
-  .foot { text-align: center; color: #b7a1ab; letter-spacing: .5em; margin-top: 18px; font-size: 12px; }
+  p { font-size: 16px; line-height: var(--lh); color: #3c3a38; white-space: pre-wrap; word-break: break-word; }
+  p + p { margin-top: var(--lh); }
+
+  /* meta 占满一整行，文字基线与正文落在同一条格线上 */
+  .entry + .entry { margin-top: var(--lh); }
+  .meta { height: var(--lh); display: flex; align-items: baseline; gap: 11px; }
+  .time { font-size: 13.5px; font-weight: 600; color: #8a7d73; font-variant-numeric: tabular-nums; }
+  .mood { font-size: 11.5px; padding: 1px 10px; border-radius: 999px; background: #fdeef2; color: #c2607c; border: 1px solid #f6d9e1; }
+  .who { font-size: 11.5px; color: #b3a69d; }
+
+  .foot {
+    margin-top: 30px; padding-top: 16px; border-top: 1px solid #ece3d7;
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; color: #bcb0a7; letter-spacing: .12em;
+  }
 </style>
+<style>{{ card_font_css }}</style>
 </head>
 <body>
-  <div class="paper">
-    <span class="book">{{ book_name }} · 共 {{ count }} 段</span>
-    <div class="stamp">— {{ date }} {{ weekday }} —</div>
-    {% for e in entries %}
-    <div class="entry">
-      <div class="meta">
-        <span class="time">{{ e.time }}</span>
-        {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
-        {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
-      </div>
-      {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+  <div class="sheet">
+    <div class="holes"><i></i><i></i><i></i></div>
+
+    <div class="head">
+      <span class="book">{{ book_name }} · 共 {{ count }} 段</span>
+      <span class="when"><b>{{ date }}</b><em>{{ weekday }}</em></span>
     </div>
-    {% endfor %}
-    <div class="foot">· · ·</div>
+
+    <div class="body">
+      {% for e in entries %}
+      <div class="entry">
+        <div class="meta">
+          <span class="time">{{ e.time }}</span>
+          {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
+          {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+        </div>
+        {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="foot"><span>她写下的这一天</span><span>· · ·</span></div>
   </div>
 </body>
 </html>

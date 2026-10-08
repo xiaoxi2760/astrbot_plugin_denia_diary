@@ -71,9 +71,27 @@ PANEL_EDIT_UNLIMITED_DEFAULT = False
 CARD_RENDER_CHOICES: tuple[str, ...] = ("pretty", "plain", "off")
 """pretty=HTML 模板（要联网走文转图端点）；plain=Markdown 渲染（可离线）；off=只发文本。"""
 CARD_RENDER_DEFAULT = "pretty"
-CARD_STYLE_CHOICES: tuple[str, ...] = ("paper", "ink", "postcard")
-"""pretty 档的模板款式：paper=纸感（面板同款，默认）；ink=墨信；postcard=明信片。"""
+CARD_STYLE_CHOICES: tuple[str, ...] = ("paper", "ink", "postcard", "tape", "dots", "seal")
+"""pretty 档的模板款式：paper=纸感（面板同款，默认）；ink=墨信；postcard=明信片；
+tape=手帐；dots=点阵本；seal=火漆信笺。
+枚举是唯一来源（``_conf_schema.json`` 与模板文件都跟它对齐，测试逐个核）。"""
 CARD_STYLE_DEFAULT = "paper"
+
+CARD_FONT_DEFAULT = ""
+"""日记卡自定义字体；空串＝用款式自带的那一套。"""
+
+FIELD_CHOICES: dict[str, tuple[str, ...]] = {
+    "diary.card_render": CARD_RENDER_CHOICES,
+    "diary.card_style": CARD_STYLE_CHOICES,
+}
+"""**枚举型**字符串字段 → 可选值。面板据此把自由文本框换成下拉框（第 15 步）。
+
+枚举只写在代码里这一处，schema 的 ``hint`` 只是给人看的说明、不是数据源；
+以前那个 hint 里写着"paper=纸感；ink=墨信…"，用户得手打 ``paper``——输错一个字母
+就静默回落默认值，界面上看不出哪儿错了。改成下拉就没有输错这回事。
+
+要加新款式：往 ``CARD_STYLE_CHOICES`` 加一项 + 放一个同名模板文件即可，
+这里和 ``test_main`` 的"枚举 ↔ 模板"一致性检查会自动跟上。"""
 
 _NOTEBOOK_DEFAULTS: dict[str, int] = {
     "promise_limit": 20,  # 约定上限（每人，按未完成计）
@@ -148,6 +166,7 @@ def default_config() -> dict[str, Any]:
             **dict(_DIARY_DEFAULTS),
             "card_render": CARD_RENDER_DEFAULT,
             "card_style": CARD_STYLE_DEFAULT,
+            "card_font": CARD_FONT_DEFAULT,
             "panel_edit_unlimited": PANEL_EDIT_UNLIMITED_DEFAULT,
         },
         "notebook": dict(_NOTEBOOK_DEFAULTS),
@@ -173,6 +192,7 @@ class Settings:
         **dict(_DIARY_DEFAULTS),
         "card_render": CARD_RENDER_DEFAULT,
         "card_style": CARD_STYLE_DEFAULT,
+        "card_font": CARD_FONT_DEFAULT,
         "panel_edit_unlimited": PANEL_EDIT_UNLIMITED_DEFAULT,
     })
     notebook: Mapping[str, int] = field(default_factory=lambda: dict(_NOTEBOOK_DEFAULTS))
@@ -245,6 +265,13 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
         raw_diary.get("card_style") if isinstance(raw_diary, Mapping) else None,
         CARD_STYLE_CHOICES, CARD_STYLE_DEFAULT, "diary.card_style", warnings,
     )
+    # 自定义字体：纯字符串，**不校验存在性**——渲染在远端无头浏览器里，
+    # 本机装没装那个字体根本不是判据（真正的校验交给浏览器回落）。
+    # ⚠️ raw_diary 可能压根不是对象（配置写坏了），取键前先判类型，
+    #    否则这里会 AttributeError，把"降级不报错"的规矩破掉。
+    diary["card_font"] = _as_text(
+        raw_diary.get("card_font") if isinstance(raw_diary, Mapping) else None
+    )[:200]
     # 面板改删豁免窗（bool）：缺键静默用默认 False，写了非 bool 才 warning。
     diary["panel_edit_unlimited"] = _as_bool(
         raw_diary.get("panel_edit_unlimited") if isinstance(raw_diary, Mapping) else None,

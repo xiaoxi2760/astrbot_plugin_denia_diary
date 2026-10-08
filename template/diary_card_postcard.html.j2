@@ -1,4 +1,6 @@
 <!-- /看日记 · postcard 款：明信片——顶部主题色横幅 + 右上"邮票"，正文紧凑。
+     与另外两款同一条铁律：画布固定约 920px，收窄 body **裁不掉**，所以居中 + 撑满整页
+     （否则右边一大片空白，整张图看着像没对齐的事故）。
      数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -6,65 +8,78 @@
 <meta charset="utf-8" />
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+
   body {
-    background: #fdf8f3;
-    font: 14px/1.8 "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    --card-font-stack: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    width: 100%;
+    display: flex; justify-content: center;
+    padding: 40px 32px;
+    background: #f3ece2;
+    font: 16px/1.9 var(--card-font-stack);
     color: #463b32;
-    padding: 28px;
+    -webkit-font-smoothing: antialiased;
   }
+
   .card {
+    position: relative;
+    display: flex; flex-direction: column;
+    width: 100%; max-width: 724px;
+    min-height: calc(100vh - 80px);
     background: #fffdf9;
     border: 1px solid #eadfce;
-    border-radius: 14px;
+    border-radius: 16px;
     overflow: hidden;
-    box-shadow: 0 2px 4px rgba(120,96,56,.08), 0 10px 26px rgba(120,96,56,.12);
-    max-width: 560px;
+    box-shadow: 0 2px 4px rgba(120,96,56,.08), 0 16px 40px rgba(120,96,56,.14);
   }
+
+  /* 邮戳本身就是日期——所以日期只在右上角出现一次，左边留给书名 */
   .band {
-    background: linear-gradient(135deg, #e8b56e, #d99a4e);
+    background: linear-gradient(135deg, #e8b56e, #d2924a);
     color: #fff;
-    padding: 18px 24px;
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 12px;
+    padding: 26px 34px;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
   }
-  .band .date { font-size: 18px; font-weight: 600; letter-spacing: .06em; }
-  .band .weekday { font-size: 12px; opacity: .92; margin-top: 3px; letter-spacing: .2em; }
+  .band .book { font-size: 14px; letter-spacing: .3em; opacity: .95; }
+  .band .count { font-size: 12px; opacity: .82; margin-top: 7px; letter-spacing: .14em; }
   .stampbox {
-    border: 2px dashed rgba(255,255,255,.85);
-    border-radius: 8px;
-    padding: 5px 12px;
-    font-size: 11px;
-    text-align: center;
+    flex: none; text-align: right;
+    border: 2px solid rgba(255,255,255,.85);
+    border-radius: 10px;
+    padding: 8px 16px;
     line-height: 1.5;
-    white-space: nowrap;
   }
-  .body { padding: 20px 24px 16px; }
-  .entry + .entry { margin-top: 16px; padding-top: 14px; border-top: 1px dashed #f0e5d3; }
-  .meta { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
-  .time { font-size: 12px; font-weight: 600; color: #a08a68; font-variant-numeric: tabular-nums; }
-  .mood { font-size: 11px; padding: 1px 9px; border-radius: 999px; background: #fbeeda; color: #b7853c; border: 1px solid rgba(217,154,78,.36); }
-  .who { font-size: 11px; color: #b5a691; }
-  p { font-size: 14px; line-height: 1.85; color: #4a4033; white-space: pre-wrap; word-break: break-word; }
+  .stampbox .date { display: block; font-size: 19px; font-weight: 600; letter-spacing: .04em; }
+  .stampbox .weekday { display: block; font-size: 11.5px; opacity: .92; letter-spacing: .2em; margin-top: 3px; }
+
+  .body { flex: 1; padding: 30px 34px 24px; }
+  p { font-size: 16px; line-height: 1.95; color: #4a4033; white-space: pre-wrap; word-break: break-word; }
+  p + p { margin-top: 16px; }
+
+  .entry + .entry { margin-top: 26px; padding-top: 22px; border-top: 1px dashed #f0e5d3; }
+  .meta { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .time { font-size: 13px; font-weight: 600; color: #a08a68; font-variant-numeric: tabular-nums; }
+  .mood { font-size: 11.5px; padding: 1px 10px; border-radius: 999px; background: #fbeeda; color: #b7853c; border: 1px solid rgba(217,154,78,.36); }
+  .who { font-size: 11.5px; color: #b5a691; }
+
   .foot {
-    padding: 10px 24px 16px;
-    text-align: right;
-    font-size: 11px;
-    color: #b5a691;
-    letter-spacing: .1em;
+    padding: 16px 34px 22px;
+    border-top: 1px solid #f4ece0;
+    display: flex; justify-content: space-between;
+    font-size: 11.5px; color: #b5a691; letter-spacing: .1em;
   }
 </style>
+<style>{{ card_font_css }}</style>
 </head>
 <body>
   <div class="card">
     <div class="band">
       <div>
-        <div class="date">{{ date }}</div>
-        <div class="weekday">{{ weekday }}</div>
+        <div class="book">{{ book_name }}</div>
+        <div class="count">共 {{ count }} 段</div>
       </div>
-      <div class="stampbox">{{ book_name }}<br />{{ count }} 段</div>
+      <div class="stampbox"><span class="date">{{ date }}</span><span class="weekday">{{ weekday }}</span></div>
     </div>
+
     <div class="body">
       {% for e in entries %}
       <div class="entry">
@@ -77,7 +92,8 @@
       </div>
       {% endfor %}
     </div>
-    <div class="foot">— 写给今天的便签</div>
+
+    <div class="foot"><span>写给今天的便签</span><span>· · ·</span></div>
   </div>
 </body>
 </html>

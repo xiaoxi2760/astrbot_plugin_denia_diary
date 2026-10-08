@@ -1,0 +1,128 @@
+<!-- /看日记 · tape 款：手帐本。
+     照真手帐复刻的三条纪律（网上排行版总结的那几点，抄在这儿当规范）：
+       ① 大面积留白，文字**不要**铺满整张纸；
+       ② 配色不超过 3 种淡色，且少大面积涂色；
+       ③ 装饰只放在四边，**不许挡住正文**。
+     于是：和纸胶带压在上下两边、点状贴纸只在左侧留白区，正文栏干干净净。
+     胶带是半透的——真手帐的 washi tape 就是微透，叠在纸上能看见底下的纹。
+     数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    --card-font-stack: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    width: 100%;
+    display: flex; justify-content: center;
+    padding: 46px 34px;
+    background: #e8e2d6;
+    font: 16px/2 var(--card-font-stack);
+    color: #4a4239;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .sheet {
+    --lh: 34px;
+    position: relative;
+    display: flex; flex-direction: column;
+    width: 100%; max-width: 744px;
+    min-height: calc(100vh - 92px);
+    padding: 56px 54px 40px 76px;
+    background: #fdfaf3;
+    box-shadow: 0 1px 2px rgba(90,72,48,.08), 0 14px 36px rgba(90,72,48,.13);
+  }
+
+  .sheet::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  }
+
+  /* 和纸胶带：半透明 + 纤维横纹 + 一点点投影。真胶带就这质感。
+     斜一点是手贴的痕迹——摆正了反而不像。 */
+  .tape {
+    position: absolute; height: 34px; pointer-events: none;
+    background-color: rgba(233, 206, 205, .62);
+    background-image: repeating-linear-gradient(90deg, rgba(255,255,255,.16) 0 3px, transparent 3px 7px);
+    box-shadow: 0 1px 3px rgba(120,90,70,.10);
+  }
+  .tape.t1 { top: 22px;  left: 34px;  width: 168px; transform: rotate(-3deg); }
+  .tape.t2 { top: 20px;  right: 30px; width: 118px; transform: rotate(2.5deg); background-color: rgba(214, 224, 208, .60); }
+  .tape.t3 { bottom: 20px; left: 22px;  width: 104px; transform: rotate(2deg);  background-color: rgba(230, 216, 190, .58); }
+  .tape.t4 { bottom: 22px; right: 20px; width: 86px;  transform: rotate(-3deg); background-color: rgba(233, 206, 205, .55); }
+
+  /* 点状贴纸：只在左侧留白区，绝不压正文 */
+  .dots { position: absolute; left: 26px; top: 116px; display: flex; flex-direction: column; gap: 26px; }
+  .dots i { width: 9px; height: 9px; border-radius: 50%; }
+  .dots i:nth-child(1) { background: #d99a9a; }
+  .dots i:nth-child(2) { background: #a8bb99; }
+  .dots i:nth-child(3) { background: #e2c79b; }
+  .dots i:nth-child(4) { background: #cfc4dd; }
+  .dots i:nth-child(5) { background: #d99a9a; }
+
+  .head { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 18px; border-bottom: 1px solid #ece4d5; }
+  .book { font-size: 12.5px; letter-spacing: .34em; color: #a2957f; padding-top: 7px; }
+  .when { text-align: right; }
+  .when b { display: block; font-size: 21px; font-weight: 600; letter-spacing: .05em; color: #4a4239; }
+  .when em { font-style: normal; font-size: 12.5px; color: #ab9e88; letter-spacing: .14em; }
+
+  /* 细横线：淡到几乎只是"纸本来就有的纹"，不跟字抢 */
+  .body {
+    flex: 1;
+    padding-top: 10px;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0, transparent calc(var(--lh) - 1px),
+      #eee6d6 calc(var(--lh) - 1px), #eee6d6 var(--lh)
+    );
+  }
+  p { font-size: 16px; line-height: var(--lh); color: #4a4239; white-space: pre-wrap; word-break: break-word; }
+  p + p { margin-top: var(--lh); }
+
+  .entry + .entry { margin-top: var(--lh); }
+  .meta { height: var(--lh); display: flex; align-items: baseline; gap: 11px; }
+  .time { font-size: 13.5px; font-weight: 600; color: #9a8d76; font-variant-numeric: tabular-nums; }
+  .mood { font-size: 11.5px; padding: 1px 10px; border-radius: 999px; background: rgba(217,154,154,.14); color: #b47878; border: 1px solid rgba(217,154,154,.34); }
+  .who { font-size: 11.5px; color: #b3a691; }
+
+  .foot {
+    /* 左右各让出 130px：底下那两条胶带就落在让出来的空档里。
+       这就是"装饰只放四边、不挡正文"那条纪律——胶带在，正文也让开。 */
+    margin-top: 30px; padding: 15px 130px 0;
+    border-top: 1px solid #ece4d5;
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: #bcb09b; letter-spacing: .16em;
+  }
+</style>
+<style>{{ card_font_css }}</style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="tape t1"></div><div class="tape t2"></div>
+    <div class="tape t3"></div><div class="tape t4"></div>
+    <div class="dots"><i></i><i></i><i></i><i></i><i></i></div>
+
+    <div class="head">
+      <span class="book">{{ book_name }} · 共 {{ count }} 段</span>
+      <span class="when"><b>{{ date }}</b><em>{{ weekday }}</em></span>
+    </div>
+
+    <div class="body">
+      {% for e in entries %}
+      <div class="entry">
+        <div class="meta">
+          <span class="time">{{ e.time }}</span>
+          {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
+          {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+        </div>
+        {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="foot"><span>手帐 · 她写下的这一天</span><span>· · ·</span></div>
+  </div>
+</body>
+</html>

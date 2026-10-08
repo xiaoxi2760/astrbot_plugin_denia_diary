@@ -1,0 +1,97 @@
+<!-- /看日记 · dots 款：点阵本（bullet journal）。
+     和 grid 款的区别就在这一条：网格是**线**、点阵是**点**。点阵透气得多，
+     字写在上头不打架——真手帐做 bullet journal 用的就是点阵不是方格。
+     配色守住 3 种淡色（象牙 / 灰绿 / 陶土），装饰只在右边留白区。
+     数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    --card-font-stack: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    width: 100%;
+    display: flex; justify-content: center;
+    padding: 46px 34px;
+    background: #e6e8e4;
+    font: 16px/2 var(--card-font-stack);
+    color: #3d453f;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .sheet {
+    --lh: 34px;
+    --g: 26px;                 /* 点距 = 约 0.8 个行高，点阵才不会和行打架 */
+    position: relative;
+    display: flex; flex-direction: column;
+    width: 100%; max-width: 740px;
+    min-height: calc(100vh - 92px);
+    padding: 52px 54px 40px 60px;
+    background: #fdfdfb;
+    box-shadow: 0 1px 2px rgba(50,60,52,.08), 0 14px 36px rgba(50,60,52,.12);
+  }
+
+  /* 点阵：radial-gradient 一个点 + background-size 平铺。一个点也别用 DOM 画。 */
+  .body {
+    flex: 1;
+    padding-top: 12px;
+    background-image: radial-gradient(circle, #d3dbd2 1.4px, transparent 1.5px);
+    background-size: var(--g) var(--g);
+  }
+  p { font-size: 16px; line-height: var(--lh); color: #3d453f; white-space: pre-wrap; word-break: break-word; }
+  p + p { margin-top: var(--lh); }
+
+  .head { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 18px; border-bottom: 2px solid #e4e9e2; }
+  .book { font-size: 12.5px; letter-spacing: .34em; color: #9aa79b; padding-top: 7px; }
+  .when { text-align: right; }
+  .when b { display: block; font-size: 21px; font-weight: 600; letter-spacing: .05em; color: #333c35; }
+  .when em { font-style: normal; font-size: 12.5px; color: #9aa79b; letter-spacing: .14em; }
+
+  .entry + .entry { margin-top: var(--lh); }
+  .meta { height: var(--lh); display: flex; align-items: baseline; gap: 11px; }
+  /* 前面那颗实心点就是 bullet journal 的 "bullet"，不是装饰是结构 */
+  .meta::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #c1745c; align-self: center; }
+  .time { font-size: 13.5px; font-weight: 600; color: #7f8d80; font-variant-numeric: tabular-nums; }
+  .mood { font-size: 11.5px; padding: 1px 10px; border-radius: 999px; background: rgba(160,178,160,.18); color: #6d8270; border: 1px solid rgba(160,178,160,.4); }
+  .who { font-size: 11.5px; color: #a6b0a4; }
+
+  /* 右边留白区的小刻度：给"手账本"一点秩序感，不碰正文 */
+  .ticks { position: absolute; right: 22px; top: 150px; display: flex; flex-direction: column; gap: 22px; }
+  .ticks i { width: 14px; height: 2px; background: #dfe4dc; }
+  .ticks i:nth-child(4) { background: #c1745c; width: 20px; }
+
+  .foot {
+    margin-top: 30px; padding-top: 15px; border-top: 2px solid #e4e9e2;
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: #a8b2a6; letter-spacing: .16em;
+  }
+</style>
+<style>{{ card_font_css }}</style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="ticks"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="head">
+      <span class="book">{{ book_name }} · 共 {{ count }} 段</span>
+      <span class="when"><b>{{ date }}</b><em>{{ weekday }}</em></span>
+    </div>
+
+    <div class="body">
+      {% for e in entries %}
+      <div class="entry">
+        <div class="meta">
+          <span class="time">{{ e.time }}</span>
+          {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
+          {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+        </div>
+        {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="foot"><span>点阵本 · 她写下的这一天</span><span>· · ·</span></div>
+  </div>
+</body>
+</html>

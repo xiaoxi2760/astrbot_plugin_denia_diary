@@ -5,7 +5,7 @@ desc: 日记和主动消息插件，可让 bot 写日记并记录日程、好感
   数据全部落在可读的文件里（日记是纯文本），内核零第三方依赖、可离线测试；
   自带 WebUI 观察面板（总览 / 日记 / 小本本 / 熟悉度 / 曲线与主动 / 数据 / 设置），
   面板标题和首页立绘都可以自己改。
-version: 1.3.0
+version: 1.4.0
 author: "xiaoxi2760"
 repo: https://github.com/xiaoxi2760/astrbot_plugin_denia_diary
 astrbot_version: ">=4.24.2"

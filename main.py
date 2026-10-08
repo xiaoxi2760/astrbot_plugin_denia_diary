@@ -88,6 +88,87 @@ CARD_TEMPLATE_DIR = Path(__file__).resolve().parent / "template"
 """/看日记 的 Jinja2 模板目录（纸感 / 墨信 / 明信片）。模板在**插件目录**而不是数据目录：
 它是随版本发布的产品文件，用户不需要改；读不到按"模板缺失"走降级链，不炸。"""
 
+_CARD_RENDER_OPTIONS = {"type": "png", "quality": 95}
+"""出图参数（会覆盖宿主 ``html_render`` 的默认值）。
+
+⚠️ 宿主的默认是 ``{"type": "jpeg", "quality": 40}``（见 AstrBot
+``astrbot/core/utils/t2i/network_strategy.py``）。40 的 JPEG 压 15~16px 的中文小字，
+字缘全是振铃、纸纹和横格线直接断层——卡片"丑"有一大半是它造成的，不是模板。
+这里改成 PNG + q95：字干净了，代价是单张从几百 KB 涨到 1~3 MB（发 QQ 有流量代价，
+但对一天发一次的卡片可以接受）。未知键会被远端忽略，多传无副作用。"""
+
+_FONT_FAMILY_RE = re.compile(r"^[A-Za-z0-9 \u4e00-\u9fff,._'\-()]{1,180}$")
+"""字体名白名单：只放行"字体名/字体栈"该有的字符。"""
+_FONT_URL_RE = re.compile(
+    r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+\.(?:woff2?|ttf|otf|eot)$",
+    re.IGNORECASE,
+)
+"""字体文件直链：只放行 http(s) + 常见字体后缀，杜绝 ``javascript:`` 之类的伪协议。"""
+
+_CARD_FONT_FAMILY = "CardFont"
+"""注入的 @font-face 家族名。模板里正文统一用它，配置为空时它压根不会被定义——
+``font-family`` 拿不到这个家族就自动回落款式自带的字体栈。"""
+
+_CARD_STYLE_LABELS: dict[str, str] = {
+    "paper": "纸感",
+    "ink": "墨信",
+    "postcard": "明信片",
+    "tape": "手帐",
+    "dots": "点阵本",
+    "seal": "火漆信笺",
+}
+"""款式 → 中文名。给人看的（指令回执、报错），**不参与判定**——
+真正的合法性只看它在不在 ``CARD_STYLE_CHOICES`` 里。"""
+
+_CARD_STYLE_ALIASES: dict[str, str] = {
+    "纸": "paper", "纸感": "paper", "横线": "paper", "横线纸": "paper", "本子": "paper",
+    "信": "ink", "墨": "ink", "墨信": "ink", "书信": "ink", "信纸": "ink",
+    "明信片": "postcard", "卡片": "postcard",
+    "手帐": "tape", "手账": "tape", "胶带": "tape", "washi": "tape",
+    "点阵": "dots", "点阵本": "dots", "点": "dots",
+    "火漆": "seal", "火漆信笺": "seal", "印章": "seal",
+}
+"""中文/口语别名 → 款式键。``/日记款式 手帐`` 总比 ``/日记款式 tape`` 好打，
+认不出的字就当没给（回一句"没有这一款"，别静默回落默认值——那正是当初
+把它做成文本框的毛病）。"""
+
+
+def _match_card_style(raw: str) -> str | None:
+    """用户敲的款式名 → 合法款式键；认不出返回 ``None``（**不**静默回落）。"""
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+    if text in settings_mod.CARD_STYLE_CHOICES:
+        return text
+    return _CARD_STYLE_ALIASES.get(text)
+
+
+def _card_font_css(raw: object) -> str:
+    """把配置里的 ``diary.card_font`` 变成一段可安全内联的 CSS（空串＝不改字体）。
+
+    两种写法都认：
+
+    - **字体文件直链**（``https://…/xxx.woff2``）→ 生成 ``@font-face``；
+    - **字体名 / 字体栈**（``Noto Serif SC, serif``）→ 直接当 ``font-family``。
+
+    ⚠️ 这一段是**原样**进模板 ``<style>`` 的（不像正文那样走 html.escape——它是 CSS，
+    转义了就废了），所以必须自己把住关：两个正则都是白名单式匹配，任何一个不过就
+    整条丢弃、退回模板默认字体。**宁可字体没生效，也不能让人往配置里塞 ``</style>``。**
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    if _FONT_URL_RE.match(value):
+        return (
+            f"@font-face{{font-family:'{_CARD_FONT_FAMILY}';"
+            f"src:url('{value}') format('woff2');font-display:swap;}}"
+            f"body{{font-family:'{_CARD_FONT_FAMILY}',var(--card-font-stack);}}"
+        )
+    if _FONT_FAMILY_RE.match(value):
+        return f"body{{font-family:{value},var(--card-font-stack);}}"
+    logger.warning("[%s] card_font 写法认不出来，已忽略：%r", PLUGIN_NAME, value[:80])
+    return ""
+
 CARD_WEEK_CN = "一二三四五六日"
 """星期几的中文字（Monday=0 对齐 ``date.weekday()``）。"""
 
@@ -850,6 +931,8 @@ Args:
                 "weekday": weekday,
                 "book_name": book_name,
                 "count": len(entries),
+                # 自定义字体（配置为空时是空串，模板里那行 <style> 就是空的）
+                "card_font_css": _card_font_css(self.settings.diary.get("card_font")),
                 "entries": [
                     {
                         "time": html.escape(str(e.get("time") or ""), quote=False),
@@ -867,7 +950,9 @@ Args:
                 tmpl = (CARD_TEMPLATE_DIR / f"diary_card_{style}.html.j2").read_text(
                     encoding="utf-8"
                 )
-                path = await self.html_render(tmpl, data, return_url=False)
+                path = await self.html_render(
+                    tmpl, data, return_url=False, options=_CARD_RENDER_OPTIONS
+                )
                 yield event.image_result(path)
                 return
             except Exception as error:  # noqa: BLE001 - 端点不通/模板缺失都走降级
@@ -883,6 +968,51 @@ Args:
                 "[%s] 日记卡 Markdown 渲染失败，发纯文本：%s", PLUGIN_NAME, error
             )
         yield event.plain_result(markdown)
+
+    @filter.command("日记款式", alias={"日记卡样式", "换日记款式"})
+    async def diary_card_style(self, event: AstrMessageEvent, style: str = "") -> None:
+        """换 /看日记 的卡片款式（/日记款式 或 /日记款式 手帐）
+
+        只改款式，**落盘 + 热生效**（走 ``apply_settings``，与面板里改同一套路径），
+        所以私聊和面板看到的是同一份配置，不会"面板改了聊天里没变"。
+
+Args:
+            style(string): 款式名（paper / ink / postcard / tape / dots / seal）；
+                不填就报当前款式和全部可选。
+        """
+        _render, current = self._card_cfg()
+        wanted = str(style or "").strip()
+        if not wanted:
+            names = "　".join(
+                f"「{s}」{_CARD_STYLE_LABELS.get(s, s)}" + ("（当前）" if s == current else "")
+                for s in settings_mod.CARD_STYLE_CHOICES
+            )
+            yield event.plain_result(f"日记卡现在是「{_CARD_STYLE_LABELS.get(current, current)}」。\n可选：{names}")
+            return
+
+        key = _match_card_style(wanted)
+        if key is None:
+            names = "、".join(settings_mod.CARD_STYLE_CHOICES)
+            yield event.plain_result(
+                f"没有「{wanted}」这一款。可选：{names}\n（也可以在面板「设置 → 内容 → 日记卡款式」里下拉选）"
+            )
+            return
+        if key == current:
+            yield event.plain_result(f"已经是「{_CARD_STYLE_LABELS.get(key, key)}」了。")
+            return
+
+        result = await self.apply_settings(
+            {**dict(self.config), "diary": {**dict(self.settings.diary), "card_style": key}},
+            applied=["diary.card_style"],
+        )
+        if not result.get("ok"):
+            yield event.plain_result(
+                str(result.get("error") or "换不了") + "（配置没动，还是原来那款）"
+            )
+            return
+        yield event.plain_result(
+            f"换成「{_CARD_STYLE_LABELS.get(key, key)}」了，/看日记 就是这个样子。"
+        )
 
     # ---- 提示挂载点（被动轮） --------------------------------------------------
 

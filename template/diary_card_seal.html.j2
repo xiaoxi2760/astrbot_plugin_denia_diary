@@ -1,0 +1,115 @@
+<!-- /看日记 · seal 款：火漆信笺。
+     参照的是老式书信：米黄笺纸、双细线内框、右下角一枚火漆印。
+     **火漆印不是贴图**——radial-gradient 叠出来的：外圈暗红、中间高光、
+     边缘微微不圆，是真的漆压出来的样子。渲染在远端，贴图读不到，只能这么画。
+     内框留出 18px 白边就是"大面积留白"那条纪律；正文不铺满，右边留一截。
+     数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    --card-font-stack: "Songti SC", "SimSun", "Noto Serif SC", serif;
+    width: 100%;
+    display: flex; justify-content: center;
+    padding: 46px 34px;
+    background: #e5ddcd;
+    font: 16px/2 var(--card-font-stack);
+    color: #3b3229;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .sheet {
+    --lh: 36px;
+    position: relative;
+    display: flex; flex-direction: column;
+    width: 100%; max-width: 736px;
+    min-height: calc(100vh - 92px);
+    padding: 30px 30px 30px;
+    background: #f6f0e1;
+    box-shadow: 0 1px 2px rgba(80,62,38,.10), 0 16px 40px rgba(80,62,38,.16);
+  }
+
+  /* 双细线内框：老信笺的边。留 18px 白边就是那片"留白" */
+  .frame { position: absolute; inset: 18px; border: 1px solid #c3ad84; pointer-events: none; }
+  .frame::after { content: ""; position: absolute; inset: 4px; border: 1px solid #ddcbaa; }
+
+  .sheet::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E");
+  }
+
+  /* 火漆印：三层 radial-gradient——底影、外圈、中心高光。
+     收一档饱和度：太艳就成了整张卡的唯一焦点，压过她的字。 */
+  .seal {
+    position: absolute; right: 62px; bottom: 64px;
+    width: 70px; height: 70px; border-radius: 50%;
+    background-image:
+      radial-gradient(circle at 36% 30%, rgba(203,131,116,.92) 0 18%, rgba(165,79,67,.94) 46%, rgba(132,58,49,.95) 74%, rgba(108,42,37,.97) 100%);
+    box-shadow: 0 3px 7px rgba(120,60,48,.26), inset 0 -2px 5px rgba(90,40,32,.42), inset 0 2px 4px rgba(255,195,180,.30);
+  }
+  .seal::after {
+    content: ""; position: absolute; inset: 21px; border-radius: 50%;
+    border: 1.5px solid rgba(120,40,34,.5);
+  }
+
+  .inner { position: relative; display: flex; flex-direction: column; flex: 1; padding: 20px 26px 26px; }
+
+  .head { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid #d8c5a2; }
+  .book { font-size: 13px; letter-spacing: .3em; color: #8d7852; padding-top: 8px; }
+  .when { text-align: right; }
+  .when b { display: block; font-size: 21px; letter-spacing: .12em; color: #3b3229; }
+  .when em { font-style: normal; font-size: 12.5px; color: #93805c; letter-spacing: .24em; margin-top: 5px; }
+
+  /* 右边留 26px 给火漆印；正文别顶到边框，首行缩进 2em 也够宽 */
+  .body { flex: 1; padding: 26px 26px 0 0; }
+  p { font-size: 16.5px; line-height: var(--lh); color: #40372c; white-space: pre-wrap; word-break: break-word; text-indent: 2em; }
+  p + p { margin-top: 18px; }
+
+  .entry + .entry { margin-top: 30px; padding-top: 24px; border-top: 1px dashed #ddcbaa; }
+  .meta { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+  .time { font-size: 13px; color: #8d7852; font-variant-numeric: tabular-nums; letter-spacing: .06em; }
+  .mood { font-size: 13.5px; color: #a06a4c; }
+  .mood::before { content: "◦ "; }
+  .who { font-size: 12.5px; color: #a08f6d; }
+
+  .foot {
+    margin-top: 30px; padding-top: 18px; padding-right: 26px;
+    border-top: 1px solid #d8c5a2;
+    display: flex; justify-content: space-between;
+    font-size: 11.5px; color: #9c8a68; letter-spacing: .2em;
+  }
+</style>
+<style>{{ card_font_css }}</style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="frame"></div>
+    <div class="seal"></div>
+    <div class="inner">
+      <div class="head">
+        <span class="book">{{ book_name }} · 共 {{ count }} 段</span>
+        <span class="when"><b>{{ date }}</b><em>{{ weekday }}</em></span>
+      </div>
+
+      <div class="body">
+        {% for e in entries %}
+        <div class="entry">
+          <div class="meta">
+            <span class="time">{{ e.time }}</span>
+            {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
+            {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+          </div>
+          {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="foot"><span>她写下的这一天</span></div>
+    </div>
+  </div>
+</body>
+</html>

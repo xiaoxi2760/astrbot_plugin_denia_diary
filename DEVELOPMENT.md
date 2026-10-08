@@ -62,7 +62,8 @@ astrbot_plugin_denia_diary/
 | `note_complete` | 把约定销账（写 `done_at`，完成即腾坑） |
 | `note_forget` | 删一条（先过归属判定，进 `trash` 回收站） |
 | `mood_report` | 心情自报（`word` 原词 + 可选 `valence` / `arousal` 字符串打分）；**没有 `affinity_*` 工具**，她不碰熟悉度数值 |
-| `@filter.command("看日记")`（别名 /日记卡） | **唯一的用户指令**（第 14 步）：把一天渲染成图片卡。读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（`text_to_image`，本地 Pillow 可离线）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape） |
+| `@filter.command("看日记")`（别名 /日记卡） | **用户指令，不是 LLM 工具**（第 14 步）：人主动敲才跑，把一天渲染成图片卡。读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（`text_to_image`，本地 Pillow 可离线）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape）。六款模板 + 自定义字体见 [日记卡](#日记卡第-15-步重做) |
+| `@filter.command("日记款式")`（别名 /日记卡样式、/换日记款式） | **换卡片款式**（第 15 步，同属用户指令）：`/日记款式 手帐`。落盘 + 热生效，走 `apply_settings`；认不出的款式明说不静默回落 |读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（`text_to_image`，本地 Pillow 可离线）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape）。六款模板 + 自定义字体见 [日记卡](#日记卡第-15-步重做) |
 | `on_llm_request`（priority=5） | 先 `affinity.touch`（私聊 private / 群聊 mention）+ `proactive.note_contact`（person→会话反查表），再把 `core.compose` 渲染的一段挂进 `req.extra_user_content_parts`（见下）；**主动轮不触发它**，那边走 `payload.note` |
 | `on_using_llm_tool` | **确认点**：主动唤醒路径里她真调了 `send_message_to_user`（事件带 `cron_job` extra）→ 写 `last_sent_at`；被动轮同一工具不算 |
 | `initialize` / `terminate` | 生命周期。`initialize()` 重建巡检 job（basic handler 只在内存注册表，热重载即失效 → 按 name 查旧 job 一律 delete 再 add）；`terminate()` 冲熟悉度合并写窗口 |
@@ -185,6 +186,105 @@ astrbot_plugin_denia_diary/
 | 剥法 | 整段删掉（不替换成文字），并压掉因此产生的多余空格与换行前的悬空空格 |
 | 剥空 | 剥完只剩空白 → **保持原文**，绝不发出空串 |
 | 绝不抛异常 | 整段 `try/except`；清洗坏了就按原文发送——**清洗坏了不能连累她说话** |
+
+## 日记卡（第 15 步重做）
+
+`/看日记` 出图丑，主因**不是模板**，是出图参数。宿主的 `html_render` 默认是
+`{"full_page": True, "type": "jpeg", "quality": 40}`（见 AstrBot
+`astrbot/core/utils/t2i/network_strategy.py`），插件不传 `options` 就全盘继承——
+**JPEG quality 40 压 15~16px 中文小字**，字缘全是振铃、纸纹和横格线直接断层。
+现在显式传 `_CARD_RENDER_OPTIONS = {"type": "png", "quality": 95}`。
+
+### 画布与版式（改模板前必读）
+
+| 事实 | 后果 |
+| :--- | :--- |
+| 画布固定**约 920px**（宿主自带 t2i 模板写的是 `width: min(100%, 920px)`） | 截图取文档滚动宽度，**把 body 收窄裁不掉**，只会让纸挤在左边、右边一大片空白（旧版就是这样） |
+| 截图高度取 `max(内容高, 视口高)` | 内容短时底部空一大片 → `.sheet` 用 `min-height: calc(100vh - 80px)` 撑满 |
+| 渲染发生在**远端**无头浏览器 | `template/` 下的图片它读不到，只有 **data URI / 公网 URL** 才有效；纸纹一律内联 SVG |
+
+**纵向节奏只认一个基准**：每款模板都有 `--lh`，正文行高、段间距、`.meta` 行高、
+`.entry` 间距**全部取它的整数倍**。差半个行高，文字就骑到横线上去（旧版也是）。
+
+**日期只在右上角出现一次**。页脚再抄一遍是冗余，`test_main.py` 逐款钉住
+`{{ date }}` 在模板里只出现 1 次。
+
+### 六款模板
+
+| `card_style` | 样子 |
+| :--- | :--- |
+| `paper`（默认） | 横线纸：装订孔 + 红边线 + 内联 SVG 纸纹，横线 2px |
+| `ink` | 墨信：米色纸、衬线字、抬头双细线、正文首行缩进 2em |
+| `postcard` | 明信片：暖橙渐变横幅，右上角是"邮戳"（日期就在这儿） |
+| `tape` | 手帐：半透明和纸胶带压四角 + 左侧点状贴纸 + 淡横线 |
+| `dots` | 点阵本（bullet journal）：点阵不是方格，字写在上头不打架 |
+| `seal` | 火漆信笺：双细线内框 + 右下火漆印 + 衬线字首行缩进 |
+
+枚举唯一来源是 `core/settings.py` 的 `CARD_STYLE_CHOICES`；`test_main.py` 会核
+**每个枚举都有对应模板文件**（少一个就静默走降级链出丑图）。`tools/preview_card.py`
+的默认款式列表也**读同一份枚举**——写死过一次，加了新款忘了改，预览就只渲三款。
+
+### 换款式的两条路
+
+**① 面板下拉选。** `core/settings.py` 的 `FIELD_CHOICES` 登记"哪些字段是枚举型"
+（目前 `diary.card_render` / `diary.card_style`），`describe_schema` 据此给字段
+挂一个 `choices` 键，前端就把自由文本框换成 `<select>`。
+
+以前是文本框：选项只写在 hint 里，用户得手打 ``paper``，**输错一个字母就静默回落
+默认值、界面上完全看不出哪儿错了**。改成下拉就没有输错这回事。当前值不在枚举里时
+会被补进选项（旧配置升上来时老值不该被下拉框藏起来）。
+
+**② 聊天指令 `/日记款式`**（别名 `/日记卡样式`、`/换日记款式`）：
+
+```
+/日记款式           → 报当前款式 + 全部可选
+/日记款式 手帐      → 换（中文别名认得，不用打 tape）
+/日记款式 认不出的  → 明说"没有这一款"，**不**静默回落
+```
+
+走的是 `apply_settings`——**落盘 + 热生效**，和面板同一套路径，所以私聊和面板看到的
+是同一份配置，不会"面板改了聊天里没变"。只动 `card_style` 一个键，其余日记参数原样带过。
+
+### 手帐排版的三条纪律
+
+后三款（手帐 / 点阵 / 火漆）是照真手帐复刻的，纪律抄在这儿当规范，新增款式照办：
+
+1. **大面积留白，文字不要铺满整张纸**；
+2. **配色不超过 3 种淡色**，少大面积涂色；
+3. **装饰只放在四边，不许挡住正文**。
+
+第三条最容易犯：`tape` 款的页脚左右各让出 130px，底下那两条胶带正好落在让出来的空档里。
+`seal` 款的火漆印压在右下角、页脚就把 ✦ 撤了——一款只留一处装饰。
+
+> ⚠️ 装饰一律**用 CSS / 内联 SVG 画**，不引外部贴图：渲染在远端无头浏览器里，
+> `template/` 下的图片它读不到（火漆、和纸胶带、点状贴纸都是 `radial-gradient` /
+> `repeating-linear-gradient` 叠出来的）。
+
+### 自定义字体
+
+`diary.card_font`（字符串，默认空＝用款式自带的）。两种写法：
+
+- 字体名 / 字体栈：`Noto Serif SC, serif` → 直接进 `font-family`
+- 字体文件直链：`https://…/x.woff2` → 生成 `@font-face`
+
+⚠️ 生成的 CSS 是**原样**内联进模板 `<style>` 的（不像正文那样 `html.escape`——
+它是 CSS，转义了就废了），所以 `_card_font_css` 用**白名单正则**自己把关：
+字体名只放行 `[A-Za-z0-9 中文 ,._'()]`；直链只放行 `http(s)://…` + 字体后缀。
+任何一个不过就整条丢弃、退回款式默认字体并记日志——**宁可字体没生效，
+也不能让人往配置里塞 `</style>`**。`test_main.py` 逐条钉死了几个注入样本。
+
+### 本地预览
+
+```bash
+py tools/preview_card.py            # 六款并排写到 test/.tmp/cards/index.html
+py tools/preview_card.py paper      # 只看某一款
+py tools/preview_card.py --open paper
+```
+
+出图链路要 AstrBot 起着、要出网、还只看得到最终那张 PNG，改一行 CSS 看不到中间态。
+`tools/preview_card.py` 把模板本地渲成 HTML，浏览器直接看，用来迭代排版。
+它自己实现了那套模板用到的 Jinja2 子集（`{{ }}` / `{% for %}` / `{% if %}`），
+**不为预览给零依赖的仓库引第三方库**；用别的语法会渲不出来（会直接报错，不静默出空图）。
 
 ## 启用范围
 

@@ -142,7 +142,13 @@
         "type": "string",
         "default": "paper",
         "description": "日记卡款式",
-        "hint": "paper=纸感（默认，与面板同款）；ink=墨信；postcard=明信片。非法值回落 paper"
+        "hint": "paper=纸感（默认）；ink=墨信；postcard=明信片；tape=手帐；dots=点阵本；seal=火漆信笺。非法值回落 paper"
+      },
+      "card_font": {
+        "type": "string",
+        "default": "",
+        "description": "日记卡字体（自定义）",
+        "hint": "留空＝用款式自带的字体。填字体名（如 Noto Serif SC）或字体文件直链（http…woff2 / ttf / otf）都行"
       }
     }
   },

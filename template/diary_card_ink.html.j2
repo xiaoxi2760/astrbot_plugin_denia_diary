@@ -1,4 +1,6 @@
-<!-- /看日记 · ink 款：一封墨写信——米色纸、衬线字、无横线，抬头一条双细线。
+<!-- /看日记 · ink 款：一封墨信——米色纸、衬线字、抬头双细线、正文首行缩进。
+     与 paper 款同一条铁律：画布固定约 920px，收窄 body **裁不掉**，所以居中 + 撑满整页
+     （否则右边一大片空白，整张图看着像没对齐的事故）。
      数据里的文本一律由 main.py 先做 HTML 转义再进来，模板里不写 |safe。 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -6,55 +8,81 @@
 <meta charset="utf-8" />
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+
   body {
-    background: #f4efe6;
-    font: 15px/2.05 "Songti SC", "SimSun", "Noto Serif SC", serif;
+    --card-font-stack: "Songti SC", "SimSun", "Noto Serif SC", serif;
+    width: 100%;
+    display: flex; justify-content: center;
+    padding: 40px 32px;
+    background: #e9e0cf;
+    font: 16px/2 var(--card-font-stack);
     color: #3a3226;
-    padding: 28px;
+    -webkit-font-smoothing: antialiased;
   }
+
   .letter {
+    position: relative;
+    display: flex; flex-direction: column;
+    width: 100%; max-width: 724px;
+    min-height: calc(100vh - 80px);
+    padding: 46px 60px 34px;
     background: #fbf7ee;
-    border: 1px solid #e4dac6;
-    border-radius: 8px;
-    padding: 34px 38px 26px;
-    box-shadow: 0 1px 2px rgba(90,74,48,.08), 0 10px 28px rgba(90,74,48,.10);
-    max-width: 560px;
+    border: 1px solid #e2d8c2;
+    box-shadow: 0 1px 2px rgba(90,74,48,.08), 0 16px 40px rgba(90,74,48,.13);
   }
-  .head {
-    text-align: center;
-    padding-bottom: 16px;
-    margin-bottom: 24px;
-    border-bottom: 3px double #cbbfa4;
+
+  /* 纸纹：同 paper 款，靠内联 SVG，不引外部文件（渲染在远端，读不到本地资源） */
+  .letter::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E");
   }
-  .date { font-size: 17px; letter-spacing: .18em; color: #3a3226; }
-  .weekday { font-size: 12px; color: #8a7a5c; margin-top: 4px; letter-spacing: .3em; }
-  .entry + .entry { margin-top: 26px; padding-top: 22px; border-top: 1px solid #e8dfc9; }
-  .meta { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
-  .time { font-size: 12.5px; color: #8a7a5c; font-variant-numeric: tabular-nums; }
-  .mood { font-size: 13px; color: #9a6b4f; }
+
+  /* 日期只在右上角出现一次（页脚不再抄一遍） */
+  .head { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 22px; margin-bottom: 34px; border-bottom: 3px double #cbbfa4; }
+  .book { font-size: 12.5px; letter-spacing: .34em; color: #8a7a5c; padding-top: 9px; }
+  .when { text-align: right; }
+  .when b { display: block; font-size: 21px; letter-spacing: .16em; color: #3a3226; }
+  .when em { font-style: normal; font-size: 12.5px; color: #8a7a5c; margin-top: 7px; letter-spacing: .3em; }
+
+  .body { flex: 1; }
+  p { font-size: 16.5px; line-height: 2.1; color: #43392a; white-space: pre-wrap; word-break: break-word; text-indent: 2em; }
+  p + p { margin-top: 20px; }
+
+  .entry + .entry { margin-top: 34px; padding-top: 28px; border-top: 1px solid #e8dfc9; }
+  .meta { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+  .time { font-size: 13px; color: #8a7a5c; font-variant-numeric: tabular-nums; letter-spacing: .06em; }
+  .mood { font-size: 14px; color: #9a6b4f; }
   .mood::before { content: "◦ "; }
-  .who { font-size: 12px; color: #a5987a; }
-  p { font-size: 15.5px; line-height: 2.05; color: #43392a; white-space: pre-wrap; word-break: break-word; }
-  p + p { margin-top: 14px; text-indent: 2em; }
-  .foot { text-align: center; color: #a5987a; margin-top: 22px; font-size: 12px; letter-spacing: .4em; }
+  .who { font-size: 12.5px; color: #a5987a; }
+
+  .foot {
+    margin-top: 34px; padding-top: 20px; text-align: center;
+    border-top: 1px solid #e8dfc9;
+    font-size: 12px; letter-spacing: .5em; color: #ab9d80;
+  }
 </style>
+<style>{{ card_font_css }}</style>
 </head>
 <body>
   <div class="letter">
     <div class="head">
-      <div class="date">{{ date }}</div>
-      <div class="weekday">{{ weekday }} · {{ book_name }}</div>
+      <span class="book">{{ book_name }} · 共 {{ count }} 段</span>
+      <span class="when"><b>{{ date }}</b><em>{{ weekday }}</em></span>
     </div>
-    {% for e in entries %}
-    <div class="entry">
-      <div class="meta">
-        <span class="time">{{ e.time }}</span>
-        {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
-        {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+
+    <div class="body">
+      {% for e in entries %}
+      <div class="entry">
+        <div class="meta">
+          <span class="time">{{ e.time }}</span>
+          {% if e.mood %}<span class="mood">{{ e.mood }}</span>{% endif %}
+          {% if e.who %}<span class="who">和 {{ e.who }}</span>{% endif %}
+        </div>
+        {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
       </div>
-      {% for p in e.paragraphs %}<p>{{ p }}</p>{% endfor %}
+      {% endfor %}
     </div>
-    {% endfor %}
+
     <div class="foot">✦</div>
   </div>
 </body>

@@ -476,6 +476,31 @@
         };
       }
 
+      /* 枚举型字符串（diary.card_style / card_render…）：下拉框。
+         以前是自由文本框——选项只写在 hint 里，用户得手打英文键名，输错一个字母
+         就静默回落默认值，界面上完全看不出哪儿错了。 */
+      var choices = Array.isArray(field.choices) ? field.choices : null;
+      if (choices && choices.length) {
+        var select = ctx.UI.h("select", { class: "set-input set-select" });
+        /* 选项**当场**建好：``renderField`` 只会 ``makeControl(field, current)``，
+           从不回头调 ``control.set(current)``——其它控件是在 makeControl 里自己
+           赋初值的，下拉框照抄这个约定（等 set() 的话框是空的）。 */
+        function fill(value) {
+          ctx.UI.clear(select);
+          choices.forEach(function (opt) {
+            select.appendChild(ctx.UI.h("option", {
+              value: opt, text: opt, selected: opt === String(value),
+            }));
+          });
+        }
+        fill(current);
+        return {
+          el: select,
+          read: function () { return { __value: select.value, __error: "" }; },
+          set: function (v) { fill(v); },
+        };
+      }
+
       /* string：默认带换行的（作息表）用 textarea，其余单行 */
       var multiline = !!field.multiline;
       var input = ctx.UI.h(multiline ? "textarea" : "input", {

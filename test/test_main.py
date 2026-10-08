@@ -1075,17 +1075,19 @@ class DiaryCardTest(PluginCase):
 
         return _CardEvent()
 
-    def test_command_registered_with_alias_and_docstring(self) -> None:
-        commands = [
-            (name, kwargs, func)
+    def test_commands_are_registered_with_aliases_and_docstrings(self) -> None:
+        commands = {
+            name: (kwargs, func)
             for kind, name, func, kwargs in self.registry["hooks"]
             if kind == "command"
-        ]
-        self.assertEqual(len(commands), 1)
-        name, kwargs, func = commands[0]
-        self.assertEqual(name, "看日记")
-        self.assertEqual(kwargs.get("alias"), {"日记卡"})
-        self.assertTrue((func.__doc__ or "").strip())
+        }
+        self.assertEqual(set(commands), {"看日记", "日记款式"})
+        self.assertEqual(commands["看日记"][0].get("alias"), {"日记卡"})
+        self.assertEqual(
+            commands["日记款式"][0].get("alias"), {"日记卡样式", "换日记款式"}
+        )
+        for name, (_kwargs, func) in commands.items():
+            self.assertTrue((func.__doc__ or "").strip(), f"{name} 缺文档字符串")
 
     def test_date_helpers(self) -> None:
         module = self.module
@@ -1192,6 +1194,182 @@ class DiaryCardTest(PluginCase):
         results = self._collect(plugin.diary_card(event, "昨天"))
         self.assertEqual(results[0][0], "plain")
         self.assertIn("/看日记", event.plains[0])
+
+    # ---- 第 15 步：出图参数 / 款式 / 自定义字体 --------------------------------
+
+    def _render_once(self, config: dict | None = None) -> tuple[str, dict]:
+        """跑一次 /看日记 的 pretty 档，返回 ``(模板原文, 传给渲染器的数据)``。"""
+        plugin = self.make_plugin(config)
+        asyncio.run(plugin.diary.write_async(
+            private_session("10001"), text="正文", mood="开心", now=NOW))
+        captured: dict = {}
+
+        async def fake_render(tmpl, data, return_url=True, options=None):
+            captured.update(tmpl=tmpl, data=data, options=options)
+            return str(self.root / "card.png")
+
+        plugin.html_render = fake_render
+        self._collect(plugin.diary_card(self._event(), "10-04"))
+        return captured["tmpl"], captured["data"]
+
+    def test_render_options_override_the_host_defaults(self) -> None:
+        """宿主的默认是 JPEG q40——那正是"字糊成一团"的来源，必须显式覆盖。"""
+        _tmpl, _data = self._render_once()
+        plugin = self.make_plugin()
+        asyncio.run(plugin.diary.write_async(
+            private_session("10001"), text="x", now=NOW))
+        seen: dict = {}
+
+        async def fake_render(tmpl, data, return_url=True, options=None):
+            seen["options"] = options
+            return str(self.root / "card.png")
+
+        plugin.html_render = fake_render
+        self._collect(plugin.diary_card(self._event(), "10-04"))
+        self.assertEqual(seen["options"], {"type": "png", "quality": 95})
+
+    def test_every_declared_style_has_a_template(self) -> None:
+        """枚举里有的款式，模板目录里必须真有那个文件（否则静默走降级链出丑图）。"""
+        from core import settings as settings_mod
+
+        for style in settings_mod.CARD_STYLE_CHOICES:
+            path = self.module.CARD_TEMPLATE_DIR / f"diary_card_{style}.html.j2"
+            self.assertTrue(path.is_file(), f"缺模板：{path.name}")
+
+    def test_style_selection_reaches_the_renderer(self) -> None:
+        tmpl, _data = self._render_once({"diary": {"card_style": "seal"}})
+        self.assertIn("seal 款", tmpl)  # 选中的是 night 那张模板
+        self.assertIn("card_font_css", tmpl)  # 每个模板都留了字体插槽
+
+    def test_date_appears_once_in_every_template(self) -> None:
+        """日期只在右上角。页脚再抄一遍是冗余（旧版就是这么写着，一屏出现两次）。"""
+        from core import settings as settings_mod
+
+        for style in settings_mod.CARD_STYLE_CHOICES:
+            src = (self.module.CARD_TEMPLATE_DIR / f"diary_card_{style}.html.j2").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(src.count("{{ date }}"), 1, f"{style} 模板里日期出现多次")
+
+    def test_empty_font_leaves_the_style_slot_blank(self) -> None:
+        _tmpl, data = self._render_once()
+        self.assertEqual(data["card_font_css"], "")
+
+    def test_font_family_is_injected(self) -> None:
+        _tmpl, data = self._render_once({"diary": {"card_font": "Noto Serif SC, serif"}})
+        css = data["card_font_css"]
+        self.assertIn("font-family:Noto Serif SC, serif", css)
+        self.assertIn("var(--card-font-stack)", css)  # 换不掉要能回落
+
+    def test_font_url_becomes_a_font_face(self) -> None:
+        _tmpl, data = self._render_once(
+            {"diary": {"card_font": "https://cdn.example.com/f/x.woff2"}}
+        )
+        css = data["card_font_css"]
+        self.assertIn("@font-face", css)
+        self.assertIn("https://cdn.example.com/f/x.woff2", css)
+
+    def test_hostile_font_value_is_dropped(self) -> None:
+        """这段 CSS 是**原样**内联的（不像正文那样转义），必须白名单式挡死。"""
+        for evil in (
+            "</style><script>alert(1)</script>",
+            "javascript:alert(1)",
+            "Noto Serif SC; } body{display:none",
+            "http://evil/x.exe",
+        ):
+            _tmpl, data = self._render_once({"diary": {"card_font": evil}})
+            self.assertEqual(data["card_font_css"], "", f"没挡住：{evil}")
+
+
+# ---- 第 15 步：/日记款式 换款式 ---------------------------------------------
+
+    def _style_cmd(self, plugin, arg: str = ""):
+        """跑 /日记款式，返回 ``(结果列表, 回执全文)``。"""
+        event = self._event()
+        results = self._collect(plugin.diary_card_style(event, arg))
+        return results, "\n".join(event.plains)
+
+    def _fake_apply(self, plugin, sink: list[dict], *, ok: bool = True):
+        from core import settings as settings_mod
+
+        async def apply_settings(updated, *, applied=None):
+            sink.append(updated)
+            if ok:
+                plugin.settings = settings_mod.load_settings(updated)
+            return {"ok": ok, "applied": ["diary.card_style"], "error": "" if ok else "配置文件写不进去"}
+
+        plugin.apply_settings = apply_settings
+
+    def test_style_command_lists_options_when_called_bare(self) -> None:
+        from core import settings as settings_mod
+
+        plugin = self.make_plugin()
+        results, text = self._style_cmd(plugin)
+        self.assertEqual(results[0][0], "plain")
+        for style in settings_mod.CARD_STYLE_CHOICES:
+            self.assertIn(style, text)
+
+    def test_style_command_accepts_chinese_alias(self) -> None:
+        plugin = self.make_plugin()
+        sink: list[dict] = []
+        self._fake_apply(plugin, sink)
+        _results, text = self._style_cmd(plugin, "手帐")
+        self.assertEqual(sink[0]["diary"]["card_style"], "tape")
+        self.assertIn("手帐", text)
+
+    def test_style_command_switches_to_another_style(self) -> None:
+        from core import settings as settings_mod
+
+        plugin = self.make_plugin()
+        sink: list[dict] = []
+        self._fake_apply(plugin, sink)
+        self._style_cmd(plugin, "seal")
+        self.assertEqual(sink[0]["diary"]["card_style"], "seal")
+        self.assertEqual(plugin._card_cfg()[1], "seal")
+        self.assertEqual(settings_mod.load_settings(sink[0]).diary["card_style"], "seal")
+
+    def test_style_command_keeps_other_diary_settings(self) -> None:
+        """换款式只动 card_style，别把 max_chars 之类的一并抹成默认。"""
+        plugin = self.make_plugin({"diary": {"max_chars": 3000}})
+        sink: list[dict] = []
+        self._fake_apply(plugin, sink)
+        self._style_cmd(plugin, "dots")
+        self.assertEqual(sink[0]["diary"]["max_chars"], 3000)
+        self.assertEqual(sink[0]["diary"]["card_style"], "dots")
+
+    def test_style_command_reports_unknown_style_without_changing(self) -> None:
+        """认不出的款式要**明说**，不能静默回落默认值——那正是文本框时代的毛病。"""
+        plugin = self.make_plugin()
+        sink: list[dict] = []
+        self._fake_apply(plugin, sink)
+        _results, text = self._style_cmd(plugin, "不存在的款")
+        self.assertEqual(sink, [], "认不出就不该落盘")
+        self.assertIn("没有", text)
+
+    def test_style_command_says_so_when_already_current(self) -> None:
+        plugin = self.make_plugin()
+        sink: list[dict] = []
+        self._fake_apply(plugin, sink)
+        _results, text = self._style_cmd(plugin, "paper")   # 默认就是 paper
+        self.assertEqual(sink, [])
+        self.assertIn("已经", text)
+
+    def test_style_command_reports_save_failure(self) -> None:
+        plugin = self.make_plugin()
+        sink: list[dict] = []
+        self._fake_apply(plugin, sink, ok=False)
+        _results, text = self._style_cmd(plugin, "ink")
+        self.assertIn("写不进去", text)
+
+    def test_style_alias_table_has_no_unknown_targets(self) -> None:
+        """别名表指向的键必须都在枚举里——写错一个就是"输入正确却切不过去"。"""
+        from core import settings as settings_mod
+
+        choices = set(settings_mod.CARD_STYLE_CHOICES)
+        for alias, target in self.module._CARD_STYLE_ALIASES.items():
+            self.assertIn(target, choices, f"别名「{alias}」指向了不存在的款式 {target}")
+        for style in choices:
+            self.assertIn(style, self.module._CARD_STYLE_LABELS, f"{style} 没有中文名")
 
 
 if __name__ == "__main__":

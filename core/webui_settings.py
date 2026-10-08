@@ -97,6 +97,14 @@ def _node(path: tuple[str, ...], spec: Mapping[str, Any], fields: list[dict]) ->
     # 作息表这类"默认带换行"的字符串用 textarea：schema 驱动，前端不认字段名。
     node["multiline"] = isinstance(node["default"], str) and "\n" in node["default"]
     node["editor"] = FIELD_EDITORS.get(node["path"], "")
+    # 枚举型字符串：带上可选值，前端据此画下拉框而不是自由文本框（第 15 步）。
+    # 当前值不在枚举里时也把它补进列表——配置是从旧版本升上来的，老值不该被下拉框藏起来。
+    choices = list(settings_mod.FIELD_CHOICES.get(node["path"], ()))
+    if choices:
+        current = spec.get("default", "")
+        if isinstance(current, str) and current and current not in choices:
+            choices.append(current)
+        node["choices"] = choices
     limits = settings_mod.INT_LIMITS.get(node["path"])
     if limits:
         node["min"], node["max"] = limits[0], limits[1]
