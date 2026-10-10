@@ -590,9 +590,9 @@ Args:
         scope: str = "",
         book: str = "",
     ) -> str:
-        """翻自己的本子。看最近写的：直接调（默认最近 20 条）；看某一天：给 date；看整本：all=true；找写过什么：给 q。
+        """翻自己的本子。**只翻得到写给眼前这个人的**那些——日记是按人分的，别人的段不在你的本子里。看最近写的：直接调（默认最近 20 条）；看某一天：给 date；看整本：all=true；找写过什么：给 q。
 
-恋爱日记那本里全是和最亲密的人有关的，**只在这本子主人自己的私聊里翻得到**。
+只在**私聊**里翻得动（群里人多耳杂，来私聊）。恋爱日记那本里全是和最亲密的人有关的，**只在这本子主人自己的私聊里翻得到**。
 
 Args:
             date(string): 哪一天（YYYY-MM-DD）。
@@ -602,8 +602,12 @@ Args:
             scope(string): group ＝ 只看群聊，private ＝ 只看私人；不填＝全部。
             book(string): love ＝ 只看恋爱日记，normal ＝ 只看普通日记；不填＝两本都算。
         """
+        session = self._session(event)
+        if not session.is_private:
+            # 与 /看日记 命令同一口径：日记是私事，念出来更是——群里一读全群都听见
+            return "日记是私事，群里不翻。想看的话来我的私聊，我翻给你。"
         result = self.diary.read_for(
-            self._session(event),
+            session,
             date=date,
             q=q,
             tail=tail,
@@ -621,12 +625,15 @@ Args:
     async def diary_list(
         self, event: AstrMessageEvent, limit: int = 7
     ) -> str:
-        """翻日记目录（哪天写了、几段、每段开头一句）。想不起哪天写过什么时先用它。
+        """翻日记目录（哪天写了、几段、每段开头一句）。**只列写给眼前这个人的**那些——目录里的"开头一句"也是内容，不跨人。想不起哪天写过什么时先用它。只在**私聊**里翻得动。
 
 Args:
             limit(number): 最多列多少天，默认 7，最多 60。
         """
-        result = self.diary.list_days(self._session(event), limit=limit, now=self._now())
+        session = self._session(event)
+        if not session.is_private:
+            return "日记是私事，群里不翻。想看的话来我的私聊，我翻给你。"
+        result = self.diary.list_days(session, limit=limit, now=self._now())
         if not result.get("ok"):
             return str(result.get("error") or "翻不了")
         if not result["days"]:

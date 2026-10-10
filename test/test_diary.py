@@ -450,6 +450,7 @@ class DiaryApiTest(TmpDirCase):
         run(diary.write_async(private_session("20002", "另一个人"), text="和另一个人聊了天气", now=NOW))
 
         peer = private_session("10001")
+        other = private_session("20002", "另一个人")
         self.assertEqual(diary.read_for(peer, q="考试", now=NOW)["matched"], 2)
         scoped = diary.read_for(peer, q="考试", scope="group", now=NOW)
         self.assertEqual(scoped["count"], 1, "scope 过滤后的展示条数")
@@ -457,19 +458,50 @@ class DiaryApiTest(TmpDirCase):
         self.assertEqual(diary.read_for(peer, q="考试", book="love", now=NOW)["matched"], 1)
         self.assertEqual(diary.read_for(peer, q="考试", book="normal", now=NOW)["matched"], 1)
         self.assertEqual(diary.read_for(peer, tail=1, now=NOW)["count"], 1)
-        self.assertEqual(diary.read_for(peer, date="2026-10-04", now=NOW)["count"], 3)
-        self.assertEqual(diary.read_for(peer, all_=True, now=NOW)["count"], 3)
+        # 按人筛（2026-10-11 定稿）：peer 只看自己的，别人的段不出现
+        self.assertEqual(diary.read_for(peer, date="2026-10-04", now=NOW)["count"], 2)
+        self.assertEqual(diary.read_for(peer, all_=True, now=NOW)["count"], 2)
+        self.assertNotIn("聊了天气", diary.read_for(peer, all_=True, now=NOW)["text"])
+        self.assertEqual(diary.read_for(other, all_=True, now=NOW)["count"], 1, "另一个人只看自己的")
+        self.assertNotIn("考试", diary.read_for(other, all_=True, now=NOW)["text"])
         self.assertIn("没找到", diary.read_for(peer, q="不存在的词", now=NOW)["text"])
 
     def test_scope_note_mentions_unclassifiable_entries(self) -> None:
         diary = make_diary(self.root)
         storage.atomic_write_text(
             diary.layout.diary,
-            "2026-10-01 10:00（平静）\n没有标注的旧条目\n\n2026-10-02 11:00〔群·甲〕\n有标注\n\n",
+            "2026-10-01 10:00（平静）〔和希#10001〕\n私聊那条\n\n"
+            "2026-10-02 11:00〔群·甲#10001〕\n群聊那条\n\n"
+            "2026-10-03 12:00\n无标注\n\n",
         )
         result = diary.read_for(group_session(), scope="group", now=NOW)
         self.assertEqual(result["count"], 1)
         self.assertIn("无法归类", result["text"])
+
+    def test_private_read_outputs_only_own_entries(self) -> None:
+        """2026-10-11 用户定稿：私聊看日记**只输出自己的日记**。
+
+        ``diary_read`` 与 ``/看日记`` 同一个 ``_own_entries``：别人的段不出现；
+        没有归属的旧段落也不塞给任何人（宁可不见，不可错认）。
+        """
+        diary = make_diary(self.root)
+        run(diary.write_async(private_session("10001"), text="10001 的日记", now=NOW))
+        run(diary.write_async(private_session("20002", "另一个人"), text="20002 的日记", now=NOW))
+        mine = diary.read_for(private_session("10001"), all_=True, now=NOW)["text"]
+        self.assertIn("10001 的日记", mine)
+        self.assertNotIn("20002 的日记", mine)
+
+        # 未归属旧段落：进 JSONL 一条 person_id 为空的行，谁读取都看不到
+        orphan = json.dumps(
+            {"date": "2026-10-01", "time": "09:00", "mood": "", "who": "和某某",
+             "person_id": "", "text": "没有归属的旧段落"},
+            ensure_ascii=False,
+        )
+        path = diary.layout.diary_jsonl
+        storage.atomic_write_text(path, storage.read_text(path) + orphan + "\n")
+        still_mine = diary.read_for(private_session("10001"), all_=True, now=NOW)["text"]
+        self.assertIn("10001 的日记", still_mine)
+        self.assertNotIn("没有归属的旧段落", still_mine)
 
     def test_prompt_line_states(self) -> None:
         empty = make_diary(self.root)

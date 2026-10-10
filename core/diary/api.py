@@ -97,6 +97,20 @@ class Diary:
             items = [e for e in items if e.person_id == want]
         return [e for e in items if e.date == day]
 
+    def _own_entries(self, entries: list[fmt.Entry], session: Session) -> list[fmt.Entry]:
+        """按人筛（第 17 步口径；2026-10-11 用户定稿：**私聊看日记只看自己的**）。
+
+        只留 ``person_id == 眼前这个人`` 的段落；没有归属的旧段落**不硬塞**——宁可
+        不见，不可错认。``person_id`` 取不到（异常事件）就什么都看不到，而不是
+        看到全部——fail-closed。所有**聊天侧读出口**（read_for / read_day_for /
+        list_days / prompt_line / event_hint）都从这一个函数过，谁也不许自己另写
+        一套筛选。
+        """
+        pid = str(session.person_id() or "")
+        if not pid:
+            return []
+        return [e for e in entries if e.person_id == pid]
+
     def visible(self, entries: list[fmt.Entry], session: Session) -> list[fmt.Entry]:
         """恋爱日记**只对最亲密那个人的私聊可见**；配了名单就一律对其他人/群聊隐藏。
 
@@ -122,11 +136,10 @@ class Diary:
             return {"ok": False, "error": "date 格式应为 YYYY-MM-DD"}
         # 卡片是"发出去的一张图"：同一本里不同人的条目必须分开（第 17 步）。
         # 私聊里只给"写给眼前这个人"的那些；群聊走不到这里（上层先拦了）。
-        shown_all = _filter_book(self.visible(self.entries(), session), book)
-        day = [
-            e for e in shown_all
-            if e.date == date and e.person_id == str(session.person_id() or "")
-        ]
+        shown_all = _filter_book(
+            self.visible(self._own_entries(self.entries(), session), session), book
+        )
+        day = [e for e in shown_all if e.date == date]
         return {
             "ok": True,
             "date": date,
@@ -159,13 +172,17 @@ class Diary:
         mark_love: bool = False,
         now: datetime | None = None,
     ) -> dict:
-        """读取入口。四种模式：``date`` / ``q`` / ``all_`` / 默认最近 N 条。"""
+        """读取入口。四种模式：``date`` / ``q`` / ``all_`` / 默认最近 N 条。
+
+        **只读得到"写给眼前这个人"的段落**（2026-10-11 定稿）：与 ``read_day_for``
+        同一个 ``_own_entries``——``diary_read`` 工具在谁的私聊里被调，翻到的就是
+        谁的日记，别人的内容不出现在结果里。
+        """
         if not self._enabled():
             return {"ok": False, "error": DISABLED}
 
-        raw = self.entries()
-        scoped = self.visible(raw, session)
-        book_filtered = _filter_book(scoped, book)
+        raw = self.visible(self._own_entries(self.entries(), session), session)
+        book_filtered = _filter_book(raw, book)
 
         if date:
             if not _is_day(date):
@@ -232,10 +249,12 @@ class Diary:
     def list_days(
         self, session: Session, *, limit: int = 7, now: datetime | None = None
     ) -> dict:
-        """目录：最近几天、各几段、每段开头一句（不吐正文，省 token）。"""
+        """目录：最近几天、各几段、每段开头一句（不吐正文，省 token）。**按人筛**
+        （``_own_entries``）——目录里的"每段开头一句"也是内容，不能跨人漏。
+        """
         if not self._enabled():
             return {"ok": False, "error": DISABLED}
-        entries = self.visible(self.entries(), session)
+        entries = self.visible(self._own_entries(self.entries(), session), session)
         by_day: dict[str, list[fmt.Entry]] = {}
         for entry in entries:
             by_day.setdefault(entry.date, []).append(entry)
@@ -412,7 +431,9 @@ class Diary:
         moment = now or datetime.now(self._tz())
         limits = self._limits()
         today = fmt.day_of(moment)
-        all_entries = self.entries()   # 只解析一次（第 17 步）
+        # 按人筛（_own_entries）："今天写了没 / 上一条是什么"都是这个人的账，
+        # 别人的段落既不该算数、也不能让开头几句漏进别的话题里。
+        all_entries = self._own_entries(self.entries(), session)   # 只解析一次（第 17 步）
         mine = [e for e in all_entries if e.date == today]
         earlier = [e for e in all_entries if e.date != today]
         previous = earlier[-1] if earlier else None
@@ -469,8 +490,12 @@ class Diary:
         if not self._enabled():
             return ""
         moment = now or datetime.now(self._tz())
-        if [e for e in self.entries() if e.date == fmt.day_of(moment)]:
-            return ""  # 今天已经写过了：不念
+        if [
+            e
+            for e in self._own_entries(self.entries(), session)
+            if e.date == fmt.day_of(moment)
+        ]:
+            return ""  # 这个人今天已经写过了：不念
         strong = bool(strong_text)
         if not strong and not exchange_who:
             return ""
