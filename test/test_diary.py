@@ -486,7 +486,22 @@ class DiaryApiTest(TmpDirCase):
         run(written.write_async(group_session(), text="今天写了", now=NOW))
         line = written.prompt_line(group_session(), now=NOW)
         self.assertIn("今天已写 1 段", line)
-        self.assertIn("想再补两句", line)
+        self.assertIn("没新事就不用再写", line)
+        self.assertIn("先照常回话", line)
+
+    def test_prompt_line_brakes_after_several_entries(self) -> None:
+        """反馈「写日记频率偏高」：当天写到 ``_WRITE_BRAKE`` 段，提醒改口「不用再写」。
+
+        纯提示层刹车——不拦 write，只改注入里那句话。
+        """
+        from core.diary.api import _WRITE_BRAKE
+
+        diary = make_diary(self.root)
+        for i in range(_WRITE_BRAKE):
+            run(diary.write_async(group_session(), text=f"第 {i + 1} 段", now=NOW))
+        line = diary.prompt_line(group_session(), now=NOW)
+        self.assertIn(f"已经写了 {_WRITE_BRAKE} 段，够了", line)
+        self.assertIn("不用再写", line)
 
     def test_prompt_line_early_hours_does_not_blame(self) -> None:
         """D8 回归（用户裁定"只改措辞"）：00:00~05:59 日历已经翻页、但她的一天还没开始，

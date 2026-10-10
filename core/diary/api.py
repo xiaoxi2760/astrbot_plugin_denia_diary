@@ -35,6 +35,10 @@ _SEARCH_MAX = 50
 _SCOPE_NOTE_SCOPE = ("group", "private")
 _NUDGE_KEEP = 60
 _NUDGE_CAP = 200
+_WRITE_BRAKE = 3
+"""当天写到这么多段，注入提醒就改口「不用再写」——纯提示层的刹车，不拦着写（她
+真想写还是写得进）。反馈「写日记频率偏高」（2026-10-11）后的第一道闸；要硬上限
+另行拍板再加。"""
 
 
 @dataclass
@@ -435,16 +439,22 @@ class Diary:
         soft = int(limits["soft_nudge_after_hour"])
         night = int(limits["nudge_after_hour"])
         if mine:
-            tail = f"\n（今天写了 {len(mine)} 段；想再补两句也随时 diary_write，想翻随时 diary_read。）"
+            if len(mine) >= _WRITE_BRAKE:
+                tail = f"\n（今天已经写了 {len(mine)} 段，够了——有话直接回她，不用再写。）"
+            else:
+                tail = f"\n（今天写了 {len(mine)} 段；没新事就不用再写，先照常回话。）"
         elif hour >= night:
             tail = (
                 f"\n（已经 {hour} 点了、今天还空着 —— 想写两句就写，用 diary_write；"
-                "不用长、不用汇报、没人会检查。）"
+                "不用长、不用汇报、没人会检查，一段就够。）"
             )
         elif hour >= soft:
             tail = "\n（今天还空着 —— 有想记的就随手写一两句（diary_write），没有就算了，不用硬凑。）"
         else:
-            tail = "\n（你的本子是一本纯文本：想写随时 diary_write，想翻随时 diary_read；没人检查，也没格式要求。）"
+            tail = (
+                "\n（你的本子想写随时 diary_write，想翻随时 diary_read；没人检查，"
+                "也没格式要求。一天一两段就很好，鸡毛蒜皮不用记。）"
+            )
         return line + tail + "\n\n"
 
     def event_hint(
@@ -485,10 +495,13 @@ class Diary:
         except OSError:
             pass  # 存不上不影响对话
         if strong:
-            return "（刚才这事要是想留着，也能顺手写进日记：diary_write。）\n"
+            return (
+                "（刚才这事要是想留着，也能顺手写进日记：diary_write。"
+                "不用每件事都记，更别让它打断回话。）\n"
+            )
         return (
             f"（刚跟「{exchange_who}」聊完一轮 —— 要是有什么想留着的，"
-            "顺手写进今天的日记也行：diary_write；不想写就算了。）\n"
+            "顺手写进今天的日记也行：diary_write；不想写就算了，也别为这个打断回话。）\n"
         )
 
 
