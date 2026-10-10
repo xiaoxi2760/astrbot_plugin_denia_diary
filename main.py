@@ -42,9 +42,10 @@ from .core import storage
 from .core import webui_data
 from .core import webui_portrait
 from .core import webui_settings
+from .core.diary import card
 from .core.diary import format as fmt
 from .core.diary.api import Diary
-from .core.diary.store import DiaryStore
+from .core.diary.store import DiaryStore, person_id_by_name
 from .core.notebook import Notebook, NotebookStore
 from .core.proactive import Proactive
 from .core.proactive.store import ProactiveStore
@@ -97,18 +98,6 @@ _CARD_RENDER_OPTIONS = {"type": "png", "quality": 95}
 这里改成 PNG + q95：字干净了，代价是单张从几百 KB 涨到 1~3 MB（发 QQ 有流量代价，
 但对一天发一次的卡片可以接受）。未知键会被远端忽略，多传无副作用。"""
 
-_FONT_FAMILY_RE = re.compile(r"^[A-Za-z0-9 \u4e00-\u9fff,._'\-()]{1,180}$")
-"""字体名白名单：只放行"字体名/字体栈"该有的字符。"""
-_FONT_URL_RE = re.compile(
-    r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+\.(?:woff2?|ttf|otf|eot)$",
-    re.IGNORECASE,
-)
-"""字体文件直链：只放行 http(s) + 常见字体后缀，杜绝 ``javascript:`` 之类的伪协议。"""
-
-_CARD_FONT_FAMILY = "CardFont"
-"""注入的 @font-face 家族名。模板里正文统一用它，配置为空时它压根不会被定义——
-``font-family`` 拿不到这个家族就自动回落款式自带的字体栈。"""
-
 _CARD_STYLE_LABELS: dict[str, str] = {
     "paper": "纸感",
     "ink": "墨信",
@@ -142,32 +131,6 @@ def _match_card_style(raw: str) -> str | None:
         return text
     return _CARD_STYLE_ALIASES.get(text)
 
-
-def _card_font_css(raw: object) -> str:
-    """把配置里的 ``diary.card_font`` 变成一段可安全内联的 CSS（空串＝不改字体）。
-
-    两种写法都认：
-
-    - **字体文件直链**（``https://…/xxx.woff2``）→ 生成 ``@font-face``；
-    - **字体名 / 字体栈**（``Noto Serif SC, serif``）→ 直接当 ``font-family``。
-
-    ⚠️ 这一段是**原样**进模板 ``<style>`` 的（不像正文那样走 html.escape——它是 CSS，
-    转义了就废了），所以必须自己把住关：两个正则都是白名单式匹配，任何一个不过就
-    整条丢弃、退回模板默认字体。**宁可字体没生效，也不能让人往配置里塞 ``</style>``。**
-    """
-    value = str(raw or "").strip()
-    if not value:
-        return ""
-    if _FONT_URL_RE.match(value):
-        return (
-            f"@font-face{{font-family:'{_CARD_FONT_FAMILY}';"
-            f"src:url('{value}') format('woff2');font-display:swap;}}"
-            f"body{{font-family:'{_CARD_FONT_FAMILY}',var(--card-font-stack);}}"
-        )
-    if _FONT_FAMILY_RE.match(value):
-        return f"body{{font-family:{value},var(--card-font-stack);}}"
-    logger.warning("[%s] card_font 写法认不出来，已忽略：%r", PLUGIN_NAME, value[:80])
-    return ""
 
 CARD_WEEK_CN = "一二三四五六日"
 """星期几的中文字（Monday=0 对齐 ``date.weekday()``）。"""
@@ -230,6 +193,18 @@ def _card_markdown(date: str, weekday: str, book_name: str, entries: list[dict])
 class DeniaDiary(Star):
     """陪伴系统插件。第 1 步日记 + 第 2 步小本本 + 第 3 步状态系统 + 第 4 步主动消息 + 第 5 步 WebUI 面板。"""
 
+    def _legacy_person_id(self, who: str) -> str:
+        """旧头行标注名 → person_id（第 18 步导入回填，方案甲：恰好匹配一人才认）。
+
+        只在旧 ``.txt`` 首次导入那一刻被 store 调；联系人表坏了不阻塞导入
+        （那一批退回"未归属"，删掉 jsonl 可重新触发导入再试）。
+        """
+        try:
+            contacts = self.proactive.store.contacts()
+        except Exception:  # noqa: BLE001 - 联系人表坏了不能带累导入
+            contacts = {}
+        return person_id_by_name(who, dict(self.settings.name_preference or {}), contacts)
+
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
         self.config = config or {}
@@ -239,7 +214,9 @@ class DeniaDiary(Star):
         self.diary = Diary(
             settings=self.settings,
             layout=self.layout,
-            store=DiaryStore(layout=self.layout, locks=self.locks),
+            store=DiaryStore(
+                layout=self.layout, locks=self.locks, name_lookup=self._legacy_person_id
+            ),
             locks=self.locks,
         )
         self.notebook = Notebook(
@@ -902,18 +879,17 @@ Args:
             yield event.plain_result(f"{day} 这天还没写。想让她写，跟她提一句就好。")
             return
 
-        # 昵称与面板同源：name_preference → contacts[person]["name"]；没有就原样
+        # 卡上的「和 ○○」：person_id 查现用称呼，旧段落剥「和」前缀——与面板卡片
+        # 预览共用 ``webui_data.card_who``。（不能拿标注当 id 查 raw_name：生产标注
+        # 是"和某某"不是 id，恒查不到返回空串，名字会被静默抹掉。）
         try:
             contacts = self.proactive.store.contacts()
         except Exception:  # noqa: BLE001 - 联系人表坏了不能带累看日记
             contacts = {}
         for e in entries:
-            who = str(e.get("who") or "")
-            if who:
-                try:
-                    e["who"] = webui_data.raw_name(self.settings, who, contacts)
-                except Exception:  # noqa: BLE001 - 昵称解析失败就显示原值
-                    pass
+            e["who"] = webui_data.card_who(
+                self.settings, str(e.get("who") or ""), str(e.get("person_id") or ""), contacts
+            )
 
         render, style = self._card_cfg()
         book_name = _card_book_name(entries)
@@ -924,28 +900,15 @@ Args:
             yield event.plain_result(markdown)
             return
         if render == "pretty":
-            # ⚠️ 日记正文是她的原话：进模板前一律 HTML 转义（autoescape 在这条
-            # 渲染链上不生效），她写的 < > & 不能变成标签。
-            data = {
-                "date": day,
-                "weekday": weekday,
-                "book_name": book_name,
-                "count": len(entries),
-                # 自定义字体（配置为空时是空串，模板里那行 <style> 就是空的）
-                "card_font_css": _card_font_css(self.settings.diary.get("card_font")),
-                "entries": [
-                    {
-                        "time": html.escape(str(e.get("time") or ""), quote=False),
-                        "mood": html.escape(str(e.get("mood") or ""), quote=False),
-                        "who": html.escape(str(e.get("who") or ""), quote=False),
-                        "paragraphs": [
-                            html.escape(str(p), quote=False)
-                            for p in (e.get("paragraphs") or [])
-                        ],
-                    }
-                    for e in entries
-                ],
-            }
+            # ⚠️ 日记正文是她的原话：转义在 ``card.card_context`` 里统一做（那条
+            # 渲染链没有 autoescape），面板预览走同一份，看到的就是真效果。
+            data = card.card_context(
+                date=day,
+                weekday=weekday,
+                book_name=book_name,
+                entries=entries,
+                font_css=card.font_css(self.settings.diary.get("card_font")),
+            )
             try:
                 tmpl = (CARD_TEMPLATE_DIR / f"diary_card_{style}.html.j2").read_text(
                     encoding="utf-8"

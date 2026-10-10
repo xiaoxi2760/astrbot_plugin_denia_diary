@@ -174,8 +174,11 @@ class LayoutTest(TmpDirCase):
         self.assertTrue(str(layout.names).endswith(storage.NAMES_FILE))
         self.assertTrue(str(layout.state_history).endswith(storage.STATE_HISTORY_FILE))
         self.assertTrue(str(layout.diary_nudge).endswith(storage.DIARY_NUDGE_FILE))
+        self.assertTrue(str(layout.diary).endswith(storage.DIARY_FILE))
+        self.assertTrue(str(layout.diary_jsonl).endswith(storage.DIARY_JSONL_FILE))
+        self.assertTrue(str(layout.love_diary_jsonl).endswith(storage.LOVE_DIARY_JSONL_FILE))
         self.assertTrue(str(layout.trash_dir).endswith(storage.TRASH_DIR))
-        self.assertEqual(len(layout.files()), 10)
+        self.assertEqual(len(layout.files()), 12)
 
     def test_all_files_live_directly_under_base_dir(self) -> None:
         layout = storage.Layout(self.root / "data")
@@ -193,6 +196,9 @@ class LayoutTest(TmpDirCase):
         for name in storage.JSON_FILES:
             self.assertIn(name, names)
         self.assertNotIn(storage.DIARY_FILE, storage.JSON_FILES)
+        # 日记 JSONL 与情绪历史 / 主动消息记录一样，是没有 schema_version 信封的行式文件
+        self.assertNotIn(storage.DIARY_JSONL_FILE, storage.JSON_FILES)
+        self.assertNotIn(storage.LOVE_DIARY_JSONL_FILE, storage.JSON_FILES)
         # 情绪历史与主动消息记录是 JSONL 追加文件，没有 schema_version 信封，不在 JSON_FILES 里
         self.assertNotIn(storage.STATE_HISTORY_FILE, storage.JSON_FILES)
         self.assertNotIn(storage.PROACTIVE_LOG_FILE, storage.JSON_FILES)

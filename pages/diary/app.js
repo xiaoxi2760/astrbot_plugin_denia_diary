@@ -21,6 +21,7 @@
     diaryDelete: "diary/delete",
     diaryTrash: "diary/trash",
     diaryRestore: "diary/restore",
+    diaryCard: "diary/card",
     notebook: "notebook",
     notebookComplete: "notebook/complete",
     notebookDelete: "notebook/delete",

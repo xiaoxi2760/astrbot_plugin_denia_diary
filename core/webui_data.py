@@ -28,6 +28,7 @@ from typing import Any
 
 from . import settings as settings_mod
 from . import storage
+from .diary import card
 from .diary import format as fmt
 from .diary.store import TRASH_SEGMENT_CAP
 from .state import Affinity, State
@@ -134,6 +135,35 @@ def raw_name(
         if isinstance(entry, Mapping):
             name = str(entry.get("name") or "").strip()
     return name
+
+
+def card_who(
+    settings: settings_mod.Settings,
+    who: str,
+    person_id: str = "",
+    contacts: Mapping[str, Any] | None = None,
+) -> str:
+    """日记卡「和 ○○」里的名字。``/看日记``（main.py）与面板卡片预览**共用这一份**
+    ——两边渲出来的标注必须一个字不差（预览就是真卡片）。
+
+    - 有 ``person_id`` → ``raw_name``：偏好/联系人表里的**现用**称呼（不带「和」前缀）；
+    - 查不到（旧段落没记 id、或那人没配过称呼）→ 头行标注剥掉开头的「和」——
+      ``Session.label()`` 落盘恒是 ``和某某``，模板还会补一个「和」，不剥就「和 和希」；
+    - 群标注（``群·xx``）→ 空串：卡片是写给某个人的，群里没有"那个人"可标；
+    - 都没有 → 空串（模板按空隐藏）。**绝不能拿可读名当 id 去查** ``raw_name``——
+      恒查不到返回空串，名字会被静默抹掉。
+    """
+    pid = str(person_id or "").strip()
+    if pid:
+        name = raw_name(settings, pid, contacts)
+        if name:
+            return name
+    tag = str(who or "").strip()
+    if tag.startswith(fmt.GROUP_TAG_PREFIX):
+        return ""
+    if tag.startswith("和"):
+        return tag[1:].strip() or tag
+    return tag
 
 
 def display_name(
@@ -300,7 +330,25 @@ def _panel_edit_window(settings: settings_mod.Settings | None) -> dict[str, Any]
     }
 
 
-def diary_list_payload(*, diary_store: Any, now: datetime | None = None) -> dict[str, Any]:
+def _person_entries(entries: list[Any], person: str) -> list[Any]:
+    """按"写给谁"筛（第 17 步）。
+
+    ``person`` 留空＝不过滤（保持老行为）；给了就只留那一个人的。
+    查不到归属的旧段落（头行没记 id）**一律排除**——它们不归属任何人，
+    硬塞给谁都算错认领。日历、正文、卡片三处走的是同一个筛子，不会对不上。
+    """
+    want = str(person or "")
+    if not want:
+        return list(entries)
+    return [e for e in entries if getattr(e, "person_id", "") == want]
+
+
+def diary_list_payload(
+    *,
+    diary_store: Any,
+    person: str = "",
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """两本日记的概览。``love_collapsed`` 恒 ``true``（决策 #18：恋爱日记默认收起）。
 
     每本另带一份**每日清单** ``days``（第 6.1 步）：前端日历照着画，不用自己再
@@ -310,7 +358,7 @@ def diary_list_payload(*, diary_store: Any, now: datetime | None = None) -> dict
     books: list[dict[str, Any]] = []
     for book in fmt.BOOKS:
         path = diary_store.path(book)
-        entries = fmt.parse_entries(diary_store.read(book), book)
+        entries = _person_entries(diary_store.read_entries(book), person)
         days, truncated = _calendar_days(entries)
         books.append(
             {
@@ -362,10 +410,12 @@ def diary_content_payload(
     tail: int = 0,
     now: datetime | None = None,
     settings: settings_mod.Settings | None = None,
+    person: str = "",
 ) -> dict[str, Any]:
     """读一段日记正文。**只读，不重写正文**。
 
     给 ``date`` 就取那天；否则取最近 ``tail`` 条（``tail<=0`` 时取全部）。
+    ``person`` 非空时只返回那一个人写的（面板顶栏「对谁」，第 17 步）。
 
     ``text`` 是给老前端与既有测试的**整段视图**，原样保留；``entries``（第 6.1 步）
     是同一批条目的**结构化视图**——顺序与 ``picked`` 完全一致、条数等于 ``count``，
@@ -378,7 +428,7 @@ def diary_content_payload(
     找到那个开关——**不给它猜第二套规则**。
     """
     target = book if book in fmt.BOOKS else fmt.NORMAL
-    entries = fmt.parse_entries(diary_store.read(target), target)
+    entries = _person_entries(diary_store.read_entries(target), person)
     total = len(entries)
     picked = entries
     if str(date or "").strip():
@@ -406,20 +456,9 @@ def diary_content_payload(
                 "who": entry.who,
                 "chars": len(entry.text),
                 "text": entry.text,
-                "seg_id": fmt.seg_id(
-                    fmt.Segment(
-                        head_line=fmt.make_head_line(
-                            entry.date, entry.time, entry.mood, entry.who
-                        ),
-                        head_idx=-1,
-                        end_idx=-1,
-                        date=entry.date,
-                        time=entry.time,
-                        mood=entry.mood,
-                        who=entry.who,
-                        text=entry.text,
-                    )
-                ),
+                # 内容地址与存储/改删两侧同一函数（format.entry_seg_id），
+                # 头行怎么重建只有一处说了算。
+                "seg_id": fmt.entry_seg_id(entry),
                 "editable": bool(
                     window["can_edit"]
                     and moment is not None
@@ -439,18 +478,88 @@ def _entry_editable(entry: fmt.Entry, now: datetime, within_days: int, tz: Any) 
     判据与 ``DiaryStore.apply_by_id`` 里那句一字不差（``already_happened`` 是共用
     底线，``within_window`` 是限定期），免得前端把按钮画成能按、后端却说"太旧"。
     """
-    seg = fmt.segment_from_record(
-        {
-            "date": entry.date,
-            "time": entry.time,
-            "mood": entry.mood,
-            "who": entry.who,
-            "text": entry.text,
-        }
-    )
+    seg = fmt.entry_segment(entry)
     if not fmt.already_happened(seg, now, tz):
         return False
     return within_days <= 0 or fmt.within_window(seg, now, within_days, tz)
+
+
+def diary_card_payload(
+    *,
+    diary_store: Any,
+    settings: settings_mod.Settings,
+    proactive_store: Any = None,
+    book: str = fmt.NORMAL,
+    date: str = "",
+    style: str = "",
+    person: str = "",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """**渲染一张日记卡片的 HTML**，给面板的卡片预览用（第 16 步）。
+
+    和 ``/看日记`` 出图走**同一份** ``card.render_card`` 与同一份转义逻辑——
+    面板里看到的就是真卡片，不是"大概长这样"。模板读不到 / 语法不认识都
+    **抛异常**（上层转成 ``{ok: false, error}``），不给一张空白的"预览"。
+
+    顺带带出**翻页导航**要用的东西：``days`` 是这本有日记的日子（倒序），
+    ``index`` 是当前那天在其中的位置——面板据此显示"第 N / 共 M 天"并做上一页
+    /下一页。没给 ``date`` 时落在**最近有日记的那天**（跟 /看日记 不给日期
+    就是今天不同：这里预览的是"能翻到的最后一页"）。
+    """
+    target = book if book in fmt.BOOKS else fmt.NORMAL
+    entries = _person_entries(diary_store.read_entries(target), person)
+    if not entries:
+        return {"ok": True, "empty": True, "book": target, "html": "", "days": [], "index": -1}
+
+    days = sorted({entry.date for entry in entries}, reverse=True)
+    wanted = str(date or "").strip()
+    if wanted not in days:
+        wanted = days[0]
+
+    # 卡上的「和 ○○」与 /看日记 走同一份 ``card_who``：person_id 查现用称呼，旧段落
+    # 剥「和」前缀。（不能拿标注当 id 查 raw_name——生产头行写的是"和某某"不是 id，
+    # 恒查不到就把名字抹成空串了。Entry 是 frozen 的，解析在落 ctx 时做，不改条目。）
+    contacts: dict[str, Any] = {}
+    if proactive_store is not None:
+        try:
+            contacts = proactive_store.contacts()
+        except Exception:  # noqa: BLE001 - 联系人表坏了不能带累预览
+            contacts = {}
+    day_entries = [e for e in entries if e.date == wanted]
+
+    chosen = str(style or "").strip() or str(settings.diary.get("card_style") or "")
+    if chosen not in settings_mod.CARD_STYLE_CHOICES:
+        chosen = settings_mod.CARD_STYLE_DEFAULT
+
+    moment = now or datetime.now(settings.zone())
+    ctx = card.card_context(
+        date=wanted,
+        weekday=card.WEEKDAYS[moment.weekday()],
+        book_name=BOOK_DISPLAY.get(target, target),
+        entries=[
+            {
+                "time": entry.time,
+                "mood": entry.mood,
+                "who": card_who(settings, entry.who, entry.person_id, contacts),
+                "paragraphs": entry.text.split("\n\n"),
+            }
+            for entry in day_entries
+        ],
+        font_css=card.font_css(settings.diary.get("card_font")),
+    )
+    return {
+        "ok": True,
+        "empty": False,
+        "book": target,
+        "book_display": BOOK_DISPLAY.get(target, target),
+        "date": wanted,
+        "style": chosen,
+        "styles": list(settings_mod.CARD_STYLE_CHOICES),
+        "count": len(day_entries),
+        "days": days,
+        "index": days.index(wanted),
+        "html": card.render_card(chosen, ctx),
+    }
 
 
 async def rewrite_diary_entry(

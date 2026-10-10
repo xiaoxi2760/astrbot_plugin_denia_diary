@@ -234,5 +234,63 @@ class TestDiaryContentRoute(DiaryWriteHandlerCase):
         self.assertTrue(written["ok"])
 
 
+class TestDiaryCardRoute(DiaryWriteHandlerCase):
+    """``GET diary/card``：服务端渲好的卡片 HTML + 翻页信息。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from core import settings as settings_mod
+        from core.proactive.store import ProactiveStore
+
+        self.deps.settings = settings_mod.load_settings({"timezone": "Asia/Shanghai"})
+        self.deps.proactive = SimpleNamespace(store=ProactiveStore(
+            layout=self.layout, locks=self.diary_store.locks
+        ))
+        storage.atomic_write_text(
+            self.layout.diary,
+            "2026-10-01 09:00（开心）〔和希#1411638634〕\n第一天。\n\n"
+            "2026-10-03 21:30（难过）\n第三天。\n\n",
+        )
+
+    def data_of(self, query=None):
+        return self.ok_of(self.call("diary_card", query=query or {}))
+
+    def test_route_is_registered(self) -> None:
+        from web_api import routes
+
+        specs = [spec for spec in routes.ROUTES if spec[0] == "diary/card"]
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0][2], ("GET",))
+
+    def test_returns_rendered_html_and_navigation(self) -> None:
+        data = self.data_of()
+        self.assertIn("<!DOCTYPE html>", data["html"])
+        # 生产头行是「和希#id」不是裸 id：名字必须剥「和」后出现在卡上，不许被抹空
+        self.assertIn("和 希", self.data_of({"date": "2026-10-01"})["html"])
+        self.assertEqual(data["days"], ["2026-10-03", "2026-10-01"])
+        self.assertEqual(data["index"], 0)
+        self.assertEqual(data["date"], "2026-10-03")
+
+    def test_paging_by_date(self) -> None:
+        data = self.data_of({"date": "2026-10-01"})
+        self.assertEqual(data["index"], 1)
+        self.assertIn("第一天。", data["html"])
+
+    def test_style_query_overrides_config(self) -> None:
+        self.assertEqual(self.data_of({"style": "dots"})["style"], "dots")
+
+    def test_empty_diary_is_a_business_result_not_400(self) -> None:
+        storage.atomic_write_text(self.layout.diary, "")
+        data = self.data_of()
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["empty"])
+
+    def test_love_book_is_addressable(self) -> None:
+        storage.atomic_write_text(self.layout.love_diary, "2026-10-02 08:00（想念）\n恋爱那条。\n\n")
+        data = self.data_of({"book": "love"})
+        self.assertEqual(data["book"], "love")
+        self.assertIn("恋爱那条。", data["html"])
+
+
 if __name__ == "__main__":
     unittest.main()

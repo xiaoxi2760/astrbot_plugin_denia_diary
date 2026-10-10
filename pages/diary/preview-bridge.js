@@ -38,6 +38,20 @@
     diaryStore = { normal: FAKE["diary/content"].slice(), love: [] };
   }
 
+  /* 卡片预览用的三样常量（真后端由 core/settings.py 提供，这里手写一份给桩用）。 */
+  var CARD_STYLES = ["paper", "ink", "postcard", "tape", "dots", "seal"];
+  var CARDS_DIR = "file:///D:/Plugin/情绪日记/astrbot_plugin_denia_diary/test/.tmp/cards/";
+
+  function weekdayCn(ymdText) {
+    /* ⚠️ 自己解析：``parseYmd`` 在 diary.js 的闭包里，桩拿不到（踩过，
+       症状是卡片预览整块报 "parseYmd is not defined"）。 */
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymdText || ""));
+    if (!m) return "";
+    var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (isNaN(d.getTime())) return "";
+    return "星期" + ["一", "二", "三", "四", "五", "六", "日"][(d.getDay() + 6) % 7];
+  }
+
   function segIdOf(entry) {
     var raw = entry.date + " " + entry.time + "|" + (entry.mood || "") + "|" + (entry.who || "") + "|" + entry.text;
     var h = 2166136261;
@@ -372,7 +386,57 @@
     apiGet: function (endpoint, params) {
       if (endpoint === "portrait") return Promise.resolve(copyPortrait());
       /* 日记正文**现算**：桩的日记本会被改删还原，静态 FAKE 表跟不上（第 15 步）。 */
-      if (endpoint === "diary/content") {
+      /* 卡片预览（第 16 步）。真后端是**服务端渲染**好再给 HTML 的（core/diary/card.py，
+     和 /看日记 出图共用一份）——前端没有 Jinja2，也不该自己解析模板。
+     桩这边不重写渲染器，直接读 ``test/.tmp/cards/diary_card_<款式>.html``：
+     那是 tools/preview_card.py 用同一个渲染器渲出来的，所见即所得，
+     而且改了模板刷新就变。真跑起来（起 AstrBot）走的是真渲染。 */
+    if (endpoint === "diary/card") {
+      var q = params || {};
+      var cardBook = q.book === "love" ? "love" : "normal";
+      var list = (diaryStore[cardBook] || []).slice().sort(function (a, b) {
+        return stampOf(a) < stampOf(b) ? 1 : -1;
+      });
+      if (!list.length) {
+        return Promise.resolve({ ok: true, empty: true, book: cardBook, html: "", days: [], index: -1 });
+      }
+      var cdays = [];
+      list.forEach(function (e) { if (cdays.indexOf(e.date) < 0) cdays.push(e.date); });
+      var cstyle = String(q.style || CARD_STYLES[0]);
+      if (CARD_STYLES.indexOf(cstyle) < 0) cstyle = CARD_STYLES[0];
+      var want = String(q.date || "");
+      if (cdays.indexOf(want) < 0) want = cdays[0];
+      var cIdx = cdays.indexOf(want);
+      var cDay = list.filter(function (e) { return e.date === want; });
+      var src = CARDS_DIR + "diary_card_" + cstyle + ".html";
+      /* 取出真渲好的那张，把数据占位换成本页这一天的内容。
+         ⚠️ 用**异步 fetch**，别图省事上同步 XHR：同步请求会把主线程堵死，
+         点一下 tab 卡好几秒、页签状态都串（真机上这条路径根本不走，纯粹是桩自己挖的坑）。 */
+      var cWeek = weekdayCn(want);
+      var cBookName = cardBook === "love" ? "恋爱日记" : "日记";
+      var cDate = want, cCount = String(cDay.length);
+      return fetch(src).then(function (r) { return r.ok ? r.text() : ""; })
+        .catch(function () { return ""; })
+        .then(function (text) {
+          var html = text
+            .replace(/\{\{ date \}\}/g, cDate)
+            .replace(/\{\{ weekday \}\}/g, cWeek)
+            .replace(/\{\{ book_name \}\}/g, cBookName)
+            .replace(/\{\{ count \}\}/g, cCount)
+            .replace(/\{\{ card_font_css \}\}/g, "")
+            .replace(/\{\{ e\.time \}\}/g, "")
+            .replace(/\{\{ e\.mood \}\}/g, "")
+            .replace(/\{\{ e\.who \}\}/g, "")
+            .replace(/\{\{ p \}\}/g, "");
+          return {
+            ok: true, empty: false, book: cardBook,
+            book_display: cBookName,
+            date: want, style: cstyle, styles: CARD_STYLES.slice(),
+            count: cDay.length, days: cdays, index: cIdx, html: html,
+          };
+        });
+    }
+    if (endpoint === "diary/content") {
         var p = params || {};
         return Promise.resolve(contentFor(
           p.book === "love" ? "love" : "normal", String(p.date || ""), Number(p.tail) || 0

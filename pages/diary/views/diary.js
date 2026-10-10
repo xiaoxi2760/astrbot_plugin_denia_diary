@@ -53,7 +53,92 @@
       /* 改删的临时态：editing = 正在编辑的 seg_id，confirming = 待确认删除的 seg_id。
        都不是 id 就不生效，所以点别的条目不会互相干扰。 */
       editing: "", confirming: "", trashOpen: false, window: null,
+      /* 第 16 步：view = "text" 看正文，"card" 看卡片预览。cardDate 是预览翻到哪天。 */
+      view: "text", cardDate: "", cardStyle: "",
     };
+
+    /* ---- 卡片预览（第 16 步）------------------------------------------------
+       后端把模板**渲成 HTML** 再给我们（``core/diary/card.py`` 与 /看日记 出图
+       共用同一份），所以这里拿到的就是真卡片——不是"大概长这样"的近似图。
+       用 iframe + srcdoc 装：卡片自带 body 背景与整页尺寸，塞进当前页会串味。 */
+    async function loadCard(book) {
+      var UI = ctx.UI;
+      if (cardSlot) cardSlot.remove();
+      var box = UI.h("div", { class: "panel np-panel" }, [UI.h("div", { class: "muted", text: "渲染卡片…" })]);
+      cardSlot = box;
+      holder.appendChild(box);
+      try {
+        var data = await ctx.apiGet("diaryCard", {
+          book: book, date: state.cardDate, style: state.cardStyle,
+          who: ctx.who(),          /* 顶栏「对谁」：面板也按人筛（第 17 步） */
+        });
+        UI.clear(box);
+        if (data.empty) {
+          box.appendChild(UI.empty("这本还没有日记，先陪她聊两句吧 ✎"));
+          return;
+        }
+        state.cardDate = data.date || "";
+        state.cardStyle = data.style || "";
+        box.appendChild(cardPager(UI, data));
+        var frame = UI.h("iframe", { class: "np-cardframe", title: "日记卡预览" });
+        frame.setAttribute("sandbox", "allow-same-origin");
+        frame.srcdoc = data.html || "";
+        box.appendChild(frame);
+        box.appendChild(cardStyleBar(UI, data));
+      } catch (error) {
+        UI.clear(box);
+        box.appendChild(UI.errorBox(String(error && error.message ? error.message : error)));
+      }
+    }
+
+    /* 翻页导航：日记是按天分的，一天就是"一页"。 */
+    function cardPager(UI, data) {
+      var days = data.days || [];
+      var index = Number(data.index);
+      var total = days.length;
+      var at = index >= 0 ? index : 0;
+      return UI.h("div", { class: "np-cardpager" }, [
+        UI.h("button", {
+          class: "btn btn-sm", type: "button", text: "‹ 上一页",
+          disabled: at <= 0,
+          title: at > 0 ? days[at - 1] : "已经是最新的一页",
+          onclick: function () {
+            if (at <= 0) return;
+            state.cardDate = days[at - 1];
+            loadCard(state.book);
+          },
+        }),
+        UI.h("span", { class: "np-cardno", text: "第 " + (at + 1) + " / " + total + " 页" }),
+        UI.h("button", {
+          class: "btn btn-sm", type: "button", text: "下一页 ›",
+          disabled: at >= total - 1,
+          title: at < total - 1 ? days[at + 1] : "已经是最早的一页",
+          onclick: function () {
+            if (at >= total - 1) return;
+            state.cardDate = days[at + 1];
+            loadCard(state.book);
+          },
+        }),
+        UI.h("span", { class: "np-carddate", text: data.date || "" }),
+      ]);
+    }
+
+    /* 换款式只改**预览**，不落盘——真要生效去设置页选或敲 /日记款式，
+       免得在这儿随手一点把她的卡片样式改了又不记得改回来。 */
+    function cardStyleBar(UI, data) {
+      var styles = data.styles || [];
+      var current = data.style || "";
+      var bar = UI.h("div", { class: "row-actions np-cardstyles" });
+      styles.forEach(function (style) {
+        bar.appendChild(UI.h("button", {
+          class: "btn btn-sm" + (style === current ? " is-on" : ""),
+          type: "button", text: style,
+          onclick: function () { state.cardStyle = style; loadCard(state.book); },
+        }));
+      });
+      bar.appendChild(UI.h("span", { class: "np-locked", text: "预览用，不会改配置" }));
+      return bar;
+    }
 
     function slot(book) {
       if (!state.per[book]) state.per[book] = { month: "", date: "", page: 0 };
@@ -81,10 +166,13 @@
        回收站也一起补：它在正文区后面，render 清空 holder 时一起被清掉了。 */
     function renderAndLoad(book) {
       render();
+      var target = book || state.book;
       /* book 传 null = "两本都收起来了，正文区不加载"（老行为：那时只 render）。
          传空串 / 不传 = 照 state.book 来。别把 null 一起兜进去 —— 那样全收起时
          又会凭空冒出一本来。 */
-      if (book !== null) loadContent(book || state.book);
+      if (book !== null) {
+        if (state.view === "card") loadCard(target); else loadContent(target);
+      }
       loadTrash();
     }
 
@@ -396,6 +484,7 @@
        **每次都清掉上一块再挂新的**：早先是 appendChild 累加，refresh 时只调一次
        看不出来，但日历点日期 / 翻页会连点，一天下来叠出一堆旧面板。 */
     var contentSlot = null;
+    var cardSlot = null;
     async function loadContent(book) {
       var UI = ctx.UI;
       var st = slot(book);
@@ -406,6 +495,7 @@
       try {
         var data = await ctx.apiGet("diaryContent", {
           book: book, date: st.date, tail: st.date ? 0 : state.tail,
+          who: ctx.who(),
         });
         /* 窗口口径以本次拉到的为准（别缓存：设置里那个开关一改就变了） */
         var window_ = data.edit_window || null;
@@ -495,6 +585,7 @@
       UI.clear(holder);
       contentSlot = null;      /* 整屏重画后旧引用已失效 */
       trashSlot = null;
+      cardSlot = null;
       var books = state.books || [];
       books.forEach(function (info) {
         var st = slot(info.book);
@@ -544,7 +635,26 @@
             /* 要重画：否则日历上旧的 is-pick 会留着（日期已经清了，格子还亮着） */
             renderAndLoad(info.book);
           });
-          card.appendChild(UI.h("div", { class: "row-actions np-tail" }, [tailSel]));
+          /* ⚠️ 必须挂进 card —— 少了这一句，下面整块（连同"最近 N 条"下拉）都不进 DOM，
+             页面看着只是"少了个选择框"，很难第一眼看出是哪句丢了。 */
+          card.appendChild(UI.h("div", { class: "row-actions np-tail" }, [
+            tailSel,
+            /* 正文 / 卡片 两个看法（第 16 步）。卡片看的是**真渲染**出来的那张，
+               翻页就是按天翻——省得为了确认一句样式好不好看去 QQ 上戳一次。 */
+            UI.h("div", { class: "seg np-view" }, [
+              ["text", "正文"], ["card", "卡片"],
+            ].map(function (pair) {
+              return UI.h("button", {
+                class: "seg-btn" + (state.view === pair[0] ? " is-on" : ""),
+                type: "button", "data-view": pair[0], text: pair[1],
+                onclick: function () {
+                  if (state.view === pair[0]) return;
+                  state.view = pair[0];
+                  renderAndLoad(info.book);
+                },
+              });
+            })),
+          ]));
         }
         holder.appendChild(card);
       });
@@ -553,17 +663,18 @@
     }
 
     async function refresh() {
-      var data = await ctx.apiGet("diaryList", {});
+      var data = await ctx.apiGet("diaryList", { who: ctx.who() });
       state.books = data.books || [];
       render();
-      await loadContent(state.book);
+      if (state.view === "card") await loadCard(state.book);
+      else await loadContent(state.book);
       await loadTrash();
     }
 
     return {
       mount: function (target) { holder = target; },
       refresh: refresh,
-      unmount: function () { holder = null; trashSlot = null; },
+      unmount: function () { holder = null; trashSlot = null; cardSlot = null; },
     };
   };
 })(window);

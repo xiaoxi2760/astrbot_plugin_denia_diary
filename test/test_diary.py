@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -19,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core import storage  # noqa: E402
 from core.diary import format as fmt  # noqa: E402
+from core.diary import store as store_mod  # noqa: E402
 from core.session import Session  # noqa: E402
 from support import (  # noqa: E402
     NOW,
@@ -62,6 +65,11 @@ class FormatContractTest(unittest.TestCase):
         self.assertEqual(fmt.sanitize_tag("和某〕某\n某"), "和某 某 某")
         self.assertNotIn("〕", fmt.sanitize_tag("a〕b"))
 
+    def test_split_tag_tail_ascii_id_is_attribution_edge(self) -> None:
+        """已知窄边界：旧数据标注尾部恰好是 ``#英文`` 会被认成 id，钉住现状。"""
+        self.assertEqual(fmt.split_tag("和希#vip"), ("和希", "vip"))
+        self.assertEqual(fmt.split_tag("和希"), ("和希", ""))
+
     def test_mood_is_sanitized_and_capped(self) -> None:
         self.assertEqual(fmt.sanitize_mood("（开心）"), "开心")
         self.assertEqual(fmt.sanitize_mood("a\nb"), "a b")
@@ -95,9 +103,26 @@ class FormatContractTest(unittest.TestCase):
         self.assertEqual(len(entries), 2)  # 第一条有心境，留着
         self.assertTrue(all(e.book == fmt.LOVE for e in entries))
 
-    def test_keep_trailing_newlines(self) -> None:
-        self.assertEqual(fmt.keep_trailing_newlines("a\nb", "x\n\n\n"), "a\nb\n\n\n")
-        self.assertEqual(fmt.keep_trailing_newlines("a\n\n\n", "x"), "a\n\n")
+    def test_mood_is_sanitized_and_capped(self) -> None:
+        self.assertEqual(fmt.sanitize_mood("（开心）"), "开心")
+        self.assertEqual(fmt.sanitize_mood("a\nb"), "a b")
+        self.assertLessEqual(len(fmt.sanitize_mood("很" * 50)), fmt.MOOD_MAX)
+
+    def test_legacy_head_line_with_person_id_imports(self) -> None:
+        """旧版把 id 拼进头行（``和希#1411638634``）：导入路径要能拆出归属。"""
+        seg = fmt.split_segments("2026-10-04 09:00（开心）〔和希#1411638634〕\n正文\n")[0]
+        self.assertEqual((seg.who, seg.person_id), ("和希", "1411638634"))
+
+    def test_legacy_head_line_bad_id_tail_stays_whole(self) -> None:
+        """id 不合规范（含正则字符集外的字）就不拆归属：条目原样保留、不归属任何人。
+
+        在头行里拼 id 的旧实现遇到这种 id 会炸掉写路径——这正是第 17 步改 JSONL、
+        归属进独立字段要根治的病。
+        """
+        head = "2026-10-04 09:00〔和希#xxxx中〕"   # 「中」不在 id 字符集里
+        seg = fmt.split_segments(head + "\n正文\n")[0]
+        self.assertEqual(seg.who, "和希#xxxx中")
+        self.assertEqual(seg.person_id, "")
 
     def test_normalize_body_literal_backslash_n_and_blank_lines(self) -> None:
         self.assertEqual(
@@ -139,54 +164,42 @@ class FormatContractTest(unittest.TestCase):
         self.assertIsNone(seg)
         self.assertEqual(error, "这本里还没有段落")
 
-    def test_rewrite_preserves_head_and_trailing_newlines(self) -> None:
-        text = "2026-10-04 10:00（平静）〔群·甲〕\n旧正文\n\n"
-        result = fmt.rewrite_segment(
-            text, match="旧正文", new_body="新正文", now=NOW, within_days=7, tz=TZ
-        )
-        self.assertTrue(result.ok)
-        self.assertTrue(result.text.startswith("2026-10-04 10:00（平静）〔群·甲〕\n新正文"))
-        self.assertTrue(result.text.endswith("\n\n"))
-        self.assertEqual(result.before, "旧正文")
-
-    def test_rewrite_rejects_empty_body(self) -> None:
-        text = "2026-10-04 10:00\n旧正文\n\n"
-        result = fmt.rewrite_segment(
-            text, match="旧", new_body="  ", now=NOW, within_days=7, tz=TZ
-        )
-        self.assertFalse(result.ok)
-        self.assertIn("delete", result.error)
-
-    def test_delete_collapses_blank_lines(self) -> None:
-        text = (
-            "2026-10-01 10:00\n甲\n\n2026-10-02 11:00\n要删的\n\n2026-10-03 12:00\n丙\n\n"
-        )
-        result = fmt.delete_segment(
-            text, match="要删的", now=NOW, within_days=7, tz=TZ
-        )
-        self.assertTrue(result.ok)
-        self.assertNotIn("要删的", result.text)
-        self.assertNotIn("\n\n\n", result.text)
-        self.assertEqual(len(fmt.split_segments(result.text)), 2)
+    def test_view_roundtrips_through_the_legacy_parser(self) -> None:
+        """纯文本视图（头行 + 正文）必须能被旧解析器原样读回——它是人工可读的
+        旧档版式，也是 ``make_head_line`` 前像同源性的试金石（person_id 除外：
+        它本来就不进展示文本）。"""
+        entries = fmt.parse_entries(TWO_SEG)
+        again = fmt.parse_entries(fmt.view_text(entries))
+        self.assertEqual([e.stamp for e in again], [e.stamp for e in entries])
+        self.assertEqual([e.mood for e in again], [e.mood for e in entries])
+        self.assertEqual([e.who for e in again], [e.who for e in entries])
+        self.assertEqual([e.text for e in again], [e.text for e in entries])
 
 
 # ---------------------------------------------------------------- 文件层
 
 
 class StoreTest(TmpDirCase):
-    def test_append_writes_lf_and_trailing_newline(self) -> None:
+    def test_append_writes_jsonl_lines(self) -> None:
+        """权威存储是 JSONL：LF、单行结尾、键序冻结、归属在字段里而不在展示文本里。"""
         diary = make_diary(self.root)
         run(
             diary.store.append(
-                fmt.NORMAL, date="2026-10-04", time="21:30", mood="开心", tag="和某某", body="第一条"
+                fmt.NORMAL, date="2026-10-04", time="21:30", mood="开心", tag="和某某",
+                body="第一条", person_id="10001",
             )
         )
-        raw = diary.layout.diary.read_bytes()
+        raw = diary.layout.diary_jsonl.read_bytes()
         self.assertNotIn(b"\r", raw)
-        self.assertTrue(raw.endswith("\n\n".encode()))
+        self.assertTrue(raw.endswith(b"\n"))
+        line = json.loads(raw.decode("utf-8").splitlines()[0])
+        self.assertEqual(list(line), list(fmt.ENTRY_LINE_KEYS))
+        self.assertEqual(line["person_id"], "10001")
+        self.assertNotIn("#", line["who"])   # 展示字段里绝不编码 id（第 17 步根治的病）
         self.assertEqual(len(diary.entries()), 1)
 
     def test_append_after_file_without_trailing_newline(self) -> None:
+        """旧 txt 手改过、结尾没换行：导入照常，两条都在（JSONL 没有粘尾不变式要守）。"""
         diary = make_diary(self.root)
         storage.atomic_write_text(
             diary.layout.diary, "2026-10-01 10:00〔群·甲〕\n之前写的"
@@ -196,8 +209,22 @@ class StoreTest(TmpDirCase):
                 fmt.NORMAL, date="2026-10-04", time="21:30", body="新的一条"
             )
         )
-        self.assertIn("之前写的\n2026-10-04", diary.store.read(fmt.NORMAL))
+        view = diary.store.read(fmt.NORMAL)
+        self.assertIn("之前写的", view)
+        self.assertIn("新的一条", view)
         self.assertEqual(len(diary.entries()), 2)
+
+    def test_import_keeps_the_legacy_txt_untouched(self) -> None:
+        """一次性导入：JSONL 落地、旧 txt 原样保留（人工可读的旧档），之后只写 JSONL。"""
+        diary = make_diary(self.root)
+        legacy = "2026-10-01 10:00〔和甲〕\n旧档第一条。\n\n"
+        storage.atomic_write_text(diary.layout.diary, legacy)
+        entries = diary.store.read_entries(fmt.NORMAL)
+        self.assertEqual([e.text for e in entries], ["旧档第一条。"])
+        self.assertEqual(diary.layout.diary.read_text(encoding="utf-8"), legacy)
+        run(diary.store.append(fmt.NORMAL, date="2026-10-04", time="21:30", body="新的"))
+        self.assertEqual(diary.layout.diary.read_text(encoding="utf-8"), legacy)
+        self.assertEqual([e.text for e in diary.store.read_entries(fmt.NORMAL)], ["旧档第一条。", "新的"])
 
     def test_edit_backs_up_original_into_trash(self) -> None:
         diary = make_diary(self.root)
@@ -206,7 +233,7 @@ class StoreTest(TmpDirCase):
             diary.edit_for(group_session(), action="rewrite", match="第一版", text="第二版", now=NOW)
         )
         self.assertTrue(result["ok"])
-        backups = list(diary.layout.trash_dir.glob("*-rewrite-normal.txt"))
+        backups = list(diary.layout.trash_dir.glob("*-rewrite-normal.jsonl"))
         self.assertEqual(len(backups), 1)
         self.assertIn("第一版", backups[0].read_text(encoding="utf-8"))
 
@@ -215,6 +242,66 @@ class StoreTest(TmpDirCase):
         self.assertEqual(diary.store.read(fmt.NORMAL), "")
         run(diary.write_async(group_session(), text="写进去了", now=NOW))
         self.assertIn("写进去了", diary.store.read(fmt.NORMAL))
+
+
+class ImportBackfillTest(TmpDirCase):
+    """方案甲（用户 2026-10-11 拍板）：旧 txt 导入那一刻，按名字回填归属。"""
+
+    def test_unique_name_is_claimed(self) -> None:
+        diary = make_diary(self.root)
+        diary.store.name_lookup = lambda who: {"和希": "10001"}.get(who, "")
+        storage.atomic_write_text(diary.layout.diary, "2026-10-01 10:00〔和希〕\n旧档。\n\n")
+        entries = diary.store.read_entries(fmt.NORMAL)
+        self.assertEqual(entries[0].person_id, "10001")
+        line = json.loads(diary.layout.diary_jsonl.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(line["person_id"], "10001")
+        # 旧档原样保留——回填错了随时能对回来
+        self.assertIn("旧档。", diary.layout.diary.read_text(encoding="utf-8"))
+
+    def test_miss_stays_unattributed(self) -> None:
+        diary = make_diary(self.root)
+        diary.store.name_lookup = lambda who: ""
+        storage.atomic_write_text(diary.layout.diary, "2026-10-01 10:00〔和某某〕\n旧档。\n\n")
+        entries = diary.store.read_entries(fmt.NORMAL)
+        self.assertEqual(entries[0].person_id, "")
+        self.assertEqual(entries[0].who, "和某某")
+
+    def test_existing_id_wins_over_lookup(self) -> None:
+        """头行 ``#id`` 已经抠出归属时不再问 lookup——显式归属优先于名字猜测。"""
+        diary = make_diary(self.root)
+        diary.store.name_lookup = lambda who: "99999"
+        storage.atomic_write_text(diary.layout.diary, "2026-10-01 10:00〔和希#10001〕\n旧档。\n\n")
+        entries = diary.store.read_entries(fmt.NORMAL)
+        self.assertEqual(entries[0].person_id, "10001")
+
+    def test_no_lookup_means_no_backfill(self) -> None:
+        """默认（没注入 lookup）＝不回填，本子按"不归属任何人"照常读。"""
+        diary = make_diary(self.root)
+        storage.atomic_write_text(diary.layout.diary, "2026-10-01 10:00〔和希〕\n旧档。\n\n")
+        entries = diary.store.read_entries(fmt.NORMAL)
+        self.assertEqual(entries[0].person_id, "")
+
+
+class PersonIdByNameTest(unittest.TestCase):
+    """回填匹配器：恰好一人才认——宁可不见，不可错认。"""
+
+    def test_unique_hit_from_preference_and_contacts(self) -> None:
+        preference = {"10001": "希"}
+        contacts = {"20002": {"name": "另一个人"}}
+        self.assertEqual(store_mod.person_id_by_name("和希", preference, contacts), "10001")
+        self.assertEqual(store_mod.person_id_by_name("和另一个人", preference, contacts), "20002")
+
+    def test_duplicate_names_are_refused(self) -> None:
+        preference = {"10001": "希"}
+        contacts = {"20002": {"name": "希"}}
+        self.assertEqual(store_mod.person_id_by_name("和希", preference, contacts), "")
+
+    def test_group_tags_and_misses_return_empty(self) -> None:
+        preference = {"10001": "希"}
+        self.assertEqual(store_mod.person_id_by_name("群·甲", preference, {}), "")
+        self.assertEqual(store_mod.person_id_by_name("和陌生人", preference, {}), "")
+        self.assertEqual(store_mod.person_id_by_name("", preference, {}), "")
+        self.assertEqual(store_mod.person_id_by_name("和", preference, {}), "")
 
 
 # ---------------------------------------------------------------- 语义入口
@@ -243,7 +330,7 @@ class DiaryApiTest(TmpDirCase):
         self.assertEqual(peer["book"], fmt.LOVE)
         other = run(diary.write_async(private_session("20002", "另一个人"), text="普通的一条", now=NOW))
         self.assertEqual(other["book"], fmt.NORMAL)
-        self.assertTrue(diary.layout.love_diary.is_file())
+        self.assertTrue(diary.layout.love_diary_jsonl.is_file())
 
     def test_wake_without_sender_id_still_routes_to_love_book(self) -> None:
         """回归（2026-10-05 真机 10:00 段）：定时唤醒没有 sender_id，私聊 session_id 就是对端。
@@ -557,11 +644,11 @@ class SegmentIdentityTest(unittest.TestCase):
 
     def test_editing_the_body_changes_the_id(self) -> None:
         """内容变了 id 就变——这是并发护栏，不是缺陷：文件被人手改过就该对不上。"""
-        seg = fmt.split_segments(TWO_SEG)[1]
-        result = fmt.rewrite_segment_at(TWO_SEG, seg, "改了。")
-        self.assertTrue(result.ok)
-        after = fmt.find_by_id(fmt.split_segments(result.text), fmt.seg_id(seg))
-        self.assertIsNone(after)
+        entry = fmt.parse_entries(TWO_SEG)[1]
+        edited = replace(entry, text="改了。")
+        self.assertNotEqual(fmt.entry_seg_id(edited), fmt.entry_seg_id(entry))
+        # 与旧版对 txt 算的 id 同一前像：已发布数据升级后 id 不变
+        self.assertEqual(fmt.entry_seg_id(entry), fmt.seg_id(fmt.split_segments(TWO_SEG)[1]))
 
     def test_find_by_id_is_exact_not_nearest(self) -> None:
         """按 id 找**不许**退化成"最后一段"——那是 ``match`` 那条路径的行为。"""
@@ -572,89 +659,81 @@ class SegmentIdentityTest(unittest.TestCase):
         self.assertIsNone(fmt.find_by_id(segs, None))
 
 
-class RewriteBySegmentTest(unittest.TestCase):
-    """按段改删：头行不动、段间空行还在、聊天侧那条路走同一份实现。"""
+class StoreSurgeryTest(TmpDirCase):
+    """条目级改删：只动正文，其余字段（含归属）原样保留；两条路径同一份实现。"""
 
-    def test_rewrite_keeps_the_head_line(self) -> None:
-        seg = fmt.split_segments(TWO_SEG)[1]
-        result = fmt.rewrite_segment_at(TWO_SEG, seg, "新正文。")
-        self.assertTrue(result.ok)
-        self.assertIn("2026-10-03 21:30（难过）〔群·乙〕\n新正文。", result.text)
-        self.assertEqual(result.before, "第二条。")
+    def setUp(self) -> None:
+        super().setUp()
+        self.diary = make_diary(self.root)
+        storage.atomic_write_text(self.diary.layout.diary, TWO_SEG)
+        self.store = self.diary.store
+        self.segs = fmt.split_segments(self.store.read(fmt.NORMAL))
 
-    def test_rewrite_keeps_one_blank_line_between_segments(self) -> None:
-        """回归 P1-b 那一类：正文整段替掉时**不能**把段间空行一起吃掉。"""
-        seg = fmt.split_segments(TWO_SEG)[1]
-        result = fmt.rewrite_segment_at(TWO_SEG, seg, "新正文。")
-        self.assertIn("新正文。\n\n2026-10-04", result.text)
-        self.assertEqual(len(fmt.split_segments(result.text)), 3)
+    def _by_id(self, index: int) -> str:
+        return fmt.seg_id(self.segs[index])
 
-    def test_rewrite_preserves_paragraphs(self) -> None:
-        seg = fmt.split_segments(TWO_SEG)[1]
-        result = fmt.rewrite_segment_at(TWO_SEG, seg, "第一段。\n\n第二段。")
-        entries = fmt.parse_entries(result.text)
-        self.assertEqual(entries[1].text, "第一段。\n\n第二段。")
+    def test_rewrite_keeps_every_field_but_text(self) -> None:
+        run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=self._by_id(1), action="rewrite",
+            new_body="第一段。\n\n第二段。", now=NOW, within_days=7, tz=TZ,
+        ))
+        entry = self.store.read_entries(fmt.NORMAL)[1]
+        self.assertEqual(entry.text, "第一段。\n\n第二段。")
+        self.assertEqual((entry.date, entry.time), ("2026-10-03", "21:30"))
+        self.assertEqual((entry.mood, entry.who), ("难过", "群·乙"))
 
     def test_rewrite_rejects_empty_body(self) -> None:
-        seg = fmt.split_segments(TWO_SEG)[1]
-        result = fmt.rewrite_segment_at(TWO_SEG, seg, "   ")
+        result = run(self.store.apply_by_id(
+            fmt.NORMAL, seg_id=self._by_id(1), action="rewrite",
+            new_body="   ", now=NOW, within_days=7, tz=TZ,
+        ))
         self.assertFalse(result.ok)
         self.assertIn("删除", result.error)
 
-    def test_delete_by_segment_removes_head_and_body(self) -> None:
-        seg = fmt.split_segments(TWO_SEG)[1]
-        result = fmt.delete_segment_at(TWO_SEG, seg)
-        self.assertTrue(result.ok)
-        self.assertNotIn("第二条。", result.text)
-        self.assertNotIn("2026-10-03", result.text)
-        self.assertEqual(len(fmt.split_segments(result.text)), 2)
-
     def test_match_path_shares_the_same_implementation(self) -> None:
-        """``match`` 那条路（聊天工具）必须保持原有行为，包括"空正文提示用 delete"。"""
-        result = fmt.rewrite_segment(
-            TWO_SEG, match="第一条", new_body="X", now=NOW, within_days=7, tz=TZ
-        )
-        self.assertTrue(result.ok)
-        self.assertIn("2026-10-01 09:00（开心）〔和甲〕\nX\n\n2026-10-03", result.text)
-        empty = fmt.rewrite_segment(
-            TWO_SEG, match="第一条", new_body=" ", now=NOW, within_days=7, tz=TZ
-        )
+        """``match`` 那条路（聊天工具）与按 id 那条路走同一份 ``_surgery``。"""
+        empty = run(self.store.apply(
+            fmt.NORMAL, action="rewrite", match="第一条", new_body=" ",
+            now=NOW, within_days=7, tz=TZ,
+        ))
         self.assertFalse(empty.ok)
-        self.assertIn("delete", empty.error)
+        self.assertIn("删除", empty.error)
+        result = run(self.store.apply(
+            fmt.NORMAL, action="rewrite", match="第一条", new_body="X",
+            now=NOW, within_days=7, tz=TZ,
+        ))
+        self.assertTrue(result.ok)
+        self.assertEqual([e.text for e in self.store.read_entries(fmt.NORMAL)][0], "X")
 
 
-class InsertSegmentTest(unittest.TestCase):
-    """回收站还原：插回**原本的时间位置**，不是甩到末尾。"""
+class InsertEntryTest(unittest.TestCase):
+    """回收站还原（条目级）：按时间顺序插回，不是甩到末尾。"""
 
     def _record(self, seg: fmt.Segment) -> dict:
         return {"date": seg.date, "time": seg.time, "mood": seg.mood,
                 "who": seg.who, "text": seg.text}
 
-    def test_round_trip_is_byte_identical(self) -> None:
-        seg = fmt.split_segments(TWO_SEG)[1]
-        gone = fmt.delete_segment_at(TWO_SEG, seg)
-        back = fmt.insert_segment(gone.text, fmt.segment_from_record(self._record(seg)))
-        self.assertEqual(back, TWO_SEG)
-
     def test_inserts_in_chronological_order(self) -> None:
         """删的是第一条，还原后它必须回到最前面，而不是追加到末尾。"""
-        first = fmt.split_segments(TWO_SEG)[0]
-        gone = fmt.delete_segment_at(TWO_SEG, first)
-        back = fmt.insert_segment(gone.text, fmt.segment_from_record(self._record(first)))
-        self.assertEqual(fmt.parse_entries(back)[0].date, "2026-10-01")
+        entries = fmt.parse_entries(TWO_SEG)
+        back = fmt.insert_entry_chronologically(entries[1:], entries[0])
+        self.assertEqual(back[0].date, "2026-10-01")
+        self.assertEqual(len(back), 3)
 
     def test_appends_when_it_is_the_newest(self) -> None:
-        last = fmt.split_segments(TWO_SEG)[2]
-        later = dict(self._record(last), date="2026-12-01", time="10:00")
-        out = fmt.insert_segment(TWO_SEG, fmt.segment_from_record(later))
-        self.assertEqual(fmt.parse_entries(out)[-1].date, "2026-12-01")
+        entries = fmt.parse_entries(TWO_SEG)
+        later = replace(entries[2], date="2026-12-01", time="10:00")
+        out = fmt.insert_entry_chronologically(entries, later)
+        self.assertEqual(out[-1].date, "2026-12-01")
 
-    def test_rebuilds_the_head_line_verbatim(self) -> None:
-        """心情与标注要一起回来，不能还原成一个光秃秃的日期行。"""
+    def test_rebuilds_the_identity_verbatim(self) -> None:
+        """从回收站记录重建的条目，内容地址与删除前一致（幂等还原靠它）。"""
         seg = fmt.split_segments(TWO_SEG)[1]
-        gone = fmt.delete_segment_at(TWO_SEG, seg)
-        back = fmt.insert_segment(gone.text, fmt.segment_from_record(self._record(seg)))
-        self.assertIn("2026-10-03 21:30（难过）〔群·乙〕", back)
+        entry = fmt.entry_from_record(self._record(seg))
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(fmt.entry_seg_id(entry), fmt.seg_id(seg))
+        self.assertEqual((entry.mood, entry.who), ("难过", "群·乙"))
 
 
 class AlreadyHappenedTest(unittest.TestCase):
@@ -696,9 +775,19 @@ class StoreApplyByIdTest(TmpDirCase):
         return fmt.seg_id(self.segs[index])
 
     def _seed_extra(self, head_line: str, body: str) -> str:
-        """把一条**追加到文件末尾**并返回它的 id（id 必须从真实文件内容算）。"""
-        storage.atomic_write_text(self.diary.layout.diary, self.store.read(fmt.NORMAL) + f"{head_line}\n{body}\n\n")
-        return fmt.seg_id(fmt.split_segments(self.store.read(fmt.NORMAL))[-1])
+        """把一条**追加进权威存储**并返回它的 id（id 必须从真实存储内容算）。"""
+        match = fmt.HEAD_RE.match(head_line)
+        assert match is not None, head_line
+        who, _pid = fmt.split_tag(match.group(4) or "")
+        run(self.store.append(
+            fmt.NORMAL,
+            date=match.group(1),
+            time=match.group(2),
+            mood=match.group(3) or "",
+            tag=who,
+            body=body,
+        ))
+        return fmt.entry_seg_id(self.store.read_entries(fmt.NORMAL)[-1])
 
     # ---- 改 / 删 ----
 
@@ -799,7 +888,7 @@ class StoreApplyByIdTest(TmpDirCase):
             now=NOW, within_days=7, tz=TZ,
         ))
         self.assertTrue(list(self.diary.layout.trash_dir.glob("seg-*.json")))
-        self.assertTrue(list(self.diary.layout.trash_dir.glob("*-delete-normal.txt")))
+        self.assertTrue(list(self.diary.layout.trash_dir.glob("*-delete-normal.jsonl")))
 
     def test_rewrite_does_not_touch_the_trash(self) -> None:
         run(self.store.apply_by_id(

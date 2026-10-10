@@ -88,11 +88,11 @@ astrbot_plugin_denia_diary/
 
 | 层 | 文件 | 只做这些 |
 | :--- | :--- | :--- |
-| 格式契约 | `core/diary/format.py` | 头行正则、分段、**改/删/还原的纯文本手术**、`seg_id`、渲染。无文件 IO、无配置、不认识平台 |
-| 文件层 | `core/diary/store.py` | 两本的位置、追加、局部替换、改删前备份、**回收站归档与还原**、每文件一把 `asyncio.Lock` |
+| 格式契约 | `core/diary/format.py` | **JSONL 行编解码（`ENTRY_LINE_KEYS` 冻结键序）**、旧 txt 导入解析、条目级改删 / 还原、`seg_id`、渲染。无文件 IO、无配置、不认识平台 |
+| 文件层 | `core/diary/store.py` | 两本的位置、**JSONL 读写 + 旧 `.txt` 一次性导入**、改删前备份、**回收站归档与还原**、每文件一把 `asyncio.Lock` |
 | 语义入口 | `core/diary/api.py` | `read_for` / `write_for` / `edit_for` / `prompt_line` / `event_hint`；**`enabled` 与可见性判定都在这里** |
 
-第 15 步新增的一层在 store 上：`apply_by_id`（按 `seg_id` 改删，面板用）、`archive_segment` / `trash_items` / `trash_record` / `restore_segment`（回收站）。`match` 那条老路（`rewrite_segment` / `delete_segment`）保留，它现在**委托**给按段的实现（`rewrite_segment_at` / `delete_segment_at`）——两条路共用一份纯文本手术，免得以后改一边忘了另一边。
+第 15 步新增的一层在 store 上：`apply_by_id`（按 `seg_id` 改删，面板用）、`archive_segment` / `trash_items` / `trash_record` / `restore_segment`（回收站）。第 18 步把存储换成 JSONL 后，`match`（聊天工具）与按 `seg_id`（面板）两条路**共用同一份条目手术**（`DiaryStore._surgery`）——先备份原文，再落盘，免得以后改一边忘了另一边。`seg_id` 由 `format.entry_seg_id` 从结构化字段统一重建，已发布数据（头行从不带 id）升级后 id 不变。
 
 已落地的约定（原包 `qq-bridge-diary` 实测过的坑，见该包分析报告的 P 编号）：
 
@@ -322,7 +322,7 @@ Dashboard → 插件管理 → `astrbot_plugin_denia_diary` → 插件页。**�
 | tab | 数据 | 读写 |
 | :--- | :--- | :--- |
 | 总览（她此刻） | 当下情绪 + 基调 + 作息词 + 今日主动计数 + 四个子系统开关 + 每个数据文件 `{exists, bytes, mtime}` + 版本 | 读 |
-| 日记 | 两本的篇数/字数/最近更新；按日期或"最近 N 条"读正文。**恋爱日记默认收起** | 读 + 写（第 15 步：改 / 删 / 回收站还原） |
+| 日记 | 两本的篇数/字数/最近更新；按日期或"最近 N 条"读正文。**恋爱日记默认收起**。两个看法：**正文**（改 / 删在此）与**卡片**（真渲染出来的那张，按天翻页带页码，底部有回收站） | 读 + 写（第 15 步：改 / 删 / 回收站还原） |
 | 小本本 | 事实与约定（按顶栏"对谁"过滤）+ 上限；可标记完成 / 删除 | 读 + 写 |
 | 熟悉度 | 榜（衰减后分数降序）+ 档位词 + `last_ts` + **当前 `love_peers`（只显示）** | 读 |
 | 曲线与主动 | 手写 SVG 折线（valence / arousal，当下令 + 基调点）+ 主动消息计数与发送记录（倒序） | 读 |
@@ -351,7 +351,7 @@ Dashboard → 插件管理 → `astrbot_plugin_denia_diary` → 插件页。**�
 
 | | 什么文件 | 谁写 | 能一键还原吗 |
 | :--- | :--- | :--- | :--- |
-| 整本快照 | `diary-trash/{stamp}-{action}-{book}.txt` | `diary_edit` 工具 | ❌ 整本回写会连带抹掉这之后的写入 |
+| 整本快照 | `diary-trash/{stamp}-{action}-{book}.jsonl` | `diary_edit` 工具 | ❌ 整本回写会连带抹掉这之后的写入 |
 | 单段记录 | `diary-trash/seg-{stamp}-{book}.json` | 面板删除 | ✅ 按时间顺序插回原位 |
 
 回收站**只列单段记录**。整本快照还在同一个目录里，但不摆进回收站——按钮上写"还原"就是在骗人。
@@ -375,6 +375,55 @@ Dashboard → 插件管理 → `astrbot_plugin_denia_diary` → 插件页。**�
 - **还原幂等**：同一份记录还原两次，第二次回"这一段已经在本子里了"，绝不插出两条一样的；
 - **`trash_id` 钉死在回收站目录内**（`Path(key).name != key` 就拒），挡目录穿越；
 - 面板改删**不受 `subsystems.diary` 门控** —— 那是"她能不能记"，与主人能不能改自己的本子无关（读侧本来也不门控）。
+
+### 面板里的卡片预览（第 16 步）
+
+日记页有两个看法：**正文**（原来那个，改删都在这儿）与**卡片**（真渲染出来的那张，
+按天翻页，带「第 N / 共 M 页」）。不用为了确认一句样式好不好看去 QQ 上戳一次 `/看日记`。
+
+**渲染发生在插件里，不在前端。** `/看日记` 的出图链路是远端 t2i 服务才有 Jinja2；
+宿主要件表里**没有** jinja2（本地装也没用），iframe 里的前端更没有。所以
+``GET diary/card`` 由 ``core.diary.card.render_card`` 在服务端渲成 HTML，前端只把
+这段塞进 iframe 的 ``srcdoc``。
+
+**三个入口共用一份渲染器**：``/看日记`` 出图、面板预览、``tools/preview_card.py``。
+面板里看到的就是真卡片，不是"大概长这样"的近似图——预览和实物对不上，预览就是骗人的。
+HTML 转义也因此只在 ``card.card_context`` 一处做（出图链路没有 autoescape）。
+
+⚠️ ``core/diary/card.py`` 只认 ``{{ }}`` / ``{% for %}`` / ``{% if %}``。模板用了别的
+语法（``{% set %}``、过滤器）会**抛异常**而不是静默出空图；`test_diary_card.py` 把
+六款模板逐个真渲一遍盯着这条。iframe 加了 ``sandbox="allow-same-origin"``（**不加**
+allow-scripts）：模板里没有脚本，预览也不该有执行能力。
+
+**预览里的换款式只改预览、不落盘**——真要生效去设置页选或敲 ``/日记款式``，免得随手
+一点把她的卡片样式改了又不记得改回来。
+
+### 日记存储换 JSONL（第 18 步）
+
+**权威存储从纯文本 `.txt` 换成 JSONL**（`日记.jsonl` / `恋爱日记.jsonl`）：一行一段
+`{"date","time","mood","who","person_id","text"}`，键序冻结（`format.ENTRY_LINE_KEYS`，
+键名可加不能改）。动机（第 17 步把 person_id 编码进头行的教训）：
+
+- **归属不该住在展示文本里**。头行拼 `#id` 要靠正则抠出来，一个不合规范的 id 就能炸
+  掉写路径；面板与存储两侧各自重建头行还会把 `seg_id` 算岔。结构归结构，展示归展示。
+- **生态调研**（2026-10-11）：AstrBot 本体对话历史走 SQLAlchemy+SQLite；同类插件
+  daymind 是"正文 `.txt` + 元数据 sidecar `.json`"，★389 的 private_companion 自有
+  数据全是 JSON。没人把结构化 id 塞进人类可读文本里。用户拍板走 JSONL。
+
+**迁移**：旧 `.txt` 在首次访问时**一次性导入** JSONL（含旧头行 `#id` 里抠出的归属），
+导入后 txt 原样留在数据目录当**人工可读的旧档**，不再读写；导入幂等（以 JSONL 存在
+为标记），无需迁移工具。`seg_id` 由 `format.entry_seg_id` 从结构化字段统一重建，与
+已发布版本对 txt 算的 id **同一算法同一前像**——升级不改 id，面板在途引用不断。
+
+**归属回填（方案甲，用户 2026-10-11 拍板）**：旧段落头行只有「和某某」没有 id，导入
+那一刻按名字反查 `name_preference` + 联系人表（`store.person_id_by_name`）——**恰好
+匹配一人才认**，查不到 / 重名 / 群标注一律保持未归属（宁可不见，不可错认）。匹配
+不到的批次想重试：删掉对应的 `日记.jsonl` 再触发一次导入即可（旧 txt 还在）。回填
+只发生在导入那一次，之后改称呼**不会**追溯改历史归属。
+
+**什么没了**：头行不再是文件格式（`view_text` 仅供展示 / 旧档查看）；"文件以换行
+结尾"的不变式随之作废；`rewrite/delete/insert_segment` 那套纯文本手术由条目级
+`_surgery` 取代。所有读侧（面板 payload、`/看日记`、注入提示）走 `read_entries`。
 
 ### 日历清单与结构化条目
 
@@ -409,6 +458,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `diary/delete` | POST | `{"book", "seg_id"}` 删一段（**先进回收站**） |
 | `diary/trash` | GET | 回收站：删掉的那些**单段**记录（倒序） |
 | `diary/restore` | POST | `{"id"}` 从回收站还原一段（幂等） |
+| `diary/card` | GET | `?book=&date=&style=` 卡片**渲染好的 HTML** + 翻页信息（`days` / `index`）；日记页「卡片」预览用 |
 | `notebook` | GET | `?who=` 过滤 |
 | `notebook/complete` | POST | `{"id": "..."}` |
 | `notebook/delete` | POST | `{"id": "..."}`（先进 `notebook.json` 的 `trash`） |
@@ -572,8 +622,10 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 
 | 文件 | 用途 | 格式 |
 | :--- | :--- | :--- |
-| `日记.txt` | 日记正文（产品主张：记事本能直接打开） | 纯文本，无版本头 |
-| `恋爱日记.txt` | 恋爱日记正文 | 纯文本，无版本头 |
+| `日记.jsonl` | 日记正文（**权威存储**，第 18 步） | JSONL，一行一段，键序冻结见 `format.ENTRY_LINE_KEYS` |
+| `恋爱日记.jsonl` | 恋爱日记正文（权威存储） | 同上 |
+| `日记.txt` | 旧纯文本日记：首次访问时**一次性导入** JSONL，之后原样保留当人工可读旧档，不再读写 | 纯文本，无版本头 |
+| `恋爱日记.txt` | 同上（恋爱日记那本） | 纯文本，无版本头 |
 | `notebook.json` | 小本本（约定型 / 事实型 + 回收站） | JSON + `schema_version` |
 | `state.json` | 情绪当前值（全局一条，不按人分） | JSON + `schema_version` |
 | `state_history.jsonl` | 情绪历史（面板情绪曲线的唯一数据源） | JSONL 追加文件，一行一个 JSON，无版本头 |
@@ -582,7 +634,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `proactive-log.jsonl` | 主动消息发送记录（**确认发出后**才追加；保留最近 200 行或 90 天） | JSONL 追加，无版本头 |
 | `names.json` | id → 昵称 / 群名缓存 | JSON + `schema_version` |
 | `diary-nudge.json` | 日记提醒冷却（按会话） | JSON + `schema_version` |
-| `diary-trash/` | 改/删日记前的原文备份 | 纯文本片段 |
+| `diary-trash/` | 改/删日记前的原文备份（整本快照 `*.jsonl`）+ 单段归档（`seg-*.json`） | JSONL 快照 / JSON 记录 |
 
 `notebook.json` 形状（`schema_version` 由 `atomic_write_json` 自动补；`id` 为 12 位 hex，生成后不变，面板可引用）：
 

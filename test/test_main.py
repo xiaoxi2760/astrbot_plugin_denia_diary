@@ -1241,6 +1241,15 @@ class DiaryCardTest(PluginCase):
         self.assertIn("seal 款", tmpl)  # 选中的是 night 那张模板
         self.assertIn("card_font_css", tmpl)  # 每个模板都留了字体插槽
 
+    def test_card_who_survives_unconfigured_names(self) -> None:
+        """生产标注是「和某某」不是 id：raw_name 查不到也**不能抹成空串**（1.2.0 起的 P1）。
+
+        write_async 落盘的标注是 ``和某某``（label 的「和」前缀）、person_id=10001；
+        没配称呼时卡上的名字回落为标注剥「和」——模板自己会补「和」。
+        """
+        _tmpl, data = self._render_once()
+        self.assertEqual(data["entries"][0]["who"], "某某")
+
     def test_date_appears_once_in_every_template(self) -> None:
         """日期只在右上角。页脚再抄一遍是冗余（旧版就是这么写着，一屏出现两次）。"""
         from core import settings as settings_mod
@@ -1370,6 +1379,27 @@ class DiaryCardTest(PluginCase):
             self.assertIn(target, choices, f"别名「{alias}」指向了不存在的款式 {target}")
         for style in choices:
             self.assertIn(style, self.module._CARD_STYLE_LABELS, f"{style} 没有中文名")
+
+
+class LegacyBackfillWiringTest(PluginCase):
+    """方案甲接线：插件把 name_preference（+联系人表）接进 store 的导入回填。"""
+
+    def test_wired_lookup_resolves_from_preference(self) -> None:
+        plugin = self.make_plugin({"name_preference": {"10001": "希"}})
+        self.assertEqual(plugin._legacy_person_id("和希"), "10001")
+        self.assertEqual(plugin._legacy_person_id("和陌生人"), "")
+        self.assertEqual(plugin._legacy_person_id("群·某某群"), "")
+
+    def test_wired_lookup_survives_broken_contacts(self) -> None:
+        """联系人表坏了不能带累导入——preference 还能命中的照常命中。"""
+        plugin = self.make_plugin({"name_preference": {"10001": "希"}})
+
+        class Boom:
+            def contacts(self) -> dict:
+                raise RuntimeError("坏了")
+
+        plugin.proactive.store = Boom()
+        self.assertEqual(plugin._legacy_person_id("和希"), "10001")
 
 
 if __name__ == "__main__":

@@ -37,6 +37,11 @@ LINE_SEP = "\n"
 
 DIARY_FILE = "日记.txt"
 LOVE_DIARY_FILE = "恋爱日记.txt"
+"""旧纯文本日记（第 17 步前的存储）。只读：首次访问时一次性导入 JSONL，之后
+原样留在数据目录当人工可读的旧档，不再被读写。"""
+DIARY_JSONL_FILE = "日记.jsonl"
+LOVE_DIARY_JSONL_FILE = "恋爱日记.jsonl"
+"""日记的**权威存储**（第 17 步）：一行一段 JSON，键序冻结见 ``format.ENTRY_LINE_KEYS``。"""
 NOTEBOOK_FILE = "notebook.json"
 STATE_FILE = "state.json"
 STATE_HISTORY_FILE = "state_history.jsonl"
@@ -69,7 +74,8 @@ _REPLACE_DELAY = 0.02
 class Layout:
     """数据目录布局。``base_dir`` 由宿主在运行时给出（AstrBot：``StarTools.get_data_dir(插件名)``）。
 
-    日记正文是纯文本 ``.txt``（产品主张：记事本能直接打开）；其余系统用 JSON。
+    日记的权威存储是 JSONL（``日记.jsonl`` / ``恋爱日记.jsonl``，第 17 步）；
+    旧 ``.txt`` 只作为导入来源与人工可读旧档保留。其余系统用 JSON。
     """
 
     base_dir: Path
@@ -84,6 +90,14 @@ class Layout:
     @property
     def love_diary(self) -> Path:
         return self.base_dir / LOVE_DIARY_FILE
+
+    @property
+    def diary_jsonl(self) -> Path:
+        return self.base_dir / DIARY_JSONL_FILE
+
+    @property
+    def love_diary_jsonl(self) -> Path:
+        return self.base_dir / LOVE_DIARY_JSONL_FILE
 
     @property
     def notebook(self) -> Path:
@@ -130,6 +144,8 @@ class Layout:
         return (
             self.diary,
             self.love_diary,
+            self.diary_jsonl,
+            self.love_diary_jsonl,
             self.notebook,
             self.state,
             self.state_history,
@@ -379,10 +395,12 @@ class KeyedLocks:
 __all__ = [
     "AFFINITY_FILE",
     "DIARY_FILE",
+    "DIARY_JSONL_FILE",
     "DIARY_NUDGE_FILE",
     "JSON_FILES",
     "LINE_SEP",
     "LOVE_DIARY_FILE",
+    "LOVE_DIARY_JSONL_FILE",
     "NAMES_FILE",
     "NOTEBOOK_FILE",
     "PROACTIVE_FILE",

@@ -78,8 +78,20 @@ class Diary:
     def entries(self) -> list[fmt.Entry]:
         out: list[fmt.Entry] = []
         for book in fmt.BOOKS:
-            out.extend(fmt.parse_entries(self.store.read(book), book))
+            out.extend(self.store.read_entries(book))
         return sorted(out, key=lambda e: f"{e.date} {e.time}")
+
+    def entries_of(self, day: str, *, person_id: str = "") -> list[fmt.Entry]:
+        """某一天的条目。``person_id`` 非空就**只看这个人的**（第 17 步）。
+
+        查不到归属的旧段落（头行没记 id）**一律排除**——它们不归属任何人，硬塞给谁都
+        算错认领。``person_id`` 留空＝不过滤（全量），给的是面板那边选中的那个人。
+        """
+        items = self.entries()
+        want = str(person_id or "")
+        if want:
+            items = [e for e in items if e.person_id == want]
+        return [e for e in items if e.date == day]
 
     def visible(self, entries: list[fmt.Entry], session: Session) -> list[fmt.Entry]:
         """恋爱日记**只对最亲密那个人的私聊可见**；配了名单就一律对其他人/群聊隐藏。
@@ -104,8 +116,13 @@ class Diary:
             return {"ok": False, "error": DISABLED}
         if not _is_day(date):
             return {"ok": False, "error": "date 格式应为 YYYY-MM-DD"}
+        # 卡片是"发出去的一张图"：同一本里不同人的条目必须分开（第 17 步）。
+        # 私聊里只给"写给眼前这个人"的那些；群聊走不到这里（上层先拦了）。
         shown_all = _filter_book(self.visible(self.entries(), session), book)
-        day = [e for e in shown_all if e.date == date]
+        day = [
+            e for e in shown_all
+            if e.date == date and e.person_id == str(session.person_id() or "")
+        ]
         return {
             "ok": True,
             "date": date,
@@ -117,6 +134,7 @@ class Diary:
                     "mood": e.mood,
                     "who": e.who,
                     "book": e.book,
+                    "person_id": e.person_id,
                     # 分段口径与面板一致：按空行切段（段内保留换行）
                     "paragraphs": [p for p in re.split(r"\n\s*\n", e.text) if p.strip()],
                 }
@@ -257,6 +275,7 @@ class Diary:
         day = date if _is_day(date) else fmt.day_of(moment)
         clock = fmt.clock_of(moment)
         tag = session.label(dict(self.settings.name_preference))
+        person_id = str(session.person_id() or "")
         book = self.book_for(session)
         return {
             "ok": True,
@@ -265,7 +284,8 @@ class Diary:
             "book": book,
             "chars": len(body),
             "tag": tag,
-            "_head": (day, clock, mood, tag, body, book),
+            "person_id": person_id,
+            "_head": (day, clock, mood, tag, body, book, person_id),
         }
 
     async def write_async(self, session: Session, **kwargs) -> dict:
@@ -273,11 +293,16 @@ class Diary:
         result = self.write_for(session, **kwargs)
         if not result.get("ok"):
             return result
-        day, clock, mood, tag, body, book = result.pop("_head")
-        await self.store.append(book, date=day, time=clock, mood=mood, tag=tag, body=body)
-        today = [e for e in self.entries() if e.date == day]
-        result["entries_today"] = len(today)
-        result["total"] = len(self.entries())
+        day, clock, mood, tag, body, book, person_id = result.pop("_head")
+        await self.store.append(
+            book, date=day, time=clock, mood=mood, tag=tag, body=body, person_id=person_id
+        )
+        # ⚠️ 只解析**一次**（第 17 步）：`self.entries()` 会把两本日记整个读回来重新
+        # 解析一遍。原来这里调两次、``prompt_line`` 里也调两次——十年数据下每轮要多付
+        # 几十毫秒（见 tools/bench_diary.py）。
+        all_entries = self.entries()
+        result["entries_today"] = len([e for e in all_entries if e.date == day])
+        result["total"] = len(all_entries)
         return result
 
     # ---- 改 / 删 -------------------------------------------------------------
@@ -305,7 +330,8 @@ class Diary:
         if action == "list":
             segments: list[dict] = []
             for candidate in candidates:
-                for seg in fmt.split_segments(self.store.read(candidate)):
+                for entry in self.store.read_entries(candidate):
+                    seg = fmt.entry_segment(entry)
                     segments.append(
                         {
                             "book": candidate,
@@ -382,8 +408,9 @@ class Diary:
         moment = now or datetime.now(self._tz())
         limits = self._limits()
         today = fmt.day_of(moment)
-        mine = [e for e in self.entries() if e.date == today]
-        earlier = [e for e in self.entries() if e.date != today]
+        all_entries = self.entries()   # 只解析一次（第 17 步）
+        mine = [e for e in all_entries if e.date == today]
+        earlier = [e for e in all_entries if e.date != today]
         previous = earlier[-1] if earlier else None
 
         # D8（用户裁定"只改措辞"）：凌晨那句别说成"今天还没写"——那读起来像在怪她

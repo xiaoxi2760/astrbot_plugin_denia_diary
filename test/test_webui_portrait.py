@@ -367,7 +367,7 @@ class TestPortraitHandlers(TmpDirCase):
         )
         self.assertEqual([spec[2] for spec in portrait_routes], [("GET",), ("POST",), ("POST",), ("POST",)])
         self.assertEqual(
-            len(routes.ROUTES), 20, "12 条既有 + 立绘 4 条 + 日记改删/回收站 4 条"
+            len(routes.ROUTES), 21, "12 条既有 + 立绘 4 条 + 日记改删/回收站 4 条 + 卡片预览 1 条"
         )
 
 

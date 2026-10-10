@@ -1,24 +1,31 @@
-"""日记**格式契约**（第 1 步）。
+"""日记**格式契约**（第 1 步；存储在第 17 步改为 JSONL）。
 
-头行是整个日记本唯一的定界符：:
+**权威存储是 JSONL，一行一段**（键序冻结，见 ``ENTRY_LINE_KEYS``）——结构化数据
+放结构化文件，正文里不再编码 id。旧版把 person_id 拼进头行、靠正则抠出来，一个怪
+id 就能炸掉写路径；那个方案已废弃。
+
+头行降级为**展示/内容地址前像**：:
 
     2026-09-23 03:45（喜欢）〔和某某〕      ← 头行：日期 时间（心情）〔标注〕
     正文若干行
                                             ← 空行 = 段间隔
 
-本模块只做**纯文本手术**：不做文件 IO、不读配置、不认识平台对象。
+它不再是文件里的定界符，只在两处出现：``seg_id`` 的哈希前像（从结构化字段重建，
+面板与存储两侧同源）、以及旧 ``.txt`` 导入时的解析（见 ``split_segments``）。
 
-⚠️ 三条不变式（原包实测踩过，改这里前先读 `docs` 里 P1-b 的复盘）：
+本模块只做**纯数据手术**：不做文件 IO、不读配置、不认识平台对象。
 
-1. **写入侧与解析侧共用 ``HEAD_RE`` 与 ``TAG_MAX``**——标注写超长会让头行失配，
-   整段从读/列/按天里消失（还会被上一段吞掉）；
-2. **头行是历史，不可改**——编辑只换正文；
-3. **文件必须以换行结尾**——否则下一次追加的头行会粘在上一段末尾，同样导致失配。
+⚠️ 两条不变式（原包实测踩过，改这里前先读 `docs` 里 P1-b 的复盘）：
+
+1. **重建头行与旧解析共用 ``HEAD_RE`` 与 ``TAG_MAX``**——导入旧文件、以及任何把
+   条目序列化成文本的地方，都必须过同一套收敛（``make_head_line``）；
+2. **头行字段是历史，不可改**——编辑只换正文（Entry 其余字段原样保留）。
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
@@ -33,6 +40,12 @@ HEAD_RE = re.compile(
 )
 TAG_MAX = 40
 """标注长度上限，**必须与 ``HEAD_RE`` 里的 ``{0,40}`` 一致**。"""
+
+_TAG_PERSON_RE = re.compile(r"#([A-Za-z0-9_.:-]{1,32})$")
+"""从旧头行标注尾部抠出 person_id（``和希#1411638634``）。
+
+只服务于**旧 .txt 导入**：新存储里归属是 JSONL 的独立字段，展示文本里不再编码 id。
+id 允许字母数字与 ``_.:-``（QQ 是纯数字，别把别平台的 id 也堵死）。"""
 
 MOOD_MAX = 12
 GROUP_TAG_PREFIX = "群·"
@@ -90,8 +103,21 @@ def sanitize_tag(tag: object) -> str:
     return text[:TAG_MAX]
 
 
+def split_tag(raw: object) -> tuple[str, str]:
+    """旧头行里那一段标注 → ``(可读名, person_id)``。**只用于旧 .txt 导入**。
+
+    没有 ``#`` 的（旧文件、群聊那种无归属的）返回 ``(原样, "")``。
+    """
+    text = str(raw or "").strip()
+    match = _TAG_PERSON_RE.search(text)
+    if not match:
+        return text, ""
+    return text[: match.start()].strip(), match.group(1)
+
+
 def make_head_line(date: str, time: str, mood: object = "", tag: object = "") -> str:
-    """唯一允许用来生成头行的函数。"""
+    """重建头行（``seg_id`` 前像 / 纯文本视图用）。**不携带 person_id**——
+    归属是 JSONL 的独立字段，展示文本里永远不编码 id。"""
     clean_mood = sanitize_mood(mood)
     clean_tag = sanitize_tag(tag)
     mood_part = f"（{clean_mood}）" if clean_mood else ""
@@ -131,6 +157,11 @@ class Segment:
     mood: str
     who: str
     text: str
+    person_id: str = ""
+    """这一段写给谁（头行 ``和希#1411638634`` 里 id 那截）。
+
+    旧文件没有这一项，为空串——那是"不归属任何人"，**不是**"不属于任何人"：
+    按人过滤时它们进不了别人的卡片，但自己翻本子时照样在。"""
 
     @property
     def stamp(self) -> str:
@@ -154,6 +185,8 @@ class Entry:
     who: str
     text: str
     book: str = NORMAL
+    person_id: str = ""
+    """这一段写给谁；见 ``Segment.person_id``。"""
 
     @property
     def stamp(self) -> str:
@@ -211,6 +244,125 @@ def find_by_id(segments: list[Segment], wanted: str) -> Segment | None:
     return None
 
 
+# ---- JSONL（权威存储，第 17 步）-------------------------------------------------
+#
+# 一行一段：{"date","time","mood","who","person_id","text"}。``book`` 不在行里
+# ——两本日记是两个文件，读侧注入。坏行读取侧丢弃兜底（state_history 同一口径），
+# 绝不让一行坏数据掀翻整本。
+
+
+ENTRY_LINE_KEYS = ("date", "time", "mood", "who", "person_id", "text")
+"""JSONL 行的冻结键序。**键名可加不能改**（与 storage 契约同一口径）。"""
+
+
+def entry_line(entry: Entry) -> str:
+    """Entry → 一行 JSONL（键序冻结，``ensure_ascii=False``：中文原样可读）。"""
+    record = {
+        "date": entry.date,
+        "time": entry.time,
+        "mood": entry.mood,
+        "who": entry.who,
+        "person_id": entry.person_id,
+        "text": entry.text,
+    }
+    return json.dumps(record, ensure_ascii=False)
+
+
+def entry_from_line(line: str, book: str = NORMAL) -> Entry | None:
+    """一行 JSONL → Entry；空行 / 坏行（不是 JSON 对象、缺 date）返回 ``None``。"""
+    text = str(line or "").strip()
+    if not text:
+        return None
+    try:
+        record = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or not str(record.get("date") or "").strip():
+        return None
+    return Entry(
+        date=str(record.get("date") or ""),
+        time=str(record.get("time") or ""),
+        mood=str(record.get("mood") or ""),
+        who=str(record.get("who") or ""),
+        person_id=str(record.get("person_id") or ""),
+        text=str(record.get("text") or ""),
+        book=book,
+    )
+
+
+def entries_from_jsonl(text: str, book: str = NORMAL) -> list[Entry]:
+    """整份 JSONL → 条目列表（空行与坏行丢弃；既无正文也无心情的空段丢弃）。"""
+    out = [entry_from_line(line, book) for line in str(text or "").splitlines()]
+    return [e for e in out if e is not None and (e.text or e.mood)]
+
+
+def view_text(entries: list[Entry]) -> str:
+    """条目 → 纯文本视图（旧 ``.txt`` 版式：头行 + 正文，段间空一行，结尾空一行）。
+
+    只做展示 / 人工查看，**不再是存储格式**——头行由 ``make_head_line`` 从结构化
+    字段重建（写入侧与解析侧同源的老不变式），所以视图永远可以被 ``parse_entries``
+    原样读回来（person_id 除外——它本来就不进展示文本）。
+    """
+    blocks = []
+    for entry in entries:
+        head = make_head_line(entry.date, entry.time, entry.mood, entry.who)
+        blocks.append(f"{head}\n{entry.text}" if entry.text else head)
+    return "\n\n".join(blocks) + ("\n\n" if blocks else "")
+
+
+def entry_segment(entry: Entry) -> Segment:
+    """Entry → Segment 视图：让时间窗 / ``find_segment`` / ``seg_id`` 那套既有检查
+    直接复用。头行按展示字段重建（**不含** person_id），行号占位无意义。
+    """
+    return Segment(
+        head_line=make_head_line(entry.date, entry.time, entry.mood, entry.who),
+        head_idx=-1,
+        end_idx=-1,
+        date=entry.date,
+        time=entry.time,
+        mood=entry.mood,
+        who=entry.who,
+        text=entry.text,
+        person_id=entry.person_id,
+    )
+
+
+def entry_seg_id(entry: Entry) -> str:
+    """条目的内容地址（面板改删唯一定位）。
+
+    = 从结构化字段重建头行再哈希，与旧版对 txt 算的 ``seg_id`` **同一算法同一前像**
+    ——已发布数据（头行从不带 id）升级后 id 不变；面板与存储两侧都从这一个函数取，
+    谁也不会算岔。
+    """
+    return seg_id(entry_segment(entry))
+
+
+def entry_from_record(record: dict) -> Entry | None:
+    """回收站记录 → Entry；没正文返回 ``None``（与 restore 的"没正文不动"口径一致）。"""
+    text = str(record.get("text") or "").strip()
+    if not text:
+        return None
+    return Entry(
+        date=str(record.get("date") or ""),
+        time=str(record.get("time") or ""),
+        mood=str(record.get("mood") or ""),
+        who=str(record.get("who") or ""),
+        person_id=str(record.get("person_id") or ""),
+        text=text,
+    )
+
+
+def insert_entry_chronologically(entries: list[Entry], entry: Entry) -> list[Entry]:
+    """按时间顺序插回一条（回收站还原）：插在第一个比它晚的段之前，都不晚就追加。
+
+    这样还原出来的本子仍按日期时间排列，不会因为还原本是前天的就跑到最后一页去。
+    """
+    for index, other in enumerate(entries):
+        if other.stamp > entry.stamp:
+            return entries[:index] + [entry] + entries[index:]
+    return entries + [entry]
+
+
 def split_segments(text: str) -> list[Segment]:
     """整份文本 → 段列表（``end_idx`` 是下一段头行的前一行）。"""
     lines = str(text or "").split("\n")
@@ -224,6 +376,7 @@ def split_segments(text: str) -> list[Segment]:
     for order, (row, match) in enumerate(heads):
         end_idx = (heads[order + 1][0] if order + 1 < len(heads) else len(lines)) - 1
         body = "\n".join(lines[row + 1 : end_idx + 1]).strip()
+        who, person_id = split_tag(match.group(4))
         segments.append(
             Segment(
                 head_line=lines[row],
@@ -232,8 +385,9 @@ def split_segments(text: str) -> list[Segment]:
                 date=match.group(1),
                 time=match.group(2),
                 mood=match.group(3) or "",
-                who=match.group(4) or "",
+                who=who,
                 text=body,
+                person_id=person_id,
             )
         )
     return segments
@@ -242,22 +396,10 @@ def split_segments(text: str) -> list[Segment]:
 def parse_entries(text: str, book: str = NORMAL) -> list[Entry]:
     """整份文本 → 条目列表（丢掉既没正文也没心情的空段）。"""
     out = [
-        Entry(date=s.date, time=s.time, mood=s.mood, who=s.who, text=s.text, book=book)
+        Entry(date=s.date, time=s.time, mood=s.mood, who=s.who, text=s.text, book=book, person_id=s.person_id)
         for s in split_segments(text)
     ]
     return [e for e in out if e.text or e.mood]
-
-
-def keep_trailing_newlines(joined: str, original: str) -> str:
-    """保住原文的结尾换行。
-
-    原包的实伤：``join`` 会吃掉结尾换行 → 下次追加时新头行粘在上一段正文末尾
-    → 头行不在行首 → 整段解析不出来（表现为"内容在、段数不涨"）。
-    先把结果末尾换行清掉，再补回原文那一串；原文没有就补 ``\\n\\n``。
-    """
-    match = re.search(r"\n+$", str(original or ""))
-    tail = match.group(0) if match else "\n\n"
-    return re.sub(r"\n+$", "", str(joined or "")) + tail
 
 
 def already_happened(seg: Segment, now: datetime, tz: tzinfo) -> bool:
@@ -318,89 +460,14 @@ def find_segment(
     return seg, ""
 
 
-def rewrite_segment(
-    text: str,
-    *,
-    match: str = "",
-    new_body: str = "",
-    now: datetime,
-    within_days: int,
-    tz: tzinfo,
-) -> EditResult:
-    """重写某一段的**正文**（头行原样保留）。按 ``match`` 模糊定位。"""
-    segments = split_segments(text)
-    seg, error = find_segment(segments, match, now, within_days, tz)
-    if seg is None:
-        return EditResult(ok=False, error=error)
-    if not str(new_body or "").strip():
-        # 空正文在这里拦、用**工具自己的话**拦：``diary_edit`` 传的 action 关键字是
-        # ``delete``，提示她"用删除"等于要她猜参数名。面板那句是"用删除"（按钮叫删除）。
-        return EditResult(ok=False, error="新正文不能为空（想删掉这段就用 delete）")
-    return rewrite_segment_at(text, seg, new_body)
-
-
-def rewrite_segment_at(text: str, seg: Segment, new_body: str) -> EditResult:
-    """重写**已经定位到的那一段**的正文（面板路径；不再找段、也不看时间窗）。
-
-    头行原样保留——它是历史（``format`` 模块头的不变式 2），改只换正文。
-    """
-    body = str(new_body or "").strip()
-    if not body:
-        return EditResult(ok=False, error="新正文不能为空（想删掉这段就用删除）")
-    lines = str(text or "").split("\n")
-    tail = lines[seg.end_idx + 1 :]
-    block = body.split("\n")
-    # 段之间必须留一个空行（format 模块头的不变式 3）。正文整段替掉原范围时，原来那句
-    # 尾随空行会被一起吃掉 —— 不补回去，下一段的头行就贴着本段正文，文件看着粘连了。
-    if tail and not lines[seg.end_idx].strip():
-        block = block + [""]
-    out = lines[: seg.head_idx + 1] + block + tail
-    return EditResult(
-        ok=True,
-        text=keep_trailing_newlines("\n".join(out), text),
-        seg=seg,
-        before=seg.text,
-    )
-
-
-def delete_segment(
-    text: str, *, match: str = "", now: datetime, within_days: int, tz: tzinfo
-) -> EditResult:
-    """删掉某一段（含头行），并把它留下的连续空行收成一个。按 ``match`` 模糊定位。"""
-    segments = split_segments(text)
-    seg, error = find_segment(segments, match, now, within_days, tz)
-    if seg is None:
-        return EditResult(ok=False, error=error)
-    return delete_segment_at(text, seg)
-
-
-def delete_segment_at(text: str, seg: Segment) -> EditResult:
-    """删掉**已经定位到的那一段**（含头行），并把它留下的连续空行收成一个。"""
-    lines = str(text or "").split("\n")
-    start = seg.head_idx
-    while start > 0 and not lines[start - 1].strip():
-        start -= 1
-    end = seg.end_idx
-    while end + 1 < len(lines) and not lines[end + 1].strip():
-        end += 1
-    joined = "\n".join(lines[:start] + lines[end + 1 :])
-    joined = re.sub(r"\n{3,}", "\n\n", joined)
-    return EditResult(
-        ok=True,
-        text=keep_trailing_newlines(joined, text),
-        seg=seg,
-        before="\n".join(lines[seg.head_idx : seg.end_idx + 1]),
-    )
-
-
 # ---- 回收站还原（第 15 步）----------------------------------------------------
 
 
 def segment_from_record(record: dict) -> Segment:
     """从归档记录（``store`` 存的 JSON）还原成 ``Segment``，**行号占位**。
 
-    行下标在这里没意义——它只对"刚 split 出来的那份文本"有效。真正用得上的只有
-    头行四个字段与正文，还原时按它们重建头行（见 ``insert_segment``）。
+    行下标在这里没意义。头行按展示字段重建（**不含** person_id）——内容地址
+    两侧同源就靠这一条；归属走 ``entry_from_record`` / ``Segment.person_id``。
     """
     return Segment(
         head_line=make_head_line(
@@ -416,33 +483,8 @@ def segment_from_record(record: dict) -> Segment:
         mood=str(record.get("mood") or ""),
         who=str(record.get("who") or ""),
         text=str(record.get("text") or "").strip(),
+        person_id=str(record.get("person_id") or ""),
     )
-
-
-def insert_segment(text: str, seg: Segment) -> str:
-    """把一段按**时间顺序**插回原文（回收站还原用）。
-
-    插在"第一个比它晚的段"之前；都不比它晚就追加到末尾。这样还原出来的本子仍按
-    日期时间排列，不会因为还原本是前天的就跑到最后一页去。
-    """
-    body_lines = seg.text.split("\n")
-    if not body_lines or not body_lines[0].strip():
-        body_lines = [line for line in body_lines if line.strip()]
-
-    existing = split_segments(text)
-    at = len(text.split("\n"))
-    for other in existing:
-        if other.stamp > seg.stamp:
-            at = other.head_idx
-            break
-
-    lines = str(text or "").split("\n")
-    block = [seg.head_line] + body_lines + [""]
-    if at < len(lines) and lines[at - 1].strip():
-        block = [""] + block  # 被手改过的文件：上一段没留空行，补一个，别把两段粘一起
-    joined = "\n".join(lines[:at] + block + lines[at:])
-    joined = re.sub(r"\n{3,}", "\n\n", joined)
-    return keep_trailing_newlines(joined, text)
 
 
 
@@ -478,6 +520,7 @@ def render(entries: list[Entry], *, mark_love: bool = False, footer: str = "") -
 __all__ = [
     "BOOKS",
     "DATE_FMT",
+    "ENTRY_LINE_KEYS",
     "GROUP_TAG_PREFIX",
     "HEAD_RE",
     "LOVE",
@@ -492,24 +535,26 @@ __all__ = [
     "Segment",
     "clock_of",
     "day_of",
-    "delete_segment",
-    "delete_segment_at",
+    "entries_from_jsonl",
+    "entry_from_line",
+    "entry_from_record",
+    "entry_line",
+    "entry_seg_id",
+    "entry_segment",
     "find_by_id",
     "find_segment",
-    "insert_segment",
-    "keep_trailing_newlines",
+    "insert_entry_chronologically",
     "make_head_line",
     "normalize_body",
     "parse_entries",
     "parse_stamp",
     "render",
-    "rewrite_segment",
-    "rewrite_segment_at",
     "sanitize_mood",
     "sanitize_tag",
     "scope_of",
     "seg_id",
     "segment_from_record",
     "split_segments",
+    "view_text",
     "within_window",
 ]

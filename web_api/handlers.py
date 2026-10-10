@@ -24,12 +24,14 @@ try:  # 包内上下文（AstrBot 加载插件 / 测试用 plugin_under_test 别
     from ..core import webui_portrait
     from ..core import webui_settings
     from ..core._log import logger
+    from ..core.diary import card as card_mod
     from ..core.diary import format as fmt
 except ImportError:  # 顶层上下文（离线单测直接把插件目录放进 sys.path）
     from core import webui_data  # type: ignore[no-redef]
     from core import webui_portrait  # type: ignore[no-redef]
     from core import webui_settings  # type: ignore[no-redef]
     from core._log import logger  # type: ignore[no-redef]
+    from core.diary import card as card_mod  # type: ignore[no-redef]
     from core.diary import format as fmt  # type: ignore[no-redef]
 
 from ._web import error_response, json_response, request
@@ -52,6 +54,7 @@ def build_handlers(deps: Any) -> dict[str, Callable[..., Any]]:
         "diary_delete": _make_diary_delete(deps),
         "diary_trash": _make_diary_trash(deps),
         "diary_restore": _make_diary_restore(deps),
+        "diary_card": _make_diary_card(deps),
         "notebook": _make_notebook(deps),
         "notebook_complete": _make_notebook_complete(deps),
         "notebook_delete": _make_notebook_delete(deps),
@@ -91,7 +94,11 @@ def _make_status(deps: Any) -> Callable[..., Any]:
 
 def _make_diary_list(deps: Any) -> Callable[..., Any]:
     async def handler() -> Any:
-        return json_response(webui_data.diary_list_payload(diary_store=deps.diary.store))
+        return json_response(
+            webui_data.diary_list_payload(
+                diary_store=deps.diary.store, person=_query_str(request, "who", "")
+            )
+        )
 
     return handler
 
@@ -103,6 +110,7 @@ def _make_diary_content(deps: Any) -> Callable[..., Any]:
         tail = _query_int(request, "tail", 20, low=0, high=MAX_TAIL)
         # 传 settings：正文要带上每段的 seg_id 与 editable（第 15 步），
         # 这两样都要 settings 里的时区与「面板豁免窗」开关才算得出来。
+        # person：顶栏「对谁」，日历 / 正文 / 卡片三处用同一个（第 17 步）。
         return json_response(
             webui_data.diary_content_payload(
                 diary_store=deps.diary.store,
@@ -110,6 +118,7 @@ def _make_diary_content(deps: Any) -> Callable[..., Any]:
                 date=date,
                 tail=tail,
                 settings=deps.settings,
+                person=_query_str(request, "who", ""),
             )
         )
 
@@ -200,6 +209,37 @@ def _make_diary_restore(deps: Any) -> Callable[..., Any]:
             now=deps._now(),
         )
         return json_response(result)
+
+    return handler
+
+
+def _make_diary_card(deps: Any) -> Callable[..., Any]:
+    """日记卡片的**渲染好的 HTML** —— 面板预览用（第 16 步）。
+
+    和 ``/看日记`` 出图走同一份 ``core.diary.card.render_card``，所以面板里看到的
+    就是真卡片。模板缺失 / 用了不支持的语法属于**服务端问题**（用户改不动模板），
+    用 500 让 ``logged_handler`` 记日志，而不是给一张空白的"预览"骗人。
+    """
+
+    async def handler() -> Any:
+        book = _query_str(request, "book", fmt.NORMAL)
+        date = _query_str(request, "date", "")
+        style = _query_str(request, "style", "")
+        try:
+            payload = webui_data.diary_card_payload(
+                diary_store=deps.diary.store,
+                settings=deps.settings,
+                proactive_store=deps.proactive.store,
+                book=book,
+                date=date,
+                style=style,
+                person=_query_str(request, "who", ""),
+                now=deps._now(),
+            )
+        except card_mod.TemplateError as error:
+            logger.warning("[webui] 日记卡模板有问题：%s", error)
+            return error_response(f"卡片模板渲染失败：{error}", 500, endpoint="diary/card")
+        return json_response(payload)
 
     return handler
 
