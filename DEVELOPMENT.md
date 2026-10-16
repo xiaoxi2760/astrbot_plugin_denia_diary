@@ -6,7 +6,7 @@
 
 | 路径 | 职责 |
 | :--- | :--- |
-| `main.py` | 适配层之一：9 个工具 + `/看日记` 指令 + 提示挂载点 + 生命周期 + WebUI 注册 |
+| `main.py` | 适配层之一：10 个工具 + `/看日记` 指令 + 提示挂载点 + 生命周期 + WebUI 注册 |
 | `web_api/` | WebUI 的 HTTP 适配层（在 `core/` 之外） |
 | `core/` | 内核：零 AstrBot 依赖，纯函数，可离线测试 |
 | `pages/diary/` | 插件页：单目录自包含，零构建零依赖 |
@@ -39,14 +39,21 @@ astrbot_plugin_denia_diary/
 │  ├─ scope.py          启用范围判定（纯函数）
 │  ├─ outbound.py       出站文本清洗（纯函数）
 │  ├─ diary/            format（格式契约）· store（文件层）· api（语义入口）
+│  │  ├─ card.py        服务端模板渲染（Jinja2 子集，零第三方依赖）
+│  │  ├─ card_cache.py  已渲染卡的落盘缓存（按内容寻址 + LRU 淘汰）
+│  │  ├─ card_render.py 出图编排：缓存 → playwright → remote → pil 降级梯
+│  │  ├─ card_local.py  引擎 playwright：本机无头浏览器（懒 import）
+│  │  └─ card_pil.py    引擎 pil：Pillow 直接画（保底，不出网不起浏览器）
 │  ├─ notebook/         store（文件层 + 上限 + 回收站）· api（语义入口）
 │  ├─ state/            store · affinity（漏积分器）· api
 │  ├─ proactive/        store · gate（闸门）· triggers（七触发器）· api（门面）
+│  ├─ greeting/         store（greetings.json）· api（识别 / 记录 / 注入素材，第 19 步）
+│  ├─ voice/            语音出口决策（纯函数：speak_plan / speakable_indices / apply_audio，F1）
 │  ├─ webui_data.py     面板数据面（纯函数、可离线单测）
 │  └─ webui_settings.py 设置页数据面（schema 递归展开 + 校验准绳）
 └─ test/
    ├─ support.py        公共设施（不被 discover 收集）
-   └─ test_{settings,storage,session,diary,compose,notebook,state,proactive,main}.py
+   └─ test_{settings,storage,session,diary,compose,notebook,state,proactive,greeting,voice,main}.py
 ```
 
 ## 适配器（`main.py`）
@@ -62,10 +69,11 @@ astrbot_plugin_denia_diary/
 | `note_complete` | 把约定销账（写 `done_at`，完成即腾坑） |
 | `note_forget` | 删一条（先过归属判定，进 `trash` 回收站） |
 | `mood_report` | 心情自报（`word` 原词 + 可选 `valence` / `arousal` 字符串打分）；**没有 `affinity_*` 工具**，她不碰熟悉度数值 |
+| `sleep_check` | 查**眼前人**的作息记录（早晚安时间 / 睡眠时长 / 连续天数）；私聊限定（口径同 diary_read），没记录就明说——工具描述写明「记不到就说没有，别编」 |
 | `@filter.command("看日记")`（别名 /日记卡） | **用户指令，不是 LLM 工具**（第 14 步）：人主动敲才跑，把一天渲染成图片卡。读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（`text_to_image`，本地 Pillow 可离线）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape）。六款模板 + 自定义字体见 [日记卡](#日记卡第-15-步重做) |
 | `@filter.command("日记款式")`（别名 /日记卡样式、/换日记款式） | **换卡片款式**（第 15 步，同属用户指令）：`/日记款式 手帐`。落盘 + 热生效，走 `apply_settings`；认不出的款式明说不静默回落 |读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（`text_to_image`，本地 Pillow 可离线）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape）。六款模板 + 自定义字体见 [日记卡](#日记卡第-15-步重做) |
-| `on_llm_request`（priority=5） | 先 `affinity.touch`（私聊 private / 群聊 mention）+ `proactive.note_contact`（person→会话反查表），再把 `core.compose` 渲染的一段挂进 `req.extra_user_content_parts`（见下）；**主动轮不触发它**，那边走 `payload.note` |
-| `on_using_llm_tool` | **确认点**：主动唤醒路径里她真调了 `send_message_to_user`（事件带 `cron_job` extra）→ 写 `last_sent_at`；被动轮同一工具不算 |
+| `on_llm_request`（priority=5） | 先 `affinity.touch`（私聊 private / 群聊 mention）+ `proactive.note_contact`（person→会话反查表）+ `greeting.observe`（整条消息是问候才记，记上后 `mark_slot_today` 双向防重），再把 `core.compose` 渲染的一段挂进 `req.extra_user_content_parts`（见下）；**主动轮不触发它**，那边走 `payload.note` |
+| `on_using_llm_tool` | **确认点**：主动唤醒路径里她真调了 `send_message_to_user`（事件带 `cron_job` extra）→ 写 `last_sent_at`；被动轮同一工具不算。主动轮在确认点之前先过 `_maybe_speak`（F1：文本就地转语音，见「语音」一节） |
 | `initialize` / `terminate` | 生命周期。`initialize()` 重建巡检 job（basic handler 只在内存注册表，热重载即失效 → 按 name 查旧 job 一律 delete 再 add）；`terminate()` 冲熟悉度合并写窗口 |
 
 工具描述是**行为规范**（"别写成工作汇报"、"开头那行不动"、"只记两类"、"闲聊情绪玩笑不记"），不是注释——改文案等于改她的行为，`test/test_main.py` 逐条钉住了这些关键词。
@@ -137,7 +145,7 @@ astrbot_plugin_denia_diary/
 4. **作息是纯函数不落盘**：config 表每行「HH:MM|状态词」（默认 5 段，支持周末第二张表，留空沿用工作日）；到点的最近一段生效，凌晨归入最后一段。`is_late_night()` 按 `state.late_night`（默认 `23:30-06:30`，可跨午夜）喂关怀触发器与主动消息免打扰。
 5. **熟悉度 = 漏积分器**：`score ×= λ^(Δt/单位) + Δ`，**λ=0.5、单位=21 天（三周半衰期，待调）**——判据：一周不聊不掉档、一个月不见才明显降（7 天半衰期会让稳定互动者贴着熟稔线跑，一天不聊就掉档，这是返工轮修掉的病根）；Δ 两档——**私聊 1.0 / 群里被叫醒并接话 0.6**（没有"群聊普通发言"档；`kind="group"` 只是 `mention` 的别名）；**单日增量封顶 3.0**；档位阈值 **熟稔 ≥10 / 泛泛 ≥3 / 其余陌生**。
 6. **衰减按经过时间折算**：落盘时把上次落盘以来的衰减折进去，读取时把当前时刻的衰减现算出来（score / band / top），不写回——落盘频率再怎么变，数字都可复现。**互动计数合并写**：`touch()` 只更新内存 overlay，窗口安静 1.5 秒后由后台任务统一原子落盘；读侧恒为"文件 + overlay"；正常关闭（`terminate`）强制 flush，硬断电最多丢窗口内（≤1.5 秒）的增量。
-7. **互动轨迹（trace 档）零新存储**：`f(affinity.last_ts, proactive.last_sent_at)` 两个时间戳的比较——"她上次主动找他是何时、对方回了没有 + 距上次互动多久"。`proactive.json` 不存在 / 字段缺失 / 解析失败 → **整档返回空串**，不报错、不占预算；字段名 `last_sent_at`（ISO8601，按会话，先按 umo 再按 session_id 查）已冻结。
+7. **互动轨迹（trace 档）零新存储**：`f(affinity.last_ts, proactive.last_sent_at)` 两个时间戳的比较——"她上次主动找他是何时、对方回了没有 + 距上次互动多久"。`proactive.json` 不存在 / 字段缺失 / 解析失败 → **整档返回空串**，不报错、不占预算；字段名 `last_sent_at`（ISO8601，按会话，先按 umo 再按 session_id 查）已冻结。早晚安的问候素材（第 19 步）并进**同一档**（`compose` 的 trace 段拼在 `trace_line` 之后），不新增类目、预算与砍序一个字节没动。
 8. **情绪历史独立追加文件**：`state_history.jsonl` 一行一个 JSON（`ts` / `layer` / `valence` / `arousal` / `word`），坐标没变不写、变了按 `layer` 各写一行、保留 180 天——面板情绪曲线的唯一数据源。
 9. **注入预算 400 字五类**：`PROMPT_BUDGET` 400，`PRIORITY` 含 `trace`（插在 fact 与 state 之间）；熟悉度档位词并进 **fact 档**（与"关于当前人的事实"同一配额）。不回归保险丝：`state=None` 且 `affinity=None` 时输出与第 2 步逐字节相同（有测试钉住）。
 10. **开关**：`subsystems.state` 一刀切管三合一（关了 `observe` 拒写、注入行全空、`is_late_night` 恒 False）；`score` / `band` / `top` 作为纯数据口仍可读（面板本来就直接读文件）。
@@ -164,9 +172,46 @@ astrbot_plugin_denia_diary/
 
 **同日防重（`slots_today`）**：早安 / 晚安 / 约定跟进 / 纪念日 / 关怀 / 久未联系 / 日记驱动各 slot 当天只发一次（早安晚安各算一个 slot）——2 小时最小间隔挡不住"窗口比间隔长"的类目（纪念日全天、早安窗 2.5h），一天一条的约束收口在这里。
 
+**双向防重（早晚安互动联动，第 19 步）**：他先说了早安/晚安（`core/greeting` 的 `observe` 命中）→ `mark_slot_today` 把该会话当天的 `morning` / `goodnight` slot 占上，`find_greetings` 的防重读的就是 `slots_today`，巡检侧零改动。占坑只写 `slots_today`——不扣 `today_count`（这不是她发的主动消息）、不写 `last_sent_at`（她没发东西）、不进发送记录。
+
 **劝睡窗与免打扰的重叠是正确行为**：劝睡窗 22:30–23:30，`late_night` 默认 23:30 起——23:30 后连劝睡都被免打扰挡掉是设计（深夜连劝睡都不该发）；把 `late_night` 配得更早就更短。各触发器的时段窗口（劝睡 / 劝饭 / 早晚安 / 日记驱动）是代码常量，**待调**；频率七项是配置。
 
 **数据形状**：`proactive.json` = 冻结的 `sessions`（键 umo：`last_sent_at`（冻结键）/ `today_date` / `today_count` / `last_slot`）+ 扩展（`slots_today` / `signal_last_at` / `signal_date` / 顶层 `contacts`）——`trace_line` 的读取面只认 `sessions[*].last_sent_at`，扩展键它一律忽略。
+
+## 语音（F1 第一步：她说，宿主发声）
+
+她的主动消息过宿主 TTS 变成语音发出。**她组织语言的方式完全不变**（还是 `send_message_to_user` 发文字）——插件在 `on_using_llm_tool` 钩子里（出站清洗之后）把主动轮的文本**就地转成 record 组件**，判定全在 `core/voice/`（纯函数，app-ready：S1 壳将来接自己的 TTS 复用同一决策层）。
+
+**上游 API 核对（源码出处见 `调研-F1语音.md`）**：`context.get_using_tts_provider_async()` → `TTSProvider.get_audio(text)` **只有文本参数**（音色/语速在 provider 配置里）→ 音频落 AstrBot temp 目录；`send_message_to_user` 原生认 `{"type": "record", "path": ...}`，且 temp 目录在它的本地文件白名单里——链路天然通。
+
+**她在写之前就知道自己在发语音**（用户 2026-10-11 定稿）：转不转是**巡检决策时掷定的**（`Proactive._decide_speak`：mode + `voice.probability` + 情绪倾向 + roll，测试可注入 `_voice_roll`），结论做两件事——①写进唤醒 note 的 `VOICE_NOTE` 告知句（"像说话一样讲——口语、短句；别用 emoji、颜文字、换行"），她按说话的口吻组织语言、还可能自然说出"我给你发条语音"；②暂存 `_pending_speak[umo]`，钩子按暂存**执行**不再掷——"她被告知"与"实际转语音"永远一致。暂存与 `_pending_log` 同生命周期：确认发出（`confirm_sent`）即清，重启丢失回落 False（不发语音，无害）。
+
+| 环节 | 口径 |
+| :--- | :--- |
+| 范围 | **只主动轮**（事件带 `cron_job` extra）；被动轮宿主管线有自己的 TTS 开关与概率，插件不做第二份 |
+| 档位 | `voice.mode`：`off`（默认）/ `voice`（语音替换文字）/ `dual`（语音在前文字在后，对齐宿主 `dual_output` 惯例） |
+| 决策 | `speak_plan`（纯函数）：mode + `voice.probability` + 情绪倾向（当下 valence<0 概率上浮 `SOFT_VALENCE_BOOST=+0.3`，待调）+ roll；probability≤0 永不开口、≥100 必开口。**决策点在巡检**（`_decide_speak`，写 note 告知 + 暂存），钩子只执行 |
+| 变换 | `speakable_indices`（非空 plain、≤`MAX_SPEAK_CHARS=200` 待调）→ 适配层逐段 `get_audio` → `apply_audio` 换组件；**没有任何一段合成成功 → 保持原文** |
+| 降级红线 | 没配 provider（`get_using_tts_provider*` 拿不到就 None）/ 合成抛异常 / 文本超长 → 原文字照发，**语音坏了不能连累她说话** |
+| 不受影响 | 暗号直发走 `StarTools.send_message`（不经工具）；确认点照常（原地改的是发送内容，`send_message_to_user` 工具名不变） |
+
+**明确不做（第一步）**：音色/语速随情绪——宿主标准接口做不到，要自带 OpenAI 兼容 TTS 客户端（tts_emotion_router 的做法）+ 用户配 API key，挂待拍板；跨机部署的文件服务 URL（宿主与 NapCat 不同机时本地路径发不出，需要 `use_file_service`）。
+
+## 早晚安（问候记录，第 19 步）
+
+gscore / 麦麦那类「用户发起」的早晚安互动：**记录归系统、接话归她**——他说了早安/晚安，系统把事实记下来、把一句话素材并进互动轨迹档，怎么回应（调侃他起太晚 / 关心昨晚没睡好）都是她自己组织语言。**不拦消息、不发模板**（与"不替她说话"同源；识别/记录全在 `core/greeting/`，零 astrbot 依赖，App 壳同一套接线）。
+
+| 环节 | 口径 |
+| :--- | :--- |
+| 识别 | 整条消息 `fullmatch` 可配置正则（`greeting.morning_patterns` / `night_patterns`，默认词表取自 gsuid_core YumekoSleep 的指令词 + 语气后缀容忍）；聊天里**提到**这两个词一律不算——宁可漏不可误伤 |
+| 记录 | `greetings.json` 按人事件流 `{date, kind, ts}`；**当日首次为准**（同日重复不记，sleep_tracker "多次刷新"的坑）；冷却（`duplicate_minutes`，默认 30 分钟）内的重复连事件都不算；范围外整轮不留痕 |
+| 凌晨归属 | 0-4 点的晚安统计上**归前一天**（`NIGHT_DAY_BOUNDARY`）——"连续 N 天道晚安"数的是睡前的道别 |
+| 派生 | 连续天数 = 从归属日往回逐日数；睡眠时长 = 最近晚安 → 这次早安的间隔，落在 **1~14 小时**才说（夜猫子 / 回笼觉算不准就**不提**） |
+| 注入 | `line()` 两层（用户 2026-10-11 定稿「记录睡眠时间 + 让她知晓」）：**当轮素材**（2 分钟新鲜窗，"刚说了早安，连续 N 天，昨晚睡了约 X 小时"——这是新闻，当轮说一次）+ **全天知晓**（当天记到过早安 → 全天出**背景行**"（背景：这个人今早 7:50 道过早安，昨晚睡了约 X 小时；已知的事，别主动复述。）"）。反复读框架是调研后采纳的 daily_life 做法（用户反馈"一直注入容易复读"：oyasumi/YumekoSleep/麦麦日程管家对问候只做一次性开口、不常驻；常驻上下文的插件都带"只是参考、别照着说"的框架）。晚安不全天驻留（它由明早的睡眠时长消费）。并进 compose 的 **trace 档** |
+| 联动 | 记录命中后调 `Proactive.mark_slot_today` 占掉当天同款主动问候的 slot（**双向防重**：他先说了晚安，她当晚不再发）——只写 `slots_today`，不扣配额、不写 `last_sent_at`、不进发送记录 |
+| 查询 | `sleep_check` 工具（第 10 个）：`greeting.report()` 按归属日聚合的作息行 + 连续天数（锚定最近一次事件，今天没问候不清零）；**只看眼前人、私聊限定**——跨人查询没有入口，同 diary_read 的口径 |
+
+**明确不做**（gscore / nonebot_morning 的玩法，与"不做签到打卡积分"冲突）：睡眠评分、连续补偿、排行榜、打卡日历。事件数据都在，以后想加评分是在派生层叠，不用迁移。
 
 ## 出站文本清洗
 
@@ -193,7 +238,67 @@ astrbot_plugin_denia_diary/
 `{"full_page": True, "type": "jpeg", "quality": 40}`（见 AstrBot
 `astrbot/core/utils/t2i/network_strategy.py`），插件不传 `options` 就全盘继承——
 **JPEG quality 40 压 15~16px 中文小字**，字缘全是振铃、纸纹和横格线直接断层。
-现在显式传 `_CARD_RENDER_OPTIONS = {"type": "png", "quality": 95}`。
+现在显式传 `card.RENDER_OPTIONS = {"type": "png", "quality": 95}`（常量搬到了 `core/diary/card_render.py` 旁边，第 20 步）。
+
+## 出图链路（第 20 步）
+
+`/看日记` 出图慢，**主因不是模板也不是渲染，是"只有远端一条路"**。
+
+第 1~19 步里，模板是 HTML+CSS，要变成 PNG 就得有个渲染引擎；当时仓库零第三方依赖、宿主本地
+又没有能解释 CSS 的东西（`LocalRenderStrategy.render_custom_template` 直接
+`raise NotImplementedError`），所以只能借宿主的 `html_render`——而它是**远端** t2i。
+
+实测（`tools/bench_card.py`，本机、真实卡片负载）：
+
+| | 耗时 | 备注 |
+| :--- | :--- | :--- |
+| 本地模板渲 HTML | ~1 ms | 一直在，从不是瓶颈 |
+| JSONL 全量解析（3650 条） | 16 ms | 一直在，从不是瓶颈 |
+| **远端 t2i** | **4.4 ~ 10.8 s** | 官方端点**随机挑**、失败自动换下一个重试，抖动会翻倍；高峰期还会 429 |
+| playwright（冷 / 热） | 1.6 s / 0.5 s | 排版最贴模板 |
+| pil | 0.3 ~ 0.5 s | 完全离线 |
+| **缓存命中** | **< 1 ms** | 日记是反复翻的东西，这才是常态 |
+
+于是链路改成 **缓存 → playwright → remote → pil**，三档全在，任一可用即可：
+
+```python
+ENGINE_ORDER = ("playwright", "remote", "pil")   # core/diary/card_render.py
+```
+
+| 环节 | 住哪 | 干什么 |
+| :--- | :--- | :--- |
+| 缓存 | `core/diary/card_cache.py` | 按 `sha256(款式 + 模板签名 + 模板数据)` 存 PNG；命中刷新 mtime，超 60 张按 LRU 淘汰 |
+| playwright | `core/diary/card_local.py` | 本机 Chrome / Edge 截图，浏览器**常驻复用**（冷启 1.4s 只付一次） |
+| remote | 宿主的 `html_render` | 回调由 `main.py` 注入，本模块不 import astrbot |
+| pil | `core/diary/card_pil.py` | Pillow 照纸感模板重画，保底 |
+| 编排 | `core/diary/card_render.py` | 降级梯；判断住 `core/`，才能离线单测 |
+
+### 三条规矩
+
+1. **`diary.card_engine` 选的是"先试谁"，不是"不许退"。** 选中的引擎失败会继续往下退（并记
+   日志）。理由和"页码数不出来就不出图"同源——一张出不成图的日记卡对用户等于"今天读不到
+   日记"，比慢几秒严重得多。
+2. **缓存是加速器，不是前提。** 缓存目录写不进去（只读挂载、磁盘满）最多让下次重新出一遍，
+   不该让图发不出去——`card_cache.put` 失败会退到系统临时目录再写一份。
+3. **三个引擎都是懒依赖。** `playwright` / `Pillow` 都在**出图那一刻**才 import，探测不到就
+   当"这台机器用不了这条路"。配置加载与启动自检一次都不碰它们。
+
+### pil 与模板的关系
+
+`card_pil` 不是"解释 HTML"，是**照 `diary_card_paper.html.j2` 的度量与配色用 Pillow 重画**
+（同一套 `--lh: 34px` 行高、同一套颜色、同一个 800px 画布宽度）。CSS 里的 `flex` /
+`repeating-linear-gradient` / `feTurbulence` 纸纹在 PIL 里没有对应物，硬解释等于自己写一个
+残缺浏览器。
+
+⚠️ 代价说清楚：**pil 只画纸感那一款**，不认 `diary.card_style`；纸纹与投影也没有。所以
+`remote` 排在 `pil` 前面——要六款样式都得能选，就该走 remote。
+
+### 量一次
+
+```
+py tools/bench_card.py            # 本地三引擎 + 缓存（不联网）
+py tools/bench_card.py --remote   # 额外量一次真实远端 t2i
+```
 
 ### 画布与版式（改模板前必读）
 
@@ -632,6 +737,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `affinity.json` | 熟悉度（按人一个漏积分器标量） | JSON + `schema_version` |
 | `proactive.json` | 主动消息状态（`sessions` + `contacts`） | JSON + `schema_version` |
 | `proactive-log.jsonl` | 主动消息发送记录（**确认发出后**才追加；保留最近 200 行或 90 天） | JSONL 追加，无版本头 |
+| `greetings.json` | 早晚安记录（按人事件流；连续天数 / 睡眠时长是**派生值不落盘**） | JSON + `schema_version` |
 | `names.json` | id → 昵称 / 群名缓存 | JSON + `schema_version` |
 | `diary-nudge.json` | 日记提醒冷却（按会话） | JSON + `schema_version` |
 | `diary-trash/` | 改/删日记前的原文备份（整本快照 `*.jsonl`）+ 单段归档（`seg-*.json`） | JSONL 快照 / JSON 记录 |
@@ -707,7 +813,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `data_dir` | 空 | 空 = 用宿主给的目录；非空 = **只接受宿主插件数据目录本身或它里面的子目录**，越界（含绝对路径指别处）启动时记 warning 并退回默认目录 |
 | `panel.brand` | `情绪日记` | 面板左上角标题（也是浏览器标签页标题）；留空＝那行不显示；>60 字截断 |
 | `panel.brand_sub` | `观察面板` | 标题下面那行小字；留空＝那行不显示 |
-| `subsystems.{diary,notebook,state,proactive}` | 全 true | 子系统开关 |
+| `subsystems.{diary,notebook,state,proactive,greeting}` | 全 true | 子系统开关 |
 | `diary.edit_within_days` | 7 | 1–60 |
 | `diary.max_chars` | 1200 | 200–20000 |
 | `diary.nudge_after_hour` | 22 | 0–23 |
@@ -733,6 +839,11 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `proactive.pending_window_hours` | `6` | 待回窗口（1-48），喂 `trace_line` |
 | `proactive.quiet_days` | `3` | 久未联系阈值（1-30，待调） |
 | `proactive.signal_char` | `。` | 暗号字符（1~4 个字符） |
+| `greeting.duplicate_minutes` | `30` | 0-1440；同款问候的重复冷却（0＝不限，当日首次为准仍生效） |
+| `greeting.morning_patterns` | 5 条默认词表 | 正则列表，**整条消息**完全匹配才算；坏条目忽略，全空回落默认 |
+| `greeting.night_patterns` | 6 条默认词表 | 同上 |
+| `voice.mode` | `off` | 主动消息的语音出口：`off`（默认）/ `voice`（只发语音）/ `dual`（语音在前文字在后）；非法回落 off |
+| `voice.probability` | `100` | 0-100；开口概率，情绪不好（valence<0）自动上浮（core.voice 常量 +30pp，待调） |
 | `outbound.strip_meme_marks` | `true` | 出站剥表情包标记总开关 |
 | `outbound.marker_pattern` | `&&[^&\s]{1,24}&&` | `re` 语法；非字符串 / 编译失败 / **能匹配空串** 三种情况都回落默认 |
 

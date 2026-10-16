@@ -28,11 +28,15 @@ from core.settings import CARD_STYLE_CHOICES  # noqa: E402
 OUT_DIR = PLUGIN_DIR / "test" / ".tmp" / "cards"
 
 # 假数据：覆盖"一段多段""有心情无心情""有标注无标注""长段落"几种形态。
+# page_index/page_total 是卡片右下角的页码，故意给一组能印出来的值——
+# 本地预览得跟线上出图长得一样，不然页码排版坏在这也看不出来。
 SAMPLE = {
     "date": "2026-10-04",
     "weekday": "周日",
     "book_name": "日记",
     "count": 2,
+    "page_index": 2,
+    "page_total": 5,
     "entries": [
         {
             "time": "09:12",

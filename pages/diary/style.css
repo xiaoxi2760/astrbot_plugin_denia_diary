@@ -963,34 +963,99 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
 }
 .np-editor-text:focus { outline: none; border-color: var(--accent); }
 
-/* ---- 卡片预览（第 16 步）----
-   卡片是**整页**（自带 body 背景、固定 ~920px 画布），所以用 iframe 装，
-   缩到面板宽度里看。不加 sandbox="allow-scripts"：模板里没有脚本，
-   预览也不该有执行能力。 */
+/* ---- 卡片预览（第 16 步；第 18 步补"PC 端缩小 + 按内容自适应高度"）----
+   卡片是**整页**（自带 body 背景、固定 ~920px 画布），所以用 iframe 装。
+   不加 sandbox="allow-scripts"：模板里没有脚本，预览也不该有执行能力。 */
 .np-view { margin-left: 10px; }
-.np-cardpager {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  margin-bottom: 12px;
+/* ---- 日记本整屏：左边卡片 + 右边竖排按钮栏（第 19 步重排）----
+   一行 flex：卡片靠左，右边一整条竖排按钮栏贴着面板右缘。
+   按钮栏从上到下：上一页/下一页（并排） → 导出为图片 → 「风格」→ 六款版式 → 保存配置。
+   保存配置在最底下单独一格 —— 这一栏里只有它会写配置，压轴放最不容易误按。 */
+.np-notebook {
+  display: flex; align-items: flex-start; gap: 24px;
 }
-.np-cardno {
-  font-size: 12.5px; font-weight: 600; color: var(--fg-dim);
-  font-variant-numeric: tabular-nums;
+.np-rail {
+  flex: 1 1 auto; min-width: 0; max-width: 240px;
+  margin-left: auto;              /* 关键：按钮栏顶到右缘 */
+  display: flex; flex-direction: column; gap: 10px;
 }
-.np-carddate {
-  margin-left: auto; font-size: 12px; color: var(--fg-faint);
-  letter-spacing: .08em; font-variant-numeric: tabular-nums;
+.np-rail-row { display: flex; gap: 8px; }
+.np-rail-row .btn { flex: 1 1 0; min-width: 0; }
+.np-rail-label {
+  margin-top: 6px; font-size: 11px; color: var(--fg-faint);
+  letter-spacing: .2em;
+}
+.np-rail-styles { display: flex; flex-direction: column; gap: 7px; }
+/* 保存配置那一格：按钮 + 说明，钉在这一栏最底下 */
+.np-rail-save {
+  margin-top: auto; padding-top: 14px;
+  border-top: 1px dashed var(--line);
+  display: flex; flex-direction: column; gap: 6px; align-items: stretch;
+}
+.np-hint { font-size: 12px; color: var(--fg-faint); line-height: 1.5; }
+
+/* 按钮栏里的按钮都比别处大一号：它们是这个页面唯一要点的控件，
+   点小了容易和旁边的日历格、其它 tab 的小按钮混在一起。
+   只加内边距和字号，不动 .btn 本身——设置页那些小按钮不该跟着变大。 */
+.np-rail .btn { padding: 8px 14px; font-size: 13.5px; }
+/* 「保存配置」比旁边的款式按钮更重一点——它是唯一一个会**写配置**的控件，
+   长得太像预览按钮就容易误按。 */
+.np-save {
+  border-color: var(--accent); color: var(--accent); background: var(--accent-soft);
+  font-weight: 600;
+}
+.np-save:not(:disabled):hover {
+  background: var(--accent); color: var(--card); border-color: var(--accent);
+}
+.np-export:not(:disabled):hover {
+  border-color: var(--accent); color: var(--accent); background: var(--accent-soft);
+}
+/* 窄屏：竖排按钮栏塞到卡片下面去横着排，别把卡片挤成一条缝 */
+@media (max-width: 1100px) {
+  .np-notebook { flex-direction: column; }
+  .np-rail { max-width: none; width: 100%; margin-left: 0; }
+  .np-rail-styles { flex-direction: row; flex-wrap: wrap; }
+  .np-rail-styles .btn { flex: 1 1 120px; }
+}
+/* 预览台：卡片是整页画布，原先 iframe 直接 width:100% 铺满面板——PC 上卡片
+   被撑得过大，两侧还剩一大片空白底色（截图里那两块 beige 就是卡片自己的 body
+   背景被拉满）。
+
+   舞台限宽 880px 且**左对齐**（不是居中）：右边整条留给按钮栏，视线不用来回跳。
+   ⚠️ 卡片"变窄"只能靠缩放，**不能**直接把舞台改窄：舞台宽就是 iframe 的内部视口，
+   窄于卡片自然宽（744px 纸面 + 左右 34px 内边距 ≈ 812px）时，卡片里的字会按更窄的
+   行宽重排——那就不是聊天里那张图了。所以舞台维持 ≥ 812px，靠 --card-zoom 缩小观感。 */
+.np-cardstage {
+  --card-zoom: 1;      /* PC 端由下面的媒体查询改小 */
+  --card-h: 720px;     /* JS 按卡片真实高度改写，这里只是兜底值 */
+  flex: 0 0 880px; width: 880px; max-width: 100%;
+  margin: 0;           /* 左对齐；别写 auto —— 那会把空白摊成两边各一半 */
+}
+.np-cardscale {
+  /* transform 不参与布局：这个盒子只负责给缩放后的卡片预留高度、裁掉溢出 */
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  height: calc(var(--card-h) * var(--card-zoom));
 }
 .np-cardframe {
   width: 100%;
-  height: 720px;
+  height: var(--card-h);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-soft);
   display: block;
+  transform: scale(var(--card-zoom));
+  transform-origin: top center;
 }
-.np-cardstyles { margin-top: 12px; gap: 6px; flex-wrap: wrap; }
-.np-cardstyles .btn.is-on {
+/* 宽屏才缩：窄屏（面板在小窗里）本来就没富余，缩了反而看不清。
+   右边现在让给了按钮栏，所以比上一版再缩一档，卡片和按钮各占一边不打架。 */
+@media (min-width: 1280px) { .np-cardstage { --card-zoom: .72; } }
+@media (min-width: 1800px) { .np-cardstage { --card-zoom: .64; } }
+/* 当前选中那一款：按钮栏里竖着排，选中态更容易一眼扫到 */
+.np-rail-styles .btn.is-on {
   border-color: var(--accent); color: var(--accent); background: var(--accent-soft);
+  font-weight: 600;
 }
 
 /* ===== 第 6.3 步 视觉打磨 · 追加区 =====

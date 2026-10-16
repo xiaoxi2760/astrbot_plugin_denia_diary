@@ -108,7 +108,7 @@
         {% endfor %}
       </div>
 
-      <div class="foot"><span>她写下的这一天</span></div>
+      <div class="foot"><span>她写下的这一天</span>{% if page_total %}<span>第 {{ page_index }} / {{ page_total }} 页</span>{% endif %}</div>
     </div>
   </div>
 </body>

@@ -35,6 +35,7 @@ ROUTES: tuple[RouteSpec, ...] = (
     ("diary/trash", "diary_trash", ("GET",), "回收站：删掉的那些段"),
     ("diary/restore", "diary_restore", ("POST",), "从回收站还原一段（幂等）"),
     ("diary/card", "diary_card", ("GET",), "日记卡片的渲染好的 HTML（面板预览用）；?book=&date=&style="),
+    ("diary/card-image", "diary_card_image", ("GET",), "导出日记本为图片（服务端出图，回 data:image/png;base64,…）；?book=&date=&style="),
     ("notebook", "notebook", ("GET",), "小本本：事实与约定（按人过滤）"),
     ("notebook/complete", "notebook_complete", ("POST",), "把一条约定标记为完成"),
     ("notebook/delete", "notebook_delete", ("POST",), "删一条（先进回收站）"),

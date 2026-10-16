@@ -17,6 +17,9 @@
 
 from __future__ import annotations
 
+import base64
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Callable
 
 try:  # 包内上下文（AstrBot 加载插件 / 测试用 plugin_under_test 别名加载）
@@ -25,6 +28,7 @@ try:  # 包内上下文（AstrBot 加载插件 / 测试用 plugin_under_test 别
     from ..core import webui_settings
     from ..core._log import logger
     from ..core.diary import card as card_mod
+    from ..core.diary import card_cache
     from ..core.diary import format as fmt
 except ImportError:  # 顶层上下文（离线单测直接把插件目录放进 sys.path）
     from core import webui_data  # type: ignore[no-redef]
@@ -32,6 +36,7 @@ except ImportError:  # 顶层上下文（离线单测直接把插件目录放进
     from core import webui_settings  # type: ignore[no-redef]
     from core._log import logger  # type: ignore[no-redef]
     from core.diary import card as card_mod  # type: ignore[no-redef]
+    from core.diary import card_cache  # type: ignore[no-redef]
     from core.diary import format as fmt  # type: ignore[no-redef]
 
 from ._web import error_response, json_response, request
@@ -55,6 +60,7 @@ def build_handlers(deps: Any) -> dict[str, Callable[..., Any]]:
         "diary_trash": _make_diary_trash(deps),
         "diary_restore": _make_diary_restore(deps),
         "diary_card": _make_diary_card(deps),
+        "diary_card_image": _make_diary_card_image(deps),
         "notebook": _make_notebook(deps),
         "notebook_complete": _make_notebook_complete(deps),
         "notebook_delete": _make_notebook_delete(deps),
@@ -111,6 +117,8 @@ def _make_diary_content(deps: Any) -> Callable[..., Any]:
         # 传 settings：正文要带上每段的 seg_id 与 editable（第 15 步），
         # 这两样都要 settings 里的时区与「面板豁免窗」开关才算得出来。
         # person：顶栏「对谁」，日历 / 正文 / 卡片三处用同一个（第 17 步）。
+        # now：editable 是时间窗判定，必须吃注入时钟（与其他 handler 同口径）——
+        # 裸 datetime.now() 会让种子测试在窗沿日期上半夜里集体变红（2026-10-11 实证）。
         return json_response(
             webui_data.diary_content_payload(
                 diary_store=deps.diary.store,
@@ -119,6 +127,7 @@ def _make_diary_content(deps: Any) -> Callable[..., Any]:
                 tail=tail,
                 settings=deps.settings,
                 person=_query_str(request, "who", ""),
+                now=deps._now(),
             )
         )
 
@@ -214,7 +223,7 @@ def _make_diary_restore(deps: Any) -> Callable[..., Any]:
 
 
 def _make_diary_card(deps: Any) -> Callable[..., Any]:
-    """日记卡片的**渲染好的 HTML** —— 面板预览用（第 16 步）。
+    """日记本预览的**渲染好的 HTML** —— 面板预览用（第 16 步）。
 
     和 ``/看日记`` 出图走同一份 ``core.diary.card.render_card``，所以面板里看到的
     就是真卡片。模板缺失 / 用了不支持的语法属于**服务端问题**（用户改不动模板），
@@ -237,9 +246,88 @@ def _make_diary_card(deps: Any) -> Callable[..., Any]:
                 now=deps._now(),
             )
         except card_mod.TemplateError as error:
-            logger.warning("[webui] 日记卡模板有问题：%s", error)
-            return error_response(f"卡片模板渲染失败：{error}", 500, endpoint="diary/card")
+            logger.warning("[webui] 日记本模板有问题：%s", error)
+            return error_response(f"日记本模板渲染失败：{error}", 500, endpoint="diary/card")
         return json_response(payload)
+
+    return handler
+
+
+def _make_diary_card_image(deps: Any) -> Callable[..., Any]:
+    """**导出为图片**：把某一页日记本交给宿主转成 PNG（第 19 步）。
+
+    为什么不干脆在前端拿 iframe 自己转：浏览器没有"把 DOM 画成 PNG"的原生 API，
+    要么引 html2canvas 这类第三方库（插件是零依赖），要么就是截图式的近似效果——
+    那就等于"面板里这张和 QQ 上那张不是同一个东西"。这里老老实实走**服务端出图**：
+    复用 ``diary/card`` 的那份 HTML，再交给 ``deps.render_card_html``，和 ``/看日记``
+    **完全同一条链路、同一个缓存**，所以导出的图和聊天里收到的一模一样。
+
+    代价是它要一条能出图的通道（``pretty`` 档那条）。连不上就**明确报错**，
+    不悄悄退回一张"长得差不多"的图糊弄用户。
+    """
+
+    async def handler() -> Any:
+        book = _query_str(request, "book", fmt.NORMAL)
+        date = _query_str(request, "date", "")
+        style = _query_str(request, "style", "")
+        try:
+            payload = webui_data.diary_card_payload(
+                diary_store=deps.diary.store,
+                settings=deps.settings,
+                proactive_store=deps.proactive.store,
+                book=book,
+                date=date,
+                style=style,
+                person=_query_str(request, "who", ""),
+                now=deps._now(),
+            )
+        except card_mod.TemplateError as error:
+            logger.warning("[webui] 导出图片时模板有问题：%s", error)
+            return error_response(f"日记本模板渲染失败：{error}", 500, endpoint="diary/card-image")
+
+        if payload.get("empty"):
+            return json_response({"ok": True, "empty": True, "book": payload.get("book", "")})
+
+        # payload["html"] 已经是渲好的成品，当成"模板"再传一次：里面没有 {{ }} / {% %} 了，
+        # 空 ctx 渲染出来就是它本身，省得在这边重建一遍 card_context。
+        html = str(payload.get("html") or "")
+        if not html.strip():
+            return error_response("这一页没有内容，导不出图", 400, endpoint="diary/card-image")
+
+        try:
+            # 第 20 步起与 /看日记 走同一条出图链路（缓存 → 引擎降级梯），见
+            # ``main.render_card_html``。ctx 由 ``diary_card_payload`` 一并带出来——
+            # **PIL 引擎画的是 ctx 不是 HTML**，没有它这条链路就落不到 pil 上。
+            ctx = payload.get("ctx")
+            key = card_cache.key_for_html(html, salt=str(style or ""))
+            path = await deps.render_card_html(html, dict(ctx) if isinstance(ctx, Mapping) else {}, key)
+            if path is None:
+                raise RuntimeError("三个引擎都没出成图")
+            raw = Path(str(path)).read_bytes()
+        except Exception as error:  # noqa: BLE001 - 出图失败 / 文件读不到都算导出失败
+            logger.warning("[webui] 日记本导出图片失败：%s", error)
+            return error_response(
+                f"导出失败：{error}。"
+                "聊天里 /看日记 能出图就说明链路是通的，多半是这次渲染超时了，稍后再试。",
+                500,
+                endpoint="diary/card-image",
+            )
+
+        name = f"{payload.get('book_display') or payload.get('book') or '日记'}-{payload.get('date') or ''}.png"
+        return json_response(
+            {
+                "ok": True,
+                "empty": False,
+                "book": payload.get("book"),
+                "book_display": payload.get("book_display"),
+                "date": payload.get("date"),
+                "style": payload.get("style"),
+                "filename": name,
+                "mime": "image/png",
+                "bytes": len(raw),
+                "data_url": "data:image/png;base64," + base64.b64encode(raw).decode("ascii"),
+            }
+        )
 
     return handler
 

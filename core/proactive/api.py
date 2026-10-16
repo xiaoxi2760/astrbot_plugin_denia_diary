@@ -17,15 +17,21 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from .. import compose, scope, storage
 from .._log import logger
+from ..voice import speak_plan
 from ..session import Session
 from . import gate, triggers
 from .store import ProactiveStore
+
+VOICE_NOTE = "（系统提示：这条消息将以语音发出。像说话一样讲——口语、短句；别用 emoji、颜文字、换行或排版符号。）"
+"""决策=开口时拼进唤醒 note 的一句话（用户 2026-10-11 定稿：该让 AI 知道自己在发语音——
+她知道要"说"，就会用说话的口吻写，还可能自然地说出"我给你发条语音"）。"""
 
 PACK_MAX = 100
 """上下文包（触发上下文）的字数上限：注入本体走 compose 的 400 预算，这里只装
@@ -60,6 +66,13 @@ class Proactive:
     """两段式的决策暂存（umo → slot/fragment）：确认发出后转成 proactive-log 记录。
 
     只活在"决策 → 确认"的窗口里；重启丢失就丢了——没确认 = 没发出 = 不该记日志。"""
+    _pending_speak: dict[str, bool] = field(default_factory=dict)
+    """语音出口的决策暂存（umo → 是否转语音，F1）：决策时掷定、写进 note 告知她，
+    钩子只执行不再掷——保证"她被告知要说话"与"实际转语音"永远一致。
+    同样只活在"决策 → 确认"的窗口，重启丢失回落 False（不发语音，无害）。"""
+
+    _voice_roll: Any = None
+    """开口概率的随机源（``random.random``）；测试注入固定值用。"""
 
     # ---- 被动轮顺手做的事 ------------------------------------------------------
 
@@ -97,6 +110,42 @@ class Proactive:
         except Exception as error:  # noqa: BLE001 - 记录失败不能影响对话
             logger.warning("[proactive] 联系人记录失败（已忽略）：%s", error)
 
+    async def mark_slot_today(self, umo: str, slot: str, *, now: datetime | None = None) -> None:
+        """替她占掉当天的一个 slot（早晚安互动的**双向防重**）：他先说了早安/晚安，
+        她的同款主动问候当天就不再发——``find_greetings`` 的防重读的就是
+        ``slots_today``，这里写入即生效，巡检那边零改动。
+
+        只写 ``slots_today``：**不扣** ``today_count``（这不是她发的主动消息）、
+        **不写** ``last_sent_at``（她没发东西）、不进发送记录。全程吞异常——
+        联动失败顶多多一句晚安，不能影响正常对话。
+        """
+        if not umo or not slot:
+            return
+        try:
+            moment = now or datetime.now(self.settings.zone())
+            today = moment.date().isoformat()
+
+            def update(doc: dict[str, Any]) -> dict[str, Any] | None:
+                entry = gate.entry_of(doc, umo)
+                if slot in gate.sent_slots(entry, today):
+                    return None  # 已经占过，不用写
+                sessions = dict(doc.get("sessions") or {})
+                entry = dict(entry)
+                slots = dict(entry.get("slots_today") or {})
+                today_slots = list(slots.get(today) or [])
+                if slot not in today_slots:
+                    today_slots.append(slot)
+                slots = {day: value for day, value in slots.items() if day == today}
+                slots[today] = today_slots
+                entry["slots_today"] = slots
+                sessions[umo] = entry
+                doc["sessions"] = sessions
+                return doc
+
+            await self.store.update(update)
+        except Exception as error:  # noqa: BLE001 - 联动失败只留日志
+            logger.warning("[proactive] 占用当日 slot 失败（已忽略）：%s", error)
+
     # ---- 巡检决策 ---------------------------------------------------------------
 
     async def patrol(self, *, now: datetime | None = None) -> dict[str, Any] | None:
@@ -123,6 +172,7 @@ class Proactive:
         if signal is not None:
             decision = self._build_decision(signal, cfg, moment)
             if await self._commit(decision, cfg, moment):
+                self._pending_speak.pop(str(decision["umo"]), None)  # 暗号是直发字符，不转语音
                 self._pending_log[str(decision["umo"])] = {
                     "slot": str(decision["slot"]),
                     "fragment": str(decision["fragment"]),
@@ -149,6 +199,7 @@ class Proactive:
                     "slot": str(decision["slot"]),
                     "fragment": str(decision["fragment"]),
                 }
+                self._pending_speak[str(decision["umo"])] = bool(decision.get("speak"))
                 return decision
             return None  # 闸门复核没过（竞态）：本 tick 放弃，不往下问
         return None
@@ -214,6 +265,7 @@ class Proactive:
             return False
         moment = now or datetime.now(self.settings.zone())
         pending = self._pending_log.pop(str(umo), None)
+        self._pending_speak.pop(str(umo), None)
         # slot 先算出来：下面"要不要补记暗号冷却"和发送记录都要它。
         slot = str((pending or {}).get("slot") or "") or str(
             gate.entry_of(self.store.read(), umo).get("last_slot") or ""
@@ -299,12 +351,17 @@ class Proactive:
                 "char": str(cfg.get("signal_char") or "。"),
                 "fragment": candidate.fragment,
             }
+        speak = self._decide_speak(now=moment)
+        note = self._build_note(candidate, now=moment)
+        if speak:
+            note = note + "\n" + VOICE_NOTE
         return {
             "kind": "wake",
             "slot": candidate.slot,
             "umo": candidate.umo,
-            "note": self._build_note(candidate, now=moment),
+            "note": note,
             "fragment": candidate.fragment,
+            "speak": speak,
         }
 
     def _build_note(self, candidate: triggers.Candidate, *, now: datetime) -> str:
@@ -327,6 +384,35 @@ class Proactive:
         pack = f"【{label}】{at_rule}{candidate.instruction}素材：{candidate.fragment}"
         pack = " ".join(pack.split())[:PACK_MAX]  # 压掉换行（json.dumps 转义预算）+ 截 100
         return f"{inject}\n{pack}" if inject else pack
+
+    def _decide_speak(self, *, now: datetime) -> bool:
+        """这条唤醒要不要转语音（F1）：配置 + 开口概率 + 情绪倾向，**决策时掷定**。
+
+        她在写消息之前就知道这条会变语音（VOICE_NOTE 拼进 note），钩子只按
+        暂存执行——这是"让 AI 知道自己在发语音"的前提。合成失败仍是发送时
+        的事：降级为原文字，她被告知的话不算撒谎（说出口的方式变了而已）。
+        """
+        cfg = dict(self.settings.voice)
+        valence = None
+        if self.state is not None:
+            try:
+                snapshot = self.state.snapshot(now=now)
+                valence = (snapshot.get("mood") or {}).get("valence")
+            except Exception:  # noqa: BLE001 - 情绪拿不到按"无倾向"处理
+                valence = None
+        roll = self._voice_roll() if callable(self._voice_roll) else random.random()
+        return bool(
+            speak_plan(
+                mode=str(cfg.get("mode") or ""),
+                probability=cfg.get("probability", 100),
+                valence=valence,
+                roll=roll,
+            )
+        )
+
+    def pending_voice(self, umo: str) -> bool:
+        """钩子读：这个会话本轮的唤醒是否决定转语音（决策暂存，不清理）。"""
+        return bool(self._pending_speak.get(str(umo or ""), False))
 
     async def _commit(
         self, decision: dict[str, Any], cfg: dict[str, Any], moment: datetime

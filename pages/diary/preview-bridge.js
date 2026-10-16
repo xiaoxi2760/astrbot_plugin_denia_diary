@@ -40,6 +40,12 @@
 
   /* 卡片预览用的三样常量（真后端由 core/settings.py 提供，这里手写一份给桩用）。 */
   var CARD_STYLES = ["paper", "ink", "postcard", "tape", "dots", "seal"];
+  /* 款式中文名。真值在 core/diary/card.py 的 STYLE_LABELS；桩拿不到 Python 常量，
+     这里照抄一份。真后端走 diary/card 时会把 style_labels 一起发下来。 */
+  var CARD_STYLE_LABELS = {
+    paper: "纸感", ink: "墨信", postcard: "明信片",
+    tape: "手帐", dots: "点阵本", seal: "火漆信笺",
+  };
   var CARDS_DIR = "file:///D:/Plugin/情绪日记/astrbot_plugin_denia_diary/test/.tmp/cards/";
 
   function weekdayCn(ymdText) {
@@ -360,6 +366,37 @@
     return JSON.parse(JSON.stringify(portraitStore));
   }
 
+  /* 画一张占位卡（导出链路专用）。见下面 diary/card-image 那段说明：
+     离线桩画不出真卡片，这里只保证「data URL → 下载」这条路是通的。 */
+  function drawStubCard(date, weekday, bookName, entries, style) {
+    var c = document.createElement("canvas");
+    c.width = 760; c.height = 980;
+    var g = c.getContext("2d");
+    var font = '"PingFang SC", "Microsoft YaHei", sans-serif';
+    g.fillStyle = "#e8e2d6"; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#fdfaf3"; g.fillRect(40, 40, 680, 900);
+    g.fillStyle = "#8a8078"; g.font = '20px ' + font;
+    g.fillText("【离线桩占位图，不是真卡片】", 70, 100);
+    g.fillStyle = "#3d372f"; g.font = '34px ' + font;
+    g.fillText(date + "  " + weekday, 70, 180);
+    g.font = '22px ' + font; g.fillStyle = "#6d635a";
+    g.fillText(bookName + " · 共 " + entries.length + " 段 · " + (CARD_STYLE_LABELS[style] || style), 70, 230);
+    g.fillStyle = "#4a4239"; g.font = '20px ' + font;
+    var y = 300;
+    entries.forEach(function (e) {
+      var lines = String(e.text || "").split(/\n+/);
+      lines.forEach(function (line) {
+        if (y > 880) return;
+        g.fillText(line.slice(0, 28), 70, y);
+        y += 34;
+      });
+      y += 18;
+    });
+    g.fillStyle = "#a89c90"; g.font = '18px ' + font;
+    g.fillText("真机上这里是你自己的日记内容（服务端渲染后转 PNG）", 70, 910);
+    return c.toDataURL("image/png");
+  }
+
   /* 「对谁」候选（第 8 步契约）：每项带 label / is_owner / out_of_scope。
      **out_of_scope 随当前档位变**，所以切档之后前端重拉就能看见下拉分区真的变了。
      没名字的那项 label 就等于 id —— 不会出现 "1411638634(1411638634)"。 */
@@ -432,9 +469,41 @@
             ok: true, empty: false, book: cardBook,
             book_display: cBookName,
             date: want, style: cstyle, styles: CARD_STYLES.slice(),
+            style_labels: CARD_STYLE_LABELS,
             count: cDay.length, days: cdays, index: cIdx, html: html,
           };
         });
+    }
+    /* 导出为图片。真机是**服务端** html_render 出图（同一份模板、同一份
+       RENDER_OPTIONS，所以导出的和 /看日记 收到的是同一张）。桩里没有 Jinja2、
+       也没有转图服务，就用 canvas 画一张**占位图**——只为让「拿到 data URL →
+       触发浏览器下载」这条链路在离线环境走得通。图上写明了是桩，**不是**真卡片。 */
+    if (endpoint === "diary/card-image") {
+      var q2 = params || {};
+      var imgBook = q2.book === "love" ? "love" : "normal";
+      var imgList = (diaryStore[imgBook] || []).slice().sort(function (a, b) {
+        return stampOf(a) < stampOf(b) ? 1 : -1;
+      });
+      if (!imgList.length) {
+        return Promise.resolve({ ok: true, empty: true, book: imgBook });
+      }
+      var imgDays = [];
+      imgList.forEach(function (e) { if (imgDays.indexOf(e.date) < 0) imgDays.push(e.date); });
+      var imgStyle = String(q2.style || CARD_STYLES[0]);
+      if (CARD_STYLES.indexOf(imgStyle) < 0) imgStyle = CARD_STYLES[0];
+      var imgDate = String(q2.date || "");
+      if (imgDays.indexOf(imgDate) < 0) imgDate = imgDays[0];
+      var imgEntries = imgList.filter(function (e) { return e.date === imgDate; });
+      var dataUrl = drawStubCard(imgDate, weekdayCn(imgDate),
+        imgBook === "love" ? "恋爱日记" : "日记", imgEntries, imgStyle);
+      var approxBytes = Math.round(dataUrl.length * 0.75);
+      return Promise.resolve({
+        ok: true, empty: false, book: imgBook,
+        book_display: imgBook === "love" ? "恋爱日记" : "日记",
+        date: imgDate, style: imgStyle,
+        filename: (imgBook === "love" ? "恋爱日记" : "日记") + "-" + imgDate + ".png",
+        mime: "image/png", bytes: approxBytes, data_url: dataUrl,
+      });
     }
     if (endpoint === "diary/content") {
         var p = params || {};

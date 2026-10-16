@@ -48,16 +48,21 @@ STATE_HISTORY_FILE = "state_history.jsonl"
 AFFINITY_FILE = "affinity.json"
 PROACTIVE_FILE = "proactive.json"
 PROACTIVE_LOG_FILE = "proactive-log.jsonl"
+GREETING_FILE = "greetings.json"
 NAMES_FILE = "names.json"
 DIARY_NUDGE_FILE = "diary-nudge.json"
 TRASH_DIR = "diary-trash"
 PORTRAITS_DIR = "portraits"
+CARD_CACHE_DIR = "card-cache"
+"""已渲染日记卡的缓存目录（第 20 步）。**纯派生数据**：删掉只会让下次 ``/看日记`` 重新出图，
+不会丢任何日记内容——所以它不进 :meth:`Layout.files`，备份/导出时也不必当成日记的一部分。"""
 
 JSON_FILES = (
     NOTEBOOK_FILE,
     STATE_FILE,
     AFFINITY_FILE,
     PROACTIVE_FILE,
+    GREETING_FILE,
     NAMES_FILE,
     DIARY_NUDGE_FILE,
 )
@@ -124,6 +129,10 @@ class Layout:
         return self.base_dir / PROACTIVE_LOG_FILE
 
     @property
+    def greeting(self) -> Path:
+        return self.base_dir / GREETING_FILE
+
+    @property
     def names(self) -> Path:
         return self.base_dir / NAMES_FILE
 
@@ -139,6 +148,10 @@ class Layout:
     def portraits(self) -> Path:
         return self.base_dir / PORTRAITS_DIR
 
+    @property
+    def card_cache(self) -> Path:
+        return self.base_dir / CARD_CACHE_DIR
+
     def files(self) -> tuple[Path, ...]:
         """全部数据文件（不含目录）。"""
         return (
@@ -152,6 +165,7 @@ class Layout:
             self.affinity,
             self.proactive,
             self.proactive_log,
+            self.greeting,
             self.names,
             self.diary_nudge,
         )
@@ -397,6 +411,7 @@ __all__ = [
     "DIARY_FILE",
     "DIARY_JSONL_FILE",
     "DIARY_NUDGE_FILE",
+    "GREETING_FILE",
     "JSON_FILES",
     "LINE_SEP",
     "LOVE_DIARY_FILE",

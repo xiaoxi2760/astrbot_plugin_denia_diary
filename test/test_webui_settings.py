@@ -863,7 +863,10 @@ class TestSettingsResetAndErrors(TestSettingsHandlers):
         reset_routes = [spec for spec in self.routes.ROUTES if spec[0] == "settings/reset"]
         self.assertEqual([spec[2] for spec in reset_routes], [("POST",)])
         self.assertEqual([spec[1] for spec in reset_routes], ["settings_reset"])
-        self.assertEqual(len(self.routes.ROUTES), 21, "12 条既有 + settings/reset + 立绘 4 条 + 日记改删/回收站 4 条 + 卡片预览 1 条")
+        self.assertEqual(
+            len(self.routes.ROUTES), 22,
+            "12 条既有 + settings/reset + 立绘 4 条 + 日记改删/回收站 4 条 + 日记本预览 1 条 + 导出图片 1 条",
+        )
 
     def test_get_carries_sections_and_problems(self) -> None:
         data = self.data_of(self.call("settings_get"))

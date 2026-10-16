@@ -37,6 +37,29 @@ _VAR = re.compile(r"{{\s*(.*?)\s*}}", re.S)
 WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 """给卡片抬头用。与 ``main.py`` 的 ``_card_weekday`` 同源（那边给 Markdown 用）。"""
 
+STYLE_LABELS: dict[str, str] = {
+    "paper": "纸感",
+    "ink": "墨信",
+    "postcard": "明信片",
+    "tape": "手帐",
+    "dots": "点阵本",
+    "seal": "火漆信笺",
+}
+"""款式键 → 中文名。**单一来源**：``/日记款式`` 指令、面板版式按钮、设置页下拉框
+都用这张表，面板上再不会出现 ``paper`` / ``tape`` 这种要人猜的英文键。"""
+
+RENDER_OPTIONS: dict[str, Any] = {"type": "png", "quality": 95}
+"""出图参数（会覆盖宿主 ``html_render`` 的默认值）。
+
+⚠️ 宿主的默认是 ``{"type": "jpeg", "quality": 40}``（见 AstrBot
+``astrbot/core/utils/t2i/network_strategy.py``）。40 的 JPEG 压 15~16px 的中文小字，
+字缘全是振铃、纸纹和横格线直接断层——卡片"丑"有一大半是它造成的，不是模板。
+这里改成 PNG + q95：字干净了，代价是单张从几百 KB 涨到 1~3 MB（发 QQ 有流量代价，
+但对一天发一次的卡片可以接受）。未知键会被远端忽略，多传无副作用。
+
+原本写在 ``main.py`` 里，但面板的"导出为图片"也要用同一份参数——两张图必须长得
+一模一样，所以常量挪到这儿，两边都从这里取。"""
+
 _FONT_FAMILY_RE = re.compile(r"^[A-Za-z0-9 一-鿿,._'\-()]{1,180}$")
 """字体名白名单：只放行"字体名/字体栈"该有的字符。"""
 _FONT_URL_RE = re.compile(
@@ -220,18 +243,31 @@ def card_context(
     book_name: str,
     entries: list[dict[str, Any]],
     font_css: str = "",
+    page_index: int = 0,
+    page_total: int = 0,
 ) -> dict[str, Any]:
     """条目 → 模板数据。**HTML 转义只在这一处做**。
 
     出图那条链路没有 autoescape（远端服务默认不开），所以 ``< > &`` 必须在这里
     就变成实体——否则她写的 ``<b>`` 会在卡片里变成真标签。
     面板预览走同一份，所以看到的就是真效果。
+
+    ``page_index`` / ``page_total`` 是**这一页在整本日记里的位置**（1 起），
+    印在卡片右下角 —— 日记本总有页码，缺了就像一叠散纸。两个都给 0（或任一为 0）
+    就不印，模板里 ``{% if page_total %}`` 自己会跳过。
     """
+    total = int(page_total or 0)
+    index = int(page_index or 0)
+    # 越界或没给就当"没有页码"：宁可右下角空着，也不要印一个「第 9 / 3 页」
+    if total <= 0 or index <= 0 or index > total:
+        index, total = 0, 0
     return {
         "date": str(date or ""),
         "weekday": str(weekday or ""),
         "book_name": str(book_name or ""),
         "count": len(entries),
+        "page_index": index,
+        "page_total": total,
         "card_font_css": str(font_css or ""),
         "entries": [
             {

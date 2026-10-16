@@ -93,7 +93,7 @@
       {% endfor %}
     </div>
 
-    <div class="foot"><span>写给今天的便签</span><span>· · ·</span></div>
+    <div class="foot"><span>写给今天的便签</span>{% if page_total %}<span>第 {{ page_index }} / {{ page_total }} 页</span>{% endif %}</div>
   </div>
 </body>
 </html>

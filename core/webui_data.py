@@ -536,6 +536,9 @@ def diary_card_payload(
         date=wanted,
         weekday=card.WEEKDAYS[moment.weekday()],
         book_name=BOOK_DISPLAY.get(target, target),
+        # 页码：这一页在整本里的位置。days 已倒序，所以 index+1 就是"从新往旧数"的页号。
+        page_index=days.index(wanted) + 1,
+        page_total=len(days),
         entries=[
             {
                 "time": entry.time,
@@ -555,10 +558,16 @@ def diary_card_payload(
         "date": wanted,
         "style": chosen,
         "styles": list(settings_mod.CARD_STYLE_CHOICES),
+        # 款式中文名：面板按钮直接显示它，不用在前端再抄一份映射
+        "style_labels": dict(card.STYLE_LABELS),
         "count": len(day_entries),
         "days": days,
         "index": days.index(wanted),
         "html": card.render_card(chosen, ctx),
+        # 模板数据一并带出去（第 20 步）：「导出为图片」那条链路可能落到 **PIL 引擎**，
+        # 而 PIL 画的是 ctx 不是 HTML——没有它，PIL 引擎在面板这边就没法用。
+        # 预览那条链路拿不拿它无所谓（``render_card`` 已经渲完了）。
+        "ctx": ctx,
     }
 
 

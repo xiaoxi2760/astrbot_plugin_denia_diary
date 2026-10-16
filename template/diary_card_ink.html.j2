@@ -56,10 +56,16 @@
   .who { font-size: 12.5px; color: #a5987a; }
 
   .foot {
-    margin-top: 34px; padding-top: 20px; text-align: center;
+    margin-top: 34px; padding-top: 20px;
     border-top: 1px solid #e8dfc9;
     font-size: 12px; letter-spacing: .5em; color: #ab9d80;
+    /* 原来是居中一个 ✦；加了页码后改成 flex：✦ 仍占满整行居中，
+       页码靠右。给 .mark 留 flex:1 居中，否则 ✦ 会被页码挤到左边。 */
+    display: flex; align-items: center; justify-content: space-between;
   }
+  .foot .mark { flex: 1; text-align: center; letter-spacing: .5em; }
+  .foot .page { flex: 0 0 auto; letter-spacing: .1em; font-size: 11.5px; }
+  .foot .page:only-child { flex: 1; text-align: center; }
 </style>
 <style>{{ card_font_css }}</style>
 </head>
@@ -83,7 +89,7 @@
       {% endfor %}
     </div>
 
-    <div class="foot">✦</div>
+    <div class="foot"><span class="mark">✦</span>{% if page_total %}<span class="page">第 {{ page_index }} / {{ page_total }} 页</span>{% endif %}</div>
   </div>
 </body>
 </html>

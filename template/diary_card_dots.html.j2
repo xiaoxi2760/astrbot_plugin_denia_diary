@@ -91,7 +91,7 @@
       {% endfor %}
     </div>
 
-    <div class="foot"><span>点阵本 · 她写下的这一天</span><span>· · ·</span></div>
+    <div class="foot"><span>点阵本 · 她写下的这一天</span>{% if page_total %}<span>第 {{ page_index }} / {{ page_total }} 页</span>{% endif %}</div>
   </div>
 </body>
 </html>

@@ -20,13 +20,20 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ._log import logger
+from .greeting.api import (
+    DUPLICATE_MINUTES_DEFAULT,
+    MORNING_PATTERNS_DEFAULT,
+    NIGHT_PATTERNS_DEFAULT,
+    PATTERN_FLAGS,
+)
 from .outbound import DEFAULT_MARKER_PATTERN
 from .scope import DEFAULT_MODE, normalize_mode
+from .voice import VOICE_MODES, VOICE_MODE_DEFAULT
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 """默认时区。禁止裸 ``datetime.now()``：云端多为 UTC，会整体错 8 小时。"""
 
-SUBSYSTEMS: tuple[str, ...] = ("diary", "notebook", "state", "proactive")
+SUBSYSTEMS: tuple[str, ...] = ("diary", "notebook", "state", "proactive", "greeting")
 """子系统开关名（调试期可只关一块）。"""
 
 INT_LIMITS: dict[str, tuple[int, int]] = {
@@ -46,6 +53,8 @@ INT_LIMITS: dict[str, tuple[int, int]] = {
     "proactive.signal_cooldown_days": (1, 30),
     "proactive.pending_window_hours": (1, 48),
     "proactive.quiet_days": (1, 30),
+    "greeting.duplicate_minutes": (0, 24 * 60),
+    "voice.probability": (0, 100),
 }
 
 _DIARY_DEFAULTS: dict[str, int] = {
@@ -80,9 +89,33 @@ CARD_STYLE_DEFAULT = "paper"
 CARD_FONT_DEFAULT = ""
 """日记卡自定义字体；空串＝用款式自带的那一套。"""
 
+CARD_ENGINE_CHOICES: tuple[str, ...] = ("auto", "playwright", "remote", "pil")
+"""``pretty`` 档**把卡片变成 PNG 用哪个引擎**（第 20 步）。
+
+这一项**只管出图引擎**，不管出不出图——出不出图是 ``diary.card_render`` 的事（pretty /
+plain / off），两者正交：``card_render=plain`` 时这一项压根不看。
+
+| 取值 | 谁出图 | 要什么 | 什么时候选它 |
+| :--- | :--- | :--- | :--- |
+| ``playwright`` | 本机 Chrome / Edge 截图 | playwright + 浏览器 | 排版最贴模板；实测约 0.9 秒且稳定 |
+| ``remote`` | AstrBot 官方 t2i | 能联网 | 要**六款官方样式**都有（PIL 只画纸感），或宿主机没浏览器 |
+| ``pil`` | Pillow 直接画 | Pillow + 中文字体 | 要完全离线、不起浏览器、不出网 |
+| ``auto`` | 按上面三者的顺序挑第一个可用的 | —— | 默认，不想操心 |
+
+这一项选的是**先试谁**，不是"不许退"：选中的引擎失败会继续往下退（并记日志）。理由和"页码
+数不出来就不出图"同源——一张出不成图的日记卡对用户等于"今天读不到日记"，比慢几秒严重得多。
+降级顺序与理由见 ``core.diary.card_render.ENGINE_ORDER``。
+"""
+
+CARD_ENGINE_DEFAULT = "auto"
+"""默认 ``auto``：按可用性自己挑。
+
+探测逻辑只有一处（各引擎自己的 ``probe()``），默认值不重复实现一遍。"""
+
 FIELD_CHOICES: dict[str, tuple[str, ...]] = {
     "diary.card_render": CARD_RENDER_CHOICES,
     "diary.card_style": CARD_STYLE_CHOICES,
+    "diary.card_engine": CARD_ENGINE_CHOICES,
 }
 """**枚举型**字符串字段 → 可选值。面板据此把自由文本框换成下拉框（第 15 步）。
 
@@ -153,6 +186,27 @@ _PROACTIVE_DEFAULTS: dict[str, Any] = {
 }
 
 
+def _greeting_defaults() -> dict[str, Any]:
+    """早晚安组默认值（每次新表，防止共享可变的列表默认值）。
+
+    词表默认值的**唯一来源**在 ``core.greeting.api``（与 outbound 的
+    ``DEFAULT_MARKER_PATTERN`` 同款分权）——这里只声明键与默认。
+    """
+    return {
+        "duplicate_minutes": DUPLICATE_MINUTES_DEFAULT,  # 同款问候的冷却（分钟）
+        "morning_patterns": list(MORNING_PATTERNS_DEFAULT),
+        "night_patterns": list(NIGHT_PATTERNS_DEFAULT),
+    }
+
+_VOICE_DEFAULTS: dict[str, Any] = {
+    "mode": VOICE_MODE_DEFAULT,  # off=不发语音（默认）；voice=纯语音；dual=语音+文字
+    "probability": 100,  # 开口概率（0-100）
+}
+"""语音出口组（F1 第一步）：模式枚举的唯一来源在 ``core.voice``。
+宿主 ``TTSProvider.get_audio(text)`` 只有文本参，音色/语速在 provider 配置里——
+这里的开关只决定"说不说"，情绪倾向（valence<0 上浮）是 core.voice 的常量。"""
+
+
 def default_config() -> dict[str, Any]:
     """一份全新的默认配置（每次调用返回新对象，避免共享可变默认值）。"""
     return {
@@ -167,11 +221,14 @@ def default_config() -> dict[str, Any]:
             "card_render": CARD_RENDER_DEFAULT,
             "card_style": CARD_STYLE_DEFAULT,
             "card_font": CARD_FONT_DEFAULT,
+            "card_engine": CARD_ENGINE_DEFAULT,
             "panel_edit_unlimited": PANEL_EDIT_UNLIMITED_DEFAULT,
         },
         "notebook": dict(_NOTEBOOK_DEFAULTS),
         "state": dict(_STATE_DEFAULTS),
         "proactive": dict(_PROACTIVE_DEFAULTS),
+        "greeting": _greeting_defaults(),
+        "voice": dict(_VOICE_DEFAULTS),
         "outbound": dict(_OUTBOUND_DEFAULTS),
         "love_peers": [],
         "name_preference": {},
@@ -193,11 +250,14 @@ class Settings:
         "card_render": CARD_RENDER_DEFAULT,
         "card_style": CARD_STYLE_DEFAULT,
         "card_font": CARD_FONT_DEFAULT,
+        "card_engine": CARD_ENGINE_DEFAULT,
         "panel_edit_unlimited": PANEL_EDIT_UNLIMITED_DEFAULT,
     })
     notebook: Mapping[str, int] = field(default_factory=lambda: dict(_NOTEBOOK_DEFAULTS))
     state: Mapping[str, str] = field(default_factory=lambda: dict(_STATE_DEFAULTS))
     proactive: Mapping[str, Any] = field(default_factory=lambda: dict(_PROACTIVE_DEFAULTS))
+    greeting: Mapping[str, Any] = field(default_factory=_greeting_defaults)
+    voice: Mapping[str, Any] = field(default_factory=lambda: dict(_VOICE_DEFAULTS))
     outbound: Mapping[str, Any] = field(default_factory=lambda: dict(_OUTBOUND_DEFAULTS))
     love_peers: tuple[str, ...] = ()
     name_preference: Mapping[str, str] = field(default_factory=dict)
@@ -265,13 +325,20 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
         raw_diary.get("card_style") if isinstance(raw_diary, Mapping) else None,
         CARD_STYLE_CHOICES, CARD_STYLE_DEFAULT, "diary.card_style", warnings,
     )
-    # 自定义字体：纯字符串，**不校验存在性**——渲染在远端无头浏览器里，
-    # 本机装没装那个字体根本不是判据（真正的校验交给浏览器回落）。
+    # 自定义字体：纯字符串，**不校验存在性**——渲染在无头浏览器里（本地或远端，
+    # 随 card_engine 变），本机装没装那个字体根本不是判据（真正的校验交给浏览器回落）。
     # ⚠️ raw_diary 可能压根不是对象（配置写坏了），取键前先判类型，
     #    否则这里会 AttributeError，把"降级不报错"的规矩破掉。
     diary["card_font"] = _as_text(
         raw_diary.get("card_font") if isinstance(raw_diary, Mapping) else None
     )[:200]
+    # 出图引擎（第 20 步）：同 card_render / card_style 的枚举校验，一样缺键静默默认。
+    # 这里**不**校验这台机器有没有浏览器——那是运行期的事（``card_local.probe``），
+    # 配置校验要是去 import playwright，就等于把"零第三方依赖"和"加载配置要 1 秒"一起弄坏。
+    diary["card_engine"] = _as_choice(
+        raw_diary.get("card_engine") if isinstance(raw_diary, Mapping) else None,
+        CARD_ENGINE_CHOICES, CARD_ENGINE_DEFAULT, "diary.card_engine", warnings,
+    )
     # 面板改删豁免窗（bool）：缺键静默用默认 False，写了非 bool 才 warning。
     diary["panel_edit_unlimited"] = _as_bool(
         raw_diary.get("panel_edit_unlimited") if isinstance(raw_diary, Mapping) else None,
@@ -301,6 +368,10 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
 
     proactive = _as_proactive(src.get("proactive"), warnings)
 
+    greeting = _as_greeting(src.get("greeting"), warnings)
+
+    voice = _as_voice(src.get("voice"), warnings)
+
     outbound = _as_outbound(src.get("outbound"), warnings)
 
     love_peers = _as_ids(src.get("love_peers"), warnings)
@@ -320,6 +391,8 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
         notebook=dict(notebook),
         state=dict(state),
         proactive=dict(proactive),
+        greeting=dict(greeting),
+        voice=dict(voice),
         outbound=dict(outbound),
         love_peers=love_peers,
         name_preference=dict(name_preference),
@@ -462,6 +535,90 @@ def _as_proactive(value: Any, warnings: list[str]) -> dict[str, Any]:
         else:
             out[key] = _as_int(raw, default, f"proactive.{key}", warnings)
     return out
+
+
+def _as_greeting(value: Any, warnings: list[str]) -> dict[str, Any]:
+    """早晚安组（问候识别与记录）：一个整数 + 两张正则词表。
+
+    词表逐条编译，坏条目丢掉并记 warning（其余照用），清洗后为空才整表回落
+    默认——用户加一条坏正则不该连累没写坏的那些。
+    """
+    if value is not None and not isinstance(value, Mapping):
+        warnings.append("greeting 不是对象，全部使用默认值")
+    defaults = _greeting_defaults()
+    raw = value if isinstance(value, Mapping) else {}
+    return {
+        "duplicate_minutes": _as_int(
+            raw.get("duplicate_minutes"),
+            defaults["duplicate_minutes"],
+            "greeting.duplicate_minutes",
+            warnings,
+        ),
+        "morning_patterns": _as_patterns(
+            raw.get("morning_patterns"),
+            tuple(defaults["morning_patterns"]),
+            "greeting.morning_patterns",
+            warnings,
+        ),
+        "night_patterns": _as_patterns(
+            raw.get("night_patterns"),
+            tuple(defaults["night_patterns"]),
+            "greeting.night_patterns",
+            warnings,
+        ),
+    }
+
+
+def _as_patterns(
+    value: Any, default: tuple[str, ...], field_name: str, warnings: list[str]
+) -> list[str]:
+    """正则词表（list of str）：逐条编译，坏条目忽略；清洗后为空整表回落默认。"""
+    if value is None:
+        return list(default)
+    if not isinstance(value, (list, tuple)):
+        warnings.append(f"{field_name} 不是列表（{type(value).__name__}），使用默认")
+        return list(default)
+    out: list[str] = []
+    for item in value:
+        text = item.strip() if isinstance(item, str) else ""
+        if not text:
+            continue
+        try:
+            re.compile(text, PATTERN_FLAGS)
+        except re.error as exc:
+            warnings.append(f"{field_name} 里有不合法的正则（{text!r}：{exc}），已忽略")
+            continue
+        out.append(text)
+    if not out:
+        warnings.append(f"{field_name} 清洗后为空，使用默认词表")
+        return list(default)
+    return out
+
+
+def _as_voice(value: Any, warnings: list[str]) -> dict[str, Any]:
+    """语音出口组（F1）：模式枚举 + 开口概率。
+
+    与 ``diary.card_render`` 同款分权：枚举合法性在这里（``_as_choice``），
+    「转不转」的决策（含情绪倾向）在 ``core.voice.speak_plan``。
+    """
+    if value is not None and not isinstance(value, Mapping):
+        warnings.append("voice 不是对象，全部使用默认值")
+    raw = value if isinstance(value, Mapping) else {}
+    return {
+        "mode": _as_choice(
+            raw.get("mode"),
+            VOICE_MODES,
+            VOICE_MODE_DEFAULT,
+            "voice.mode",
+            warnings,
+        ),
+        "probability": _as_int(
+            raw.get("probability"),
+            _VOICE_DEFAULTS["probability"],
+            "voice.probability",
+            warnings,
+        ),
+    }
 
 
 def _as_outbound(value: Any, warnings: list[str]) -> dict[str, Any]:

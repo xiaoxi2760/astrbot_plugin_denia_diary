@@ -3,7 +3,7 @@
     "type": "bool",
     "default": true,
     "description": "总开关",
-    "hint": "关闭后日记、小本本、状态、主动消息全部停用（数据保留）"
+    "hint": "关闭后日记、小本本、状态、主动消息、早晚安全部停用（数据保留）"
   },
   "timezone": {
     "type": "string",
@@ -64,6 +64,12 @@
         "default": true,
         "description": "主动消息",
         "hint": "她主动找你"
+      },
+      "greeting": {
+        "type": "bool",
+        "default": true,
+        "description": "早晚安",
+        "hint": "他说早安/晚安时记下来，她自然接话；关了就当普通聊天"
       }
     }
   },
@@ -149,6 +155,12 @@
         "default": "",
         "description": "日记卡字体（自定义）",
         "hint": "留空＝用款式自带的字体。填字体名（如 Noto Serif SC）或字体文件直链（http…woff2 / ttf / otf）都行"
+      },
+      "card_engine": {
+        "type": "string",
+        "default": "auto",
+        "description": "日记卡出图引擎（pretty 档）",
+        "hint": "playwright=本机 Chrome/Edge 截图（约1秒，排版最贴模板）；remote=AstrBot 官方转图服务（约4-6秒，六款样式都能选）；pil=Pillow 直接画（完全离线，但只画纸感那一款）；auto=按前三者顺序挑第一个可用的（默认）。选中的引擎失败会自动往下退并记日志。非法值回落 auto"
       }
     }
   },
@@ -248,6 +260,63 @@
         "default": "。",
         "description": "心情暗号字符",
         "hint": "1~4 个字符；整条消息只有它，不带解释。别用聊天里常见的字符"
+      }
+    }
+  },
+  "greeting": {
+    "type": "object",
+    "description": "早晚安（问候识别与记录）",
+    "hint": "他整条消息说早安/晚安时记下来；连续天数与睡眠时长她会自己提到，怎么回应归她",
+    "items": {
+      "duplicate_minutes": {
+        "type": "int",
+        "default": 30,
+        "description": "重复冷却（分钟）",
+        "hint": "0-1440；这段时间里再说的同款问候不重复记录"
+      },
+      "morning_patterns": {
+        "type": "list",
+        "default": [
+          "早[呀吖啊哈安]?[~～。．.！!？?]*",
+          "早上好[呀吖啊哈~～。．.！!？?]*",
+          "起床[啦了咯~～。．.！!]*",
+          "醒[了啦][~～。．.！!]*",
+          "gm"
+        ],
+        "description": "早安识别词",
+        "hint": "每条一个正则，整条消息完全匹配才算；坏条目忽略，全空回落默认"
+      },
+      "night_patterns": {
+        "type": "list",
+        "default": [
+          "晚安[呀吖啊哈安]?[~～。．.！!？?]*",
+          "安安[~～。．.！!]*",
+          "睡[了啦][~～。．.！!]*",
+          "睡觉[了啦][~～。．.！!]*",
+          "去睡[了啦]?[~～。．.！!]*",
+          "gn"
+        ],
+        "description": "晚安识别词",
+        "hint": "同上；凌晨 0-4 点的晚安统计上归前一天"
+      }
+    }
+  },
+  "voice": {
+    "type": "object",
+    "description": "语音（主动消息开口说）",
+    "hint": "她的主动消息过宿主 TTS 变成语音发出；需要先在宿主配好一个 TTS 提供商。合成失败自动保持文字",
+    "items": {
+      "mode": {
+        "type": "string",
+        "default": "off",
+        "description": "语音模式",
+        "hint": "off=不发语音（默认）；voice=只发语音；dual=语音在前文字在后。非法值回落 off"
+      },
+      "probability": {
+        "type": "int",
+        "default": 100,
+        "description": "开口概率（%）",
+        "hint": "0-100；情绪不好（valence<0）时会自动上浮一些"
       }
     }
   },

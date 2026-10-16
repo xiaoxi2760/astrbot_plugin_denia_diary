@@ -6,6 +6,7 @@
   ``note_add`` / ``note_list`` / ``note_complete`` / ``note_forget``；
   ``mood_report``（心情自报，参数全字符串——AstrBot 不生成 ``required``，
   数字类型 + 默认值会把"没提供"写成 0）；
+  ``sleep_check``（查眼前人的作息记录，第 19 步）；
 - 提示挂载点：``on_llm_request`` → 互动计数（``affinity.touch``）→ ``core.compose``
   渲染结果挂进 ``req.extra_user_content_parts``（临时内容块，**不拼 system_prompt**——
   每轮都变的文本拼在 system_prompt 尾部会打掉前缀缓存）；
@@ -13,7 +14,13 @@
   热重载即失效 → 必须删旧建新）；巡检 handler 里闸门与触发器都在 core 判定，这里只
   负责出站——``add_active_job`` 唤醒她本人 / ``StarTools.send_message`` 直发暗号；
   ``on_using_llm_tool`` 是"真的发出去了"的确认点（只认主动轮的
-  ``send_message_to_user``，被动轮她回复用的同一个工具不算）。
+  ``send_message_to_user``，被动轮她回复用的同一个工具不算）；
+- 早晚安记录（``core/greeting``）：``on_llm_request`` 里整条消息匹配问候词就记，
+  记上后调 ``Proactive.mark_slot_today`` 占掉当天同款主动问候（双向防重）。
+- 语音出口（F1 第一步，``core/voice``）：巡检决策时掷定"这条要不要转语音"
+  （``Proactive._decide_speak``，结论写进 note 告知她——她知道自己在发语音）；
+  钩子按暂存执行，把 ``send_message_to_user`` 的文本就地过宿主 TTS 转成 record
+  组件（原地改 ``tool_args``）；合成失败一律降级为原文字。
 
 "该不该"全部在 ``core`` 里：会话身份、可见性、上限、时间窗、开关都在内核算，这里只传参和套壳。
 
@@ -43,15 +50,22 @@ from .core import webui_data
 from .core import webui_portrait
 from .core import webui_settings
 from .core.diary import card
+from .core.diary import card_cache
+from .core.diary import card_local
+from .core.diary import card_pil
+from .core.diary import card_render
 from .core.diary import format as fmt
 from .core.diary.api import Diary
 from .core.diary.store import DiaryStore, person_id_by_name
+from .core.greeting.api import Greeting
+from .core.greeting.store import GreetingStore
 from .core.notebook import Notebook, NotebookStore
 from .core.proactive import Proactive
 from .core.proactive.store import ProactiveStore
 from .core.session import Session
 from .core.state import Affinity, State
 from .core.state.store import AffinityStore, StateStore
+from .core.voice import plan as voice_plan_mod
 from .web_api import register_all
 
 try:  # pragma: no cover - 取决于 AstrBot 版本（``extra_user_content_parts`` 的内容块类型）
@@ -87,27 +101,15 @@ ACTIVE_JOB_NAME = f"{PLUGIN_NAME}#proactive-wake"
 
 CARD_TEMPLATE_DIR = Path(__file__).resolve().parent / "template"
 """/看日记 的 Jinja2 模板目录（纸感 / 墨信 / 明信片）。模板在**插件目录**而不是数据目录：
-它是随版本发布的产品文件，用户不需要改；读不到按"模板缺失"走降级链，不炸。"""
+它是随版本发布的产品文件，用户不需要改；读不到按"模板缺失"走降级链，不炸。
 
-_CARD_RENDER_OPTIONS = {"type": "png", "quality": 95}
-"""出图参数（会覆盖宿主 ``html_render`` 的默认值）。
+出图参数（``card.RENDER_OPTIONS``）**不在这里取**：第 20 步起出图编排搬进了
+``core/diary/card_render``，那份参数由它直接喂给远端渲染；main 只剩接线，多抄一份常量
+就多一处会漂的地方。"""
 
-⚠️ 宿主的默认是 ``{"type": "jpeg", "quality": 40}``（见 AstrBot
-``astrbot/core/utils/t2i/network_strategy.py``）。40 的 JPEG 压 15~16px 的中文小字，
-字缘全是振铃、纸纹和横格线直接断层——卡片"丑"有一大半是它造成的，不是模板。
-这里改成 PNG + q95：字干净了，代价是单张从几百 KB 涨到 1~3 MB（发 QQ 有流量代价，
-但对一天发一次的卡片可以接受）。未知键会被远端忽略，多传无副作用。"""
-
-_CARD_STYLE_LABELS: dict[str, str] = {
-    "paper": "纸感",
-    "ink": "墨信",
-    "postcard": "明信片",
-    "tape": "手帐",
-    "dots": "点阵本",
-    "seal": "火漆信笺",
-}
-"""款式 → 中文名。给人看的（指令回执、报错），**不参与判定**——
-真正的合法性只看它在不在 ``CARD_STYLE_CHOICES`` 里。"""
+_CARD_STYLE_LABELS: dict[str, str] = card.STYLE_LABELS
+"""款式 → 中文名（定义在 ``core.diary.card``，面板与指令共用）。给人看的，
+**不参与判定**——真正的合法性只看它在不在 ``CARD_STYLE_CHOICES`` 里。"""
 
 _CARD_STYLE_ALIASES: dict[str, str] = {
     "纸": "paper", "纸感": "paper", "横线": "paper", "横线纸": "paper", "本子": "paper",
@@ -247,6 +249,12 @@ class DeniaDiary(Star):
             state=self.state,
             affinity=self.affinity,
         )
+        self.greeting = Greeting(
+            settings=self.settings,
+            layout=self.layout,
+            store=GreetingStore(layout=self.layout, locks=self.locks),
+            locks=self.locks,
+        )
         self.portraits = webui_portrait.PortraitStore(layout=self.layout, locks=self.locks)
         logger.info("[%s] 数据目录：%s", PLUGIN_NAME, self.layout.base_dir)
         for message in self.settings.warnings:
@@ -269,19 +277,23 @@ class DeniaDiary(Star):
         """插件卸载 / 热重载前调用：把熟悉度合并写窗口的增量冲到盘上（正常关闭不丢互动计数）。
 
         主动消息状态（proactive.json）是写穿的，没有内存态要收尾。
+        第 20 步多了一件：本地出图的**常驻浏览器**要收掉——它是插件起的后台 Chromium 进程，
+        没人管的话会一直挂在任务栏上占内存。
         """
         try:
             await self.affinity.store.flush()
         except Exception as error:  # noqa: BLE001 - 卸载路径不能被磁盘错误卡死
             logger.warning("[%s] 熟悉度收尾落盘失败：%s", PLUGIN_NAME, error)
+        await card_local.shutdown()
+        await card_pil.shutdown()
 
     async def apply_settings(self, updated: dict, *, applied: list[str] | None = None) -> dict:
         """WebUI 改配置后的**热生效**（第 5.2 步）：备份 → 落盘 → 就地重建
         ``self.settings`` → 巡检间隔变了就重建 job。返回结构化结果，**不抛异常**。
 
         为什么必须就地重建而不只是写盘：门面（Diary / Notebook / State / Affinity /
-        Proactive）在构造时各拿了一份 ``settings`` 引用，插件本体并不会因为配置文件
-        变了而重新构造——只写盘等于"改了没生效"，用户会以为面板在骗人。
+        Proactive / Greeting）在构造时各拿了一份 ``settings`` 引用，插件本体并不会
+        因为配置文件变了而重新构造——只写盘等于"改了没生效"，用户会以为面板在骗人。
 
         落盘走插件**自己的活配置对象**（``AstrBotConfig`` 是 dict 子类，构造时注入）：
         ``clear()`` 后 ``save_config(updated)``；``save_config`` 不可用时回落
@@ -339,7 +351,14 @@ class DeniaDiary(Star):
 
         # 3) 热生效：就地换掉插件与各门面的 settings 引用（不重建门面、不搬数据）
         self.settings = resolved
-        for facade in (self.diary, self.notebook, self.state, self.affinity, self.proactive):
+        for facade in (
+            self.diary,
+            self.notebook,
+            self.state,
+            self.affinity,
+            self.proactive,
+            self.greeting,
+        ):
             if hasattr(facade, "settings"):
                 facade.settings = resolved
         for message in resolved.warnings:
@@ -844,6 +863,42 @@ Args:
             return f"记下了：{saved_word}。"
         return "记下了（这会儿说不清，只记了打分）。"
 
+    # ---- 工具：作息记录（第 19 步） --------------------------------------------
+
+    @llm_tool("sleep_check")
+    async def sleep_check(self, event: AstrMessageEvent) -> str:
+        """查眼前这个人的作息记录：他哪天几点说的晚安/早安、睡了多久、连续多少天。他聊到自己没睡好、起了大早，或者你想关心他作息的时候用。
+
+⚠️ 记录来自他跟你道早晚安——记不到的就说没有，**别编**。作息是私事，只在**私聊**里翻得动，群里不念。
+        """
+        session = self._session(event)
+        if not session.is_private:
+            return "作息是私事，群里不翻。想看的话来我的私聊，我翻给你。"
+        result = self.greeting.report(session.person_id(), now=self._now())
+        if not result.get("ok"):
+            return str(result.get("error") or "还翻不到。")
+        rows = result.get("days") or []
+        lines: list[str] = []
+        for row in rows:
+            parts = [str(row["date"])]
+            if row.get("night"):
+                parts.append(f"晚安 {row['night']}")
+            if row.get("morning"):
+                parts.append(f"早安 {row['morning']}")
+            if row.get("sleep_hours") is not None:
+                parts.append(f"睡了约 {row['sleep_hours']:g} 小时")
+            lines.append("- " + "，".join(parts))
+        streaks = []
+        if result.get("morning_streak"):
+            streaks.append(f"连续 {result['morning_streak']} 天道早安")
+        if result.get("night_streak"):
+            streaks.append(f"连续 {result['night_streak']} 天道晚安")
+        head = f"TA 的作息（共记了 {result['total']} 天，最近 {len(rows)} 天）："
+        body = "\n".join([head] + lines)
+        if streaks:
+            body += "\n" + "，".join(streaks) + "。"
+        return body
+
     # ---- 用户指令（不是 LLM 工具：人主动敲 /看日记 才跑） ----------------------
 
     def _card_cfg(self) -> tuple[str, str]:
@@ -857,6 +912,40 @@ Args:
         if style not in settings_mod.CARD_STYLE_CHOICES:
             style = settings_mod.CARD_STYLE_DEFAULT
         return render, style
+
+    def _card_engine(self) -> str:
+        """当前生效的出图引擎（``auto`` / ``local`` / ``remote``）。口径同 :meth:`_card_cfg`。"""
+        value = str(dict(self.settings.diary).get("card_engine") or "")
+        return value if value in settings_mod.CARD_ENGINE_CHOICES else settings_mod.CARD_ENGINE_DEFAULT
+
+    async def _card_png(self, tmpl: str, data: dict, style: str) -> Path | None:
+        """/看日记 的出图入口：算缓存键，再交给共用链路。出不了图返回 None（降级 Markdown）。
+
+        缓存键含款式与模板签名（``card_cache.key_for``）——改了 CSS 会自动失效重出，
+        不会把一张"改坏了但缓存还在"的图反复发出去。
+        """
+        tmpl_path = CARD_TEMPLATE_DIR / f"diary_card_{style}.html.j2"
+        key = card_cache.key_for(style, data, tmpl_path)
+        return await self.render_card_html(tmpl, data, key)
+
+    async def render_card_html(self, tmpl: str, data: dict, key: str) -> Path | None:
+        """**缓存 → 本地 → 远端**逐级降级，出不了图返回 None（见 ``core.diary.card_render``）。
+
+        本方法只做一件事：把宿主能力（数据目录、出图引擎档位、``html_render``）注入
+        ``core.diary.card_render.render_html``——"先查哪条路、失败了退哪条"那个判断住在
+        ``core/``，才能离线单测。
+
+        公开成方法是因为 ``web_api/handlers.py`` 的「导出为图片」要复用它：那边手里只有
+        一段渲好的 HTML、没有 ctx，所以键由它自己用 ``card_cache.key_for_html`` 算。
+        """
+        return await card_render.render_html(
+            tmpl,
+            data,
+            cache_dir=self.layout.card_cache,
+            key=key,
+            engine=self._card_engine(),
+            remote=self.html_render,
+        )
 
     @filter.command("看日记", alias={"日记卡"})
     async def diary_card(self, event: AstrMessageEvent, date: str = "") -> None:
@@ -908,6 +997,20 @@ Args:
         weekday = _card_weekday(day)
         markdown = _card_markdown(day, weekday, book_name, entries)
 
+        # 页码：这一天在整本里的第几页 / 共几页。多读一次整本只为数天数——
+        # 日记是纯文本文件，这个量级不算什么。数不出来（读失败 / 这一天不在本子里）
+        # 就传 0，模板自动不印页码，绝不因为数不出页码就不出图。
+        page_index, page_total = 0, 0
+        try:
+            book_key = str(entries[0].get("book") or fmt.NORMAL)
+            all_days = sorted(
+                {e.date for e in self.diary.store.read_entries(book_key)}, reverse=True
+            )
+            if day in all_days:
+                page_index, page_total = all_days.index(day) + 1, len(all_days)
+        except Exception as error:  # noqa: BLE001 - 页码是锦上添花，不能带累出图
+            logger.debug("[%s] 数日记页数失败，这次不印页码：%s", PLUGIN_NAME, error)
+
         if render == "off":
             yield event.plain_result(markdown)
             return
@@ -920,20 +1023,27 @@ Args:
                 book_name=book_name,
                 entries=entries,
                 font_css=card.font_css(self.settings.diary.get("card_font")),
+                page_index=page_index,
+                page_total=page_total,
             )
             try:
                 tmpl = (CARD_TEMPLATE_DIR / f"diary_card_{style}.html.j2").read_text(
                     encoding="utf-8"
                 )
-                path = await self.html_render(
-                    tmpl, data, return_url=False, options=_CARD_RENDER_OPTIONS
-                )
-                yield event.image_result(path)
-                return
-            except Exception as error:  # noqa: BLE001 - 端点不通/模板缺失都走降级
+                path = await self._card_png(tmpl, data, style)
+            except OSError as error:  # 模板缺失/读不到：降级 Markdown
                 logger.warning(
-                    "[%s] 日记卡 HTML 渲染失败，降级 Markdown：%s", PLUGIN_NAME, error
+                    "[%s] 日记卡模板读不到，降级 Markdown：%s", PLUGIN_NAME, error
                 )
+            except Exception as error:  # noqa: BLE001 - 出图链路出任何岔子都降级，不打断指令
+                logger.warning(
+                    "[%s] 日记卡出图异常，降级 Markdown：%s", PLUGIN_NAME, error
+                )
+            else:
+                if path is not None:
+                    yield event.image_result(str(path))
+                    return
+                logger.warning("[%s] 日记卡出图没成功，降级 Markdown", PLUGIN_NAME)
         try:
             path = await self.text_to_image(markdown)
             yield event.image_result(path)
@@ -1002,6 +1112,10 @@ Args:
         （群聊普通发言没有信号，复核 #4）：私聊记 private，群聊记 mention。
         ``note_contact`` 顺手记下"这个人平时在哪找我说话"（第 4 步触发器的目标反查表）。
 
+        早晚安记录（``core/greeting``）：整条消息是一句早安/晚安才记（判定在
+        core），记上了就替她占掉当天同款主动问候的 slot（双向防重）；问候素材
+        经 ``compose`` 的 trace 档进注入——记录归系统、怎么回应归她。
+
         挂载点见 ``_attach_hint``：**不碰 ``system_prompt``**，走临时内容块。
         """
         if req is None:
@@ -1014,12 +1128,22 @@ Args:
             session, kind="private" if session.is_private else "mention", now=self._now()
         )
         await self.proactive.note_contact(session)
+        greeted = await self.greeting.observe(
+            session, text=str(getattr(event, "message_str", "") or ""), now=self._now()
+        )
+        if greeted.get("ok"):
+            await self.proactive.mark_slot_today(
+                session.umo,
+                "morning" if greeted.get("kind") == "morning" else "goodnight",
+                now=self._now(),
+            )
         text = compose.compose_prompt(
             self.diary,
             session,
             notebook=self.notebook,
             state=self.state,
             affinity=self.affinity,
+            greeting=self.greeting,
             now=self._now(),
         )
         if not text:
@@ -1083,6 +1207,7 @@ Args:
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             if not umo:
                 return
+            await self._maybe_speak(umo, tool_args)
             await self.proactive.confirm_sent(umo, now=self._now())
             logger.info("[%s] 主动消息已发出（确认点命中）→ %s", PLUGIN_NAME, umo)
         except Exception as error:  # noqa: BLE001
@@ -1119,6 +1244,74 @@ Args:
             logger.info("[%s] 出站已剥离表情包标记（%d 个组件）", PLUGIN_NAME, len(cleaned))
         except Exception as error:  # noqa: BLE001 - 红线：清洗失败不影响她说话
             logger.warning("[%s] 出站清洗失败，按原文发送：%s", PLUGIN_NAME, error)
+
+    async def _maybe_speak(self, umo: str, tool_args: object) -> None:
+        """F1 第一步：主动轮的文本就地转语音（她说文字，宿主发声）。
+
+        与出站清洗同一机制——**原地改** ``tool_args["messages"]``（紧接着被
+        ``execute(**valid_params)`` 展开成同一个 dict）。
+
+        **转不转是巡检决策时掷定的**（``Proactive._decide_speak``：结论写进
+        note 告知她 + 暂存 ``_pending_speak``）——她在写消息之前就知道这条要
+        "说"，这里只按暂存执行，保证"她被告知"与"实际转语音"永远一致。
+
+        这里只做三件 IO 事——拿 provider、合成、写回。**红线**：没配 provider、
+        合成失败、文本超长，一律保持原文字——语音坏了不能连累她说话；
+        整段 try/except，这条路径绝不能抛。
+        """
+        try:
+            if not isinstance(tool_args, dict):
+                return
+            if not self.proactive.pending_voice(umo):
+                return
+            cfg = dict(getattr(self.settings, "voice", {}) or {})
+            messages = tool_args.get("messages")
+            indices = voice_plan_mod.speakable_indices(messages)
+            if not indices:
+                return
+            provider = await self._tts_provider()
+            if provider is None:
+                logger.info("[%s] 宿主没有可用的 TTS provider，本条保持文字", PLUGIN_NAME)
+                return
+            audio: dict[int, str] = {}
+            for index in indices:
+                text = str(messages[index].get("text") or "").strip()
+                try:
+                    path = await provider.get_audio(text)
+                except Exception as error:  # noqa: BLE001 - 单段合成失败不连累其余
+                    logger.warning("[%s] 语音合成失败，该段保持文字：%s", PLUGIN_NAME, error)
+                    continue
+                if path:
+                    audio[index] = str(path)
+            if not audio:
+                return
+            mode = str(cfg.get("mode") or "")
+            replaced = voice_plan_mod.apply_audio(messages, audio, mode=mode)
+            if replaced is None:
+                return
+            tool_args["messages"] = replaced
+            logger.info(
+                "[%s] 主动消息已转语音（mode=%s，%d 段）", PLUGIN_NAME, mode, len(audio)
+            )
+        except Exception as error:  # noqa: BLE001 - 红线：语音失败不影响她说话
+            logger.warning("[%s] 语音出口失败，按原文发送：%s", PLUGIN_NAME, error)
+
+    async def _tts_provider(self) -> object | None:
+        """宿主 TTS provider：优先 async 版，旧宿主回落同步版，都没有就 None。"""
+        getter = getattr(self.context, "get_using_tts_provider_async", None)
+        if callable(getter):
+            try:
+                return await getter()
+            except Exception as error:  # noqa: BLE001
+                logger.warning("[%s] 取 TTS provider 失败：%s", PLUGIN_NAME, error)
+                return None
+        getter = getattr(self.context, "get_using_tts_provider", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception as error:  # noqa: BLE001
+                logger.warning("[%s] 取 TTS provider 失败：%s", PLUGIN_NAME, error)
+        return None
 
 
 def _parse_coord(value: object) -> int | None:

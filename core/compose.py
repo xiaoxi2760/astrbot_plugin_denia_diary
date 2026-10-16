@@ -82,6 +82,16 @@ class AffinityLike(Protocol):
     def trace_line(self, session: object, *, now: object = None) -> str: ...
 
 
+class GreetingLike(Protocol):
+    """``compose`` 用到的早晚安记录能力（协议而非 import，保持依赖单向）。
+
+    ``line`` 只在"他刚说完问候"的当轮出一句话素材（含连续天数/睡眠时长，
+    自截到 60 字内），其余轮次返回空串、不占预算。
+    """
+
+    def line(self, session: object, *, now: object = None) -> str: ...
+
+
 @dataclass(frozen=True)
 class Section:
     """一段要注入的话。``priority`` 越大越先保留。"""
@@ -123,6 +133,7 @@ def compose_prompt(
     notebook: NotebookLike | None = None,
     state: StateLike | None = None,
     affinity: AffinityLike | None = None,
+    greeting: GreetingLike | None = None,
     now: object = None,
     strong_text: str = "",
     exchange_who: str = "",
@@ -134,6 +145,10 @@ def compose_prompt(
     （PRIORITY 里旧键的数值不动，新增的只有 ``trace``；有测试钉住）。
     熟悉度档位词并进 fact 档（§2.6 的表：100 字配额含档位词）；
     state 与 affinity 各自的渲染规则留在 ``core/state/`` 内部。
+
+    早晚安素材并进 **trace 档**（它本来就是"连续性"的题中之义）：问候句与
+    互动轨迹句拼在同一档，一起吃 trace 的预算与砍序——不新增第六类目，
+    PROMPT_BUDGET 与 PRIORITY 一个字节不动。
     """
     sections: list[Section] = []
     fact_text = ""
@@ -146,10 +161,17 @@ def compose_prompt(
     fact_parts = [text for text in (fact_text, band) if text]
     if fact_parts:
         sections.append(Section("fact", "\n".join(fact_parts), PRIORITY["fact"]))
+    trace_parts: list[str] = []
     if affinity is not None:
         trace = affinity.trace_line(session, now=now)
         if trace:
-            sections.append(Section("trace", trace, PRIORITY["trace"]))
+            trace_parts.append(trace)
+    if greeting is not None:
+        hello = greeting.line(session, now=now)
+        if hello:
+            trace_parts.append(hello)
+    if trace_parts:
+        sections.append(Section("trace", "\n".join(trace_parts), PRIORITY["trace"]))
     if state is not None:
         parts = [
             text
@@ -174,6 +196,7 @@ __all__ = [
     "PROMPT_BUDGET",
     "AffinityLike",
     "DiaryLike",
+    "GreetingLike",
     "NotebookLike",
     "Section",
     "StateLike",

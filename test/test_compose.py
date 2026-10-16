@@ -66,6 +66,16 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(text, "留下我\n")
 
 
+class _FakeGreeting:
+    """早晚安素材的替身（协议：``line``）。"""
+
+    def __init__(self, line: str) -> None:
+        self.text = line
+
+    def line(self, session, *, now=None) -> str:
+        return self.text
+
+
 class ComposePromptTest(TmpDirCase):
     def test_asks_diary_for_both_pieces(self) -> None:
         fake = _FakeDiary(line="日记那行", hint="提醒那句")
@@ -86,6 +96,23 @@ class ComposePromptTest(TmpDirCase):
     def test_disabled_diary_renders_empty(self) -> None:
         diary = make_diary(self.root, {"subsystems": {"diary": False}})
         self.assertEqual(compose.compose_prompt(diary, group_session()), "")
+
+    def test_greeting_line_joins_trace_section(self) -> None:
+        """早晚安素材并进 trace 档：不新增类目、预算与优先级一个字节不动。"""
+        fake = _FakeDiary(line="日记那行")
+        text = compose.compose_prompt(
+            fake, group_session(), greeting=_FakeGreeting("这个人刚说了早安，已经连续 5 天了。")
+        )
+        self.assertIn("这个人刚说了早安", text)
+        self.assertIn("日记那行", text)
+
+    def test_greeting_line_absent_when_empty_or_dep_missing(self) -> None:
+        fake = _FakeDiary(line="日记那行")
+        with_greeting = compose.compose_prompt(
+            fake, group_session(), greeting=_FakeGreeting("")
+        )
+        without_greeting = compose.compose_prompt(fake, group_session())
+        self.assertEqual(with_greeting, without_greeting, "空素材不占预算，行为与不传一致")
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ READ_ONLY: dict[str, str] = {
 """**只读项**（键 → 原因）。出现在字段表里但标 ``editable: false``，
 改它返回结构化错误——数据目录的搬迁与 Layout 的建立都在插件启动期完成。"""
 
-READ_ONLY_ENABLED_NOTE = "关掉总开关后日记、小本本、状态、主动消息全部不可用（数据保留）。"
+READ_ONLY_ENABLED_NOTE = "关掉总开关后日记、小本本、状态、主动消息、早晚安全部不可用（数据保留）。"
 """总开关可改，但响应里要带上这句提示（§四#4）。"""
 
 _EMPTY_DEFAULT: dict[str, Any] = {
@@ -349,6 +349,8 @@ CONFIG_GROUPS: tuple[tuple[str, str], ...] = (
     ("notebook", "小本本参数"),
     ("state", "状态参数（情绪 / 作息 / 熟悉度）"),
     ("proactive", "主动消息参数"),
+    ("greeting", "早晚安（问候识别与记录）"),
+    ("voice", "语音（主动消息开口说）"),
     ("outbound", "出站文本清洗"),
     ("love_peers", "最亲密名单"),
     ("name_preference", "称呼偏好"),
@@ -372,8 +374,8 @@ CONFIG_SECTIONS: tuple[dict[str, Any], ...] = (
     {
         "key": "proactive",
         "label": "主动消息",
-        "description": "她的状态（情绪 / 作息）与主动消息的频率、冷却与暗号",
-        "groups": ("state", "proactive"),
+        "description": "她的状态（情绪 / 作息）、主动消息的频率与冷却、早晚安的问候记录、语音出口",
+        "groups": ("state", "proactive", "greeting", "voice"),
     },
     {
         "key": "outbound",

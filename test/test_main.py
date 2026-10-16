@@ -23,8 +23,56 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import NOW, TmpDirCase, private_session  # noqa: E402
 
+from core.diary import card_render  # noqa: E402
+
 SUPPORTED_TYPES = {"string", "number", "boolean", "object", "array"}
 MODULE_NAME = "plugin_under_test.main"
+
+
+class _EnginePatcher:
+    """临时替换某个 ``card_render`` 模块实例里的几个引擎。
+
+    第 20 步起出图是"缓存 → playwright → remote → pil"的降级梯，而**这台机器上三条路都可能
+    是真的能用的**（装了 Chrome、装了 Pillow、能联网）。不把引擎换掉，测"降级"就会变成
+    "看这台机器装了什么"——那样测出来的东西换个环境就是假的。
+
+    换成返回 None 的假实现 = 那条路"确定出不了图"，剩下的交给编排。
+
+    ⚠️ ``module`` 必须传**插件自己用的那个** ``card_render``（``self.module.card_render``）。
+    本文件里 ``from core.diary import card_render`` 拿到的是**另一个模块实例**——测试把插件
+    装在 ``plugin_under_test`` 包下重载了一遍，两份 ``core.diary.card_render`` 各不相干，
+    补丁打在测试这份上，插件那份纹丝不动。踩过一次：断言拿到的还是 PIL 真出的缓存图。
+    """
+
+    def __init__(self, module, *names: str) -> None:
+        self.module = module
+        self.names = names or tuple(module.ENGINE_ORDER)
+        self._saved: dict = {}
+
+    def __enter__(self):
+        async def dead(*args, **kwargs):
+            return None
+
+        for name in self.names:
+            self._saved[name] = getattr(self.module, f"render_{name}")
+            setattr(self.module, f"render_{name}", dead)
+        return self
+
+    def __exit__(self, *exc):
+        for name, original in self._saved.items():
+            setattr(self.module, f"render_{name}", original)
+        self._saved.clear()
+        return False
+
+
+def _all_engines_dead(module) -> _EnginePatcher:
+    """三个引擎全换成"出不了图"。"""
+    return _EnginePatcher(module)
+
+
+def _only_engine(module, name: str) -> _EnginePatcher:
+    """只留 ``name`` 这一个引擎可用，其余换成"出不了图"。"""
+    return _EnginePatcher(module, *[n for n in module.ENGINE_ORDER if n != name])
 
 
 def _install_stubs(default_data_dir: Path) -> dict:
@@ -236,6 +284,8 @@ class _FakeEvent:
         self.message_obj = _FakeMessage(**kwargs)
         self._group_id = kwargs.get("group_id", "")
         self._extras = kwargs.get("extras", {})
+        # 真实事件带 message_str（纯文本）；早晚安识别读它，默认空＝普通消息
+        self.message_str = kwargs.get("message_str", "")
 
     def get_extra(self, key: str, default=None):
         return self._extras.get(key, default)
@@ -296,7 +346,7 @@ class PluginCase(TmpDirCase):
 
 
 class RegistrationTest(PluginCase):
-    def test_nine_tools_are_registered(self) -> None:
+    def test_ten_tools_are_registered(self) -> None:
         self.assertEqual(
             set(self.registry["tools"]),
             {
@@ -309,6 +359,7 @@ class RegistrationTest(PluginCase):
                 "note_complete",
                 "note_forget",
                 "mood_report",
+                "sleep_check",
             },
         )
 
@@ -691,6 +742,300 @@ class PromptInjectionTest(PluginCase):
             await plugin.terminate()
 
         asyncio.run(scenario())
+
+
+class GreetingWiringTest(PluginCase):
+    """早晚安接线（钩子 → 记录 → 注入素材 → 主动消息双向防重）。
+
+    时钟钉死在上午 8 点（greeting 的"刚说"窗只有 2 分钟，且凌晨归属不同——
+    别让测试撞真挂钟）。"""
+
+    MORNING_NOW = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        cls.MORNING_NOW = datetime(2026, 10, 11, 8, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    async def _run_hook(self, plugin, event):
+        req = sys.modules["astrbot.api.provider"].ProviderRequest()
+        await plugin.inject_diary_hint(event, req)
+        return _parts_text(req)
+
+    def test_morning_greeting_recorded_injected_and_slot_marked(self) -> None:
+        async def scenario() -> tuple[str, dict, dict]:
+            plugin = self.make_plugin()
+            plugin._now = lambda: self.MORNING_NOW
+            event = _FakeEvent(message_str="早安")
+            text = await self._run_hook(plugin, event)
+            proactive = json.loads(
+                (plugin.layout.proactive).read_text(encoding="utf-8")
+            )
+            greetings = json.loads(
+                (plugin.layout.greeting).read_text(encoding="utf-8")
+            )
+            return text, proactive, greetings
+
+        text, proactive, greetings = asyncio.run(scenario())
+        self.assertIn("刚说了早安", text, "问候素材进注入（trace 档）")
+        self.assertIn("连续 1 天", text)
+        self.assertEqual(len(greetings["people"]["10001"]["events"]), 1)
+        today = self.MORNING_NOW.date().isoformat()
+        slots = proactive["sessions"]["aiocqhttp:FriendMessage:10001"]["slots_today"][today]
+        self.assertIn("morning", slots, "他先说了早安，她的早安主动问候当天不再发")
+
+    def test_night_greeting_marks_goodnight_slot(self) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        async def scenario() -> list:
+            plugin = self.make_plugin()
+            night = datetime(2026, 10, 10, 23, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            plugin._now = lambda: night
+            event = _FakeEvent(message_str="晚安")
+            text = await self._run_hook(plugin, event)
+            doc = json.loads((plugin.layout.proactive).read_text(encoding="utf-8"))
+            return text, doc["sessions"]["aiocqhttp:FriendMessage:10001"]["slots_today"]["2026-10-10"]
+
+        text, slots = asyncio.run(scenario())
+        self.assertIn("刚道了晚安", text)
+        self.assertIn("goodnight", slots)
+
+    def test_non_greeting_message_records_nothing(self) -> None:
+        async def scenario() -> tuple[str, bool]:
+            plugin = self.make_plugin()
+            plugin._now = lambda: self.MORNING_NOW
+            event = _FakeEvent(message_str="你好呀，在吗")
+            return await self._run_hook(plugin, event), plugin.layout.greeting.exists()
+
+        text, exists = asyncio.run(scenario())
+        self.assertNotIn("刚说了早安", text)
+        self.assertFalse(exists, "没有问候就不该建记录文件")
+
+    def test_greeting_out_of_scope_not_recorded(self) -> None:
+        """范围外整轮不介入（第 7 步）：默认 private 档下群聊的早安不记、不注入。"""
+        async def scenario() -> tuple[str, bool]:
+            plugin = self.make_plugin()
+            plugin._now = lambda: self.MORNING_NOW
+            event = _FakeEvent(
+                "aiocqhttp:GroupMessage:555",
+                type="GroupMessage",
+                session_id="555",
+                group_id="555",
+                sender_id="10001",
+                message_str="早安",
+            )
+            return await self._run_hook(plugin, event), plugin.layout.greeting.exists()
+
+        text, exists = asyncio.run(scenario())
+        self.assertFalse(exists, "范围外的问候不留痕")
+        self.assertNotIn("刚说了早安", text)
+
+    def test_greeting_disabled_skips_everything(self) -> None:
+        async def scenario() -> tuple[str, bool]:
+            plugin = self.make_plugin({"subsystems": {"greeting": False}})
+            plugin._now = lambda: self.MORNING_NOW
+            event = _FakeEvent(message_str="早安")
+            return await self._run_hook(plugin, event), plugin.layout.greeting.exists()
+
+        text, exists = asyncio.run(scenario())
+        self.assertFalse(exists)
+        self.assertNotIn("刚说了早安", text)
+
+    def test_sleep_check_tool_reports_records_in_private(self) -> None:
+        async def scenario() -> str:
+            plugin = self.make_plugin()
+            plugin._now = lambda: self.MORNING_NOW
+            await plugin.greeting.observe(private_session("10001"), text="早安", now=self.MORNING_NOW)
+            return await plugin.sleep_check(_FakeEvent())
+
+        body = asyncio.run(scenario())
+        self.assertIn("TA 的作息", body)
+        self.assertIn("早安 8:00", body)
+        self.assertIn("连续 1 天道早安", body)
+
+    def test_sleep_check_tool_refuses_group_and_empty(self) -> None:
+        async def scenario() -> tuple[str, str]:
+            plugin = self.make_plugin()
+            plugin._now = lambda: self.MORNING_NOW
+            group = _FakeEvent(
+                "aiocqhttp:GroupMessage:555",
+                type="GroupMessage",
+                session_id="555",
+                group_id="555",
+                sender_id="10001",
+            )
+            refused = await plugin.sleep_check(group)
+            empty = await plugin.sleep_check(_FakeEvent())
+            return refused, empty
+
+        refused, empty = asyncio.run(scenario())
+        self.assertIn("群里不翻", refused)
+        self.assertIn("还没记到", empty, "没记录就明说，别给她编的素材")
+
+    def test_sleep_check_tool_description_carries_behavior_rules(self) -> None:
+        doc = self.registry["tools"]["sleep_check"].__doc__ or ""
+        self.assertIn("别编", doc)
+        self.assertIn("私聊", doc)
+
+
+class _FakeTTSProvider:
+    """宿主 TTS provider 替身：``get_audio(text) -> 路径``，可指路可报错。"""
+
+    def __init__(self, mapping: dict[str, str] | None = None, error: bool = False) -> None:
+        self.mapping = mapping or {}
+        self.calls: list[str] = []
+        self.error = error
+
+    async def get_audio(self, text: str) -> str:
+        self.calls.append(text)
+        if self.error:
+            raise RuntimeError("tts down")
+        return self.mapping.get(text, "")
+
+
+class SpeechWiringTest(PluginCase):
+    """F1 语音出口接线（主动轮 send_message_to_user → 宿主 TTS → record 组件）。"""
+
+    @staticmethod
+    def _context(provider) -> SimpleNamespace:
+        async def getter():
+            return provider
+
+        return SimpleNamespace(get_using_tts_provider_async=getter)
+
+    async def _run_hook(self, plugin, event, tool_args) -> None:
+        tool = SimpleNamespace(name="send_message_to_user")
+        await plugin.note_proactive_sent(event, tool, tool_args)
+
+    def _proactive_event(self) -> "_FakeEvent":
+        return _FakeEvent(extras={"cron_job": {"slot": "morning"}})
+
+    def test_voice_mode_replaces_plain_with_record(self) -> None:
+        async def scenario() -> tuple[object, dict]:
+            provider = _FakeTTSProvider({"早呀，今天也元气满满": "/tmp/voice/a.mp3"})
+            plugin = self.make_plugin({"voice": {"mode": "voice"}})
+            plugin.context = self._context(provider)
+            umo = "aiocqhttp:FriendMessage:10001"
+            plugin.proactive._pending_speak[umo] = True  # 巡检决策暂存（_decide_speak 落点）
+            tool_args = {"messages": [{"type": "plain", "text": "早呀，今天也元气满满"}]}
+            await self._run_hook(plugin, self._proactive_event(), tool_args)
+            doc = json.loads((plugin.layout.proactive).read_text(encoding="utf-8"))
+            return tool_args["messages"], doc
+
+        messages, doc = asyncio.run(scenario())
+        self.assertEqual(
+            messages, [{"type": "record", "path": "/tmp/voice/a.mp3"}], "纯语音档：文字被替换"
+        )
+        self.assertIn("last_sent_at", doc["sessions"]["aiocqhttp:FriendMessage:10001"],
+                      "确认点照常生效（语音不改变两段式）")
+
+    def test_dual_mode_appends_record_after_plain(self) -> None:
+        async def scenario() -> list:
+            provider = _FakeTTSProvider({"早安": "/tmp/voice/a.mp3"})
+            plugin = self.make_plugin({"voice": {"mode": "dual"}})
+            plugin.context = self._context(provider)
+            plugin.proactive._pending_speak["aiocqhttp:FriendMessage:10001"] = True
+            tool_args = {"messages": [{"type": "plain", "text": "早安"}]}
+            await self._run_hook(plugin, self._proactive_event(), tool_args)
+            return tool_args["messages"]
+
+        self.assertEqual(
+            asyncio.run(scenario()),
+            [{"type": "plain", "text": "早安"}, {"type": "record", "path": "/tmp/voice/a.mp3"}],
+            "dual 档：语音在前文字在后（对齐宿主 dual_output 惯例）",
+        )
+
+    def test_off_mode_and_passive_turn_never_touch_messages(self) -> None:
+        async def scenario() -> tuple[list, list, list]:
+            provider = _FakeTTSProvider({"早安": "/tmp/a.mp3"})
+            plugin_off = self.make_plugin({"voice": {"mode": "off"}})
+            plugin_off.context = self._context(provider)
+            args_off = {"messages": [{"type": "plain", "text": "早安"}]}
+            await self._run_hook(plugin_off, self._proactive_event(), args_off)
+
+            plugin_passive = self.make_plugin({"voice": {"mode": "voice"}})
+            plugin_passive.context = self._context(provider)
+            args_passive = {"messages": [{"type": "plain", "text": "早安"}]}
+            tool = SimpleNamespace(name="send_message_to_user")
+            # 被动轮（无 cron extra）：宿主管线有自己的 TTS 开关，插件不碰
+            await plugin_passive.note_proactive_sent(_FakeEvent(), tool, args_passive)
+            return args_off["messages"], args_passive["messages"], provider.calls
+
+        off, passive, calls = asyncio.run(scenario())
+        self.assertEqual(off, [{"type": "plain", "text": "早安"}])
+        self.assertEqual(passive, [{"type": "plain", "text": "早安"}])
+        self.assertEqual(calls, [], "没有决策暂存（off 档/被动轮）就不该调 TTS")
+
+    def test_no_provider_or_synth_failure_keeps_text(self) -> None:
+        async def scenario() -> tuple[list, list]:
+            plugin_noc = self.make_plugin({"voice": {"mode": "voice"}})
+            plugin_noc.context = SimpleNamespace()  # 宿主没有 provider 方法
+            plugin_noc.proactive._pending_speak["aiocqhttp:FriendMessage:10001"] = True
+            args_noc = {"messages": [{"type": "plain", "text": "早安"}]}
+            await self._run_hook(plugin_noc, self._proactive_event(), args_noc)
+
+            provider = _FakeTTSProvider(error=True)
+            plugin_err = self.make_plugin({"voice": {"mode": "voice"}})
+            plugin_err.context = self._context(provider)
+            plugin_err.proactive._pending_speak["aiocqhttp:FriendMessage:10001"] = True
+            args_err = {"messages": [{"type": "plain", "text": "早安"}]}
+            await self._run_hook(plugin_err, self._proactive_event(), args_err)
+            return args_noc["messages"], args_err["messages"]
+
+        no_provider, synth_failed = asyncio.run(scenario())
+        self.assertEqual(no_provider, [{"type": "plain", "text": "早安"}])
+        self.assertEqual(synth_failed, [{"type": "plain", "text": "早安"}], "红线：语音坏了不能连累她说话")
+
+    def test_decide_speak_respects_mode_probability_and_mood(self) -> None:
+        plugin = self.make_plugin({"voice": {"mode": "voice"}})
+        plugin.proactive._voice_roll = lambda: 0.0
+        self.assertTrue(plugin.proactive._decide_speak(now=plugin._now()))
+        plugin.proactive._voice_roll = lambda: 0.99
+        self.assertTrue(plugin.proactive._decide_speak(now=plugin._now()),
+                        "probability=100 必开口，与 roll 无关")
+        plugin_off = self.make_plugin({"voice": {"mode": "off"}})
+        self.assertFalse(plugin_off.proactive._decide_speak(now=plugin_off._now()))
+
+    def test_wake_note_tells_her_about_voice(self) -> None:
+        """决策=开口 → note 里明说这条是语音（她在写之前就知道，按说话的口吻写）。"""
+        from core.proactive.api import VOICE_NOTE
+
+        plugin = self.make_plugin({"voice": {"mode": "voice"}})
+        plugin.proactive._voice_roll = lambda: 0.0
+        candidate = SimpleNamespace(
+            slot="morning",
+            umo="aiocqhttp:FriendMessage:10001",
+            session=private_session("10001"),
+            fragment="作息词",
+            instruction="说早安",
+            priority=5,
+        )
+        decision = plugin.proactive._build_decision(
+            candidate, dict(plugin.settings.proactive), plugin._now()
+        )
+        self.assertTrue(decision["speak"])
+        self.assertIn("语音", decision["note"])
+        self.assertIn(VOICE_NOTE, decision["note"])
+
+    def test_off_mode_wake_note_has_no_voice_note(self) -> None:
+        plugin = self.make_plugin()  # voice.mode 默认 off
+        candidate = SimpleNamespace(
+            slot="morning",
+            umo="aiocqhttp:FriendMessage:10001",
+            session=private_session("10001"),
+            fragment="作息词",
+            instruction="说早安",
+            priority=5,
+        )
+        decision = plugin.proactive._build_decision(
+            candidate, dict(plugin.settings.proactive), plugin._now()
+        )
+        self.assertFalse(decision["speak"])
+        self.assertNotIn("语音", decision["note"])
 
 
 class MoodToolFlowTest(PluginCase):
@@ -1122,7 +1467,7 @@ class DiaryCardTest(PluginCase):
         self.assertEqual(event.images, [])
 
     def test_pretty_renders_html_and_escapes_content(self) -> None:
-        plugin = self.make_plugin()
+        plugin = self.make_plugin({"diary": {"card_engine": "remote"}})
         asyncio.run(plugin.diary.write_async(
             private_session("10001"), text="正文 <b>与 & 符号</b>", mood="开心", now=NOW))
         captured: dict = {}
@@ -1143,6 +1488,11 @@ class DiaryCardTest(PluginCase):
         self.assertIn("&lt;b&gt;", entry["paragraphs"][0])
 
     def test_pretty_falls_back_to_markdown_when_render_fails(self) -> None:
+        """**三个引擎全挂**才降 Markdown——第 20 步起出图有 playwright / remote / pil 三条路。
+
+        以前只要 ``html_render`` 挂了就降级；现在 PIL 是保底，那台机器装了 Pillow 就会把图
+        接住。所以"验降级"必须**三个都弄挂**，否则测到的根本不是降级，是 PIL 正常工作。
+        """
         plugin = self.make_plugin()
         asyncio.run(plugin.diary.write_async(
             private_session("10001"), text="降级也要出图", now=NOW))
@@ -1150,14 +1500,17 @@ class DiaryCardTest(PluginCase):
         async def broken_render(tmpl, data, return_url=True, options=None):
             raise RuntimeError("All endpoints failed")
 
+        async def broken(*args, **kwargs):
+            return None
+
         plugin.html_render = broken_render
+        with _all_engines_dead(self.module.card_render):
+            async def fake_t2i(text):
+                return str(self.root / "md.png")
 
-        async def fake_t2i(text):
-            return str(self.root / "md.png")
-
-        plugin.text_to_image = fake_t2i
-        event = self._event()
-        results = self._collect(plugin.diary_card(event, "10-04"))
+            plugin.text_to_image = fake_t2i
+            event = self._event()
+            results = self._collect(plugin.diary_card(event, "10-04"))
         self.assertEqual(results[0][0], "image")
         self.assertIn("md.png", event.images[0])
         self.assertEqual(event.plains, [])
@@ -1172,11 +1525,37 @@ class DiaryCardTest(PluginCase):
 
         plugin.html_render = broken
         plugin.text_to_image = broken
-        event = self._event()
-        results = self._collect(plugin.diary_card(event, "10-04"))
+        with _all_engines_dead(self.module.card_render):
+            event = self._event()
+            results = self._collect(plugin.diary_card(event, "10-04"))
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0][0], "plain")
         self.assertIn("最后还有纯文本", event.plains[0])
+
+    def test_pil_engine_serves_the_card_when_remote_is_down(self) -> None:
+        """远端挂了就该由 PIL 把图接住，而不是直接掉到 Markdown。
+
+        这是第 20 步加 PIL 的全部意义：**出图有一条永远在的底**。
+        """
+        from core.diary import card_pil
+
+        ok, reason = card_pil.probe()
+        if not ok:
+            self.skipTest(f"这台机器不能 PIL 出图：{reason}")
+        plugin = self.make_plugin({"diary": {"card_engine": "remote"}})
+        asyncio.run(plugin.diary.write_async(
+            private_session("10001"), text="PIL 接住了", mood="开心", now=NOW))
+
+        async def broken_render(tmpl, data, return_url=True, options=None):
+            raise RuntimeError("All endpoints failed")
+
+        plugin.html_render = broken_render
+        with _only_engine(self.module.card_render, "pil"):
+            event = self._event()
+            results = self._collect(plugin.diary_card(event, "10-04"))
+        self.assertEqual(results[0][0], "image")
+        self.assertTrue(Path(event.images[0]).is_file())
+        self.assertEqual(event.plains, [], "出图成功了就不该再补一句纯文本")
 
     def test_group_gets_hint_without_content(self) -> None:
         plugin = self.make_plugin()
@@ -1198,8 +1577,16 @@ class DiaryCardTest(PluginCase):
     # ---- 第 15 步：出图参数 / 款式 / 自定义字体 --------------------------------
 
     def _render_once(self, config: dict | None = None) -> tuple[str, dict]:
-        """跑一次 /看日记 的 pretty 档，返回 ``(模板原文, 传给渲染器的数据)``。"""
-        plugin = self.make_plugin(config)
+        """跑一次 /看日记 的 pretty 档，返回 ``(模板原文, 传给渲染器的数据)``。
+
+        ⚠️ 引擎必须钉死在 ``remote``：第 20 步起出图是"缓存 → playwright → remote → pil"的
+        降级梯，而这台机器上 playwright 与 pil **都是真的能用的**。不钉死的话这些用例会去跑
+        真浏览器/真 Pillow，``fake_render`` 永远不被调用——测试就变成"看这台机器装了什么"。
+        钉死 remote 才是"验那条我自己写的分支"。
+        """
+        merged = {"diary": {"card_engine": "remote", **(config or {}).get("diary", {})}}
+        merged.update({k: v for k, v in (config or {}).items() if k != "diary"})
+        plugin = self.make_plugin(merged)
         asyncio.run(plugin.diary.write_async(
             private_session("10001"), text="正文", mood="开心", now=NOW))
         captured: dict = {}
@@ -1215,7 +1602,7 @@ class DiaryCardTest(PluginCase):
     def test_render_options_override_the_host_defaults(self) -> None:
         """宿主的默认是 JPEG q40——那正是"字糊成一团"的来源，必须显式覆盖。"""
         _tmpl, _data = self._render_once()
-        plugin = self.make_plugin()
+        plugin = self.make_plugin({"diary": {"card_engine": "remote"}})
         asyncio.run(plugin.diary.write_async(
             private_session("10001"), text="x", now=NOW))
         seen: dict = {}

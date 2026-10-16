@@ -57,10 +57,37 @@
       view: "text", cardDate: "", cardStyle: "",
     };
 
-    /* ---- 卡片预览（第 16 步）------------------------------------------------
+    /* ---- 卡片预览（第 16 步；第 18 步补"按内容自适应高度 + PC 端缩小"）--------
        后端把模板**渲成 HTML** 再给我们（``core/diary/card.py`` 与 /看日记 出图
        共用同一份），所以这里拿到的就是真卡片——不是"大概长这样"的近似图。
-       用 iframe + srcdoc 装：卡片自带 body 背景与整页尺寸，塞进当前页会串味。 */
+       用 iframe + srcdoc 装：卡片自带 body 背景与整页尺寸，塞进当前页会串味。
+
+       高度由 ``--card-h`` 驱动、缩放交给 ``.np-cardstage`` 的媒体查询：卡片模板里
+       ``.sheet`` 是 ``min-height: calc(100vh - 92px)``，所以「iframe 多高、正文就
+       多高」正好互相咬住，写一次就停，不会越滚越长。 */
+    function fitCardHeight(stage, frame) {
+      try {
+        var doc = frame.contentDocument;
+        if (!doc) return;
+        var h = Math.max(
+          (doc.documentElement && doc.documentElement.scrollHeight) || 0,
+          (doc.body && doc.body.scrollHeight) || 0
+        );
+        if (h > 0) stage.style.setProperty("--card-h", h + "px");
+      } catch (error) { /* 拿不到就沿用 CSS 里的兜底高度，不白屏 */ }
+    }
+
+    /* 窗口尺寸变了要重算一次：舞台宽度变了，卡片里换行的位置跟着变，高度也会变。
+       去抖 150ms——拖窗口时不必每帧都去读 iframe 文档。 */
+    function refitCard() {
+      if (cardStage && cardFrame) fitCardHeight(cardStage, cardFrame);
+    }
+
+    function onWindowResize() {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(refitCard, 150);
+    }
+
     async function loadCard(book) {
       var UI = ctx.UI;
       if (cardSlot) cardSlot.remove();
@@ -79,65 +106,152 @@
         }
         state.cardDate = data.date || "";
         state.cardStyle = data.style || "";
-        box.appendChild(cardPager(UI, data));
-        var frame = UI.h("iframe", { class: "np-cardframe", title: "日记卡预览" });
+
+        /* 左卡片 + 右按钮栏，同一个 flex 行里并排 */
+        var stage = UI.h("div", { class: "np-cardstage" });
+        var scale = UI.h("div", { class: "np-cardscale" });
+        var frame = UI.h("iframe", { class: "np-cardframe", title: "日记本预览" });
         frame.setAttribute("sandbox", "allow-same-origin");
+        frame.addEventListener("load", function () { fitCardHeight(stage, frame); });
         frame.srcdoc = data.html || "";
-        box.appendChild(frame);
-        box.appendChild(cardStyleBar(UI, data));
+        scale.appendChild(frame);
+        stage.appendChild(scale);
+        box.appendChild(UI.h("div", { class: "np-notebook" }, [stage, cardBar(UI, data)]));
+
+        cardStage = stage;
+        cardFrame = frame;
+        if (!resizeBound) {
+          resizeBound = true;
+          window.addEventListener("resize", onWindowResize);
+        }
       } catch (error) {
         UI.clear(box);
         box.appendChild(UI.errorBox(String(error && error.message ? error.message : error)));
       }
     }
 
-    /* 翻页导航：日记是按天分的，一天就是"一页"。 */
-    function cardPager(UI, data) {
+    /* ---- 日记本页：左卡片 + 右侧竖排按钮栏 --------------------------------------
+   左边是卡片（收窄后更靠边），右边一整条竖排的按钮栏，按钮从上到下依次是：
+   上一页 / 下一页（并排一行） → 导出为图片 → 「风格」标题 → 六款版式 → 保存配置。
+   保存配置单独落在**最底下**，它是这一栏里唯一会写配置的控件，压轴放最不容易误按。 */
+    function cardBar(UI, data) {
       var days = data.days || [];
       var index = Number(data.index);
       var total = days.length;
       var at = index >= 0 ? index : 0;
-      return UI.h("div", { class: "np-cardpager" }, [
-        UI.h("button", {
-          class: "btn btn-sm", type: "button", text: "‹ 上一页",
-          disabled: at <= 0,
-          title: at > 0 ? days[at - 1] : "已经是最新的一页",
-          onclick: function () {
-            if (at <= 0) return;
-            state.cardDate = days[at - 1];
-            loadCard(state.book);
-          },
-        }),
-        UI.h("span", { class: "np-cardno", text: "第 " + (at + 1) + " / " + total + " 页" }),
-        UI.h("button", {
-          class: "btn btn-sm", type: "button", text: "下一页 ›",
-          disabled: at >= total - 1,
-          title: at < total - 1 ? days[at + 1] : "已经是最早的一页",
-          onclick: function () {
-            if (at >= total - 1) return;
-            state.cardDate = days[at + 1];
-            loadCard(state.book);
-          },
-        }),
-        UI.h("span", { class: "np-carddate", text: data.date || "" }),
+      var prevDay = at > 0 ? days[at - 1] : "";
+      var nextDay = at < total - 1 ? days[at + 1] : "";
+
+      var exportBtn = UI.h("button", {
+        class: "btn np-export", type: "button", text: "导出为图片",
+        title: "把这页日记本存成 PNG（和聊天里 /看日记 出的是同一张图）",
+        onclick: function () { exportCard(exportBtn); },
+      });
+
+      return UI.h("aside", { class: "np-rail" }, [
+        UI.h("div", { class: "np-rail-row" }, [
+          UI.h("button", {
+            class: "btn", type: "button", text: "‹ 上一页",
+            disabled: at <= 0, title: prevDay ? "翻到 " + prevDay : "已经是最新的一页",
+            onclick: function () { if (!prevDay) return; state.cardDate = prevDay; loadCard(state.book); },
+          }),
+          UI.h("button", {
+            class: "btn", type: "button", text: "下一页 ›",
+            disabled: at >= total - 1, title: nextDay ? "翻到 " + nextDay : "已经是最早的一页",
+            onclick: function () { if (!nextDay) return; state.cardDate = nextDay; loadCard(state.book); },
+          }),
+        ]),
+        exportBtn,
+        UI.h("div", { class: "np-rail-label", text: "风格" }),
+        cardStyleRail(UI, data),
+        saveBtnFor(UI, data),
       ]);
     }
 
-    /* 换款式只改**预览**，不落盘——真要生效去设置页选或敲 /日记款式，
-       免得在这儿随手一点把她的卡片样式改了又不记得改回来。 */
-    function cardStyleBar(UI, data) {
+    /* 挑款式只改**预览**——想比个样子就挨个点，不用先想好再改配置。
+       满意了按最下面的「保存配置」才落盘（``saveCardStyle``）。 */
+    function cardStyleRail(UI, data) {
       var styles = data.styles || [];
+      var labels = data.style_labels || {};
       var current = data.style || "";
-      var bar = UI.h("div", { class: "row-actions np-cardstyles" });
+      var rail = UI.h("div", { class: "np-rail-styles" });
       styles.forEach(function (style) {
-        bar.appendChild(UI.h("button", {
-          class: "btn btn-sm" + (style === current ? " is-on" : ""),
-          type: "button", text: style,
+        rail.appendChild(UI.h("button", {
+          class: "btn" + (style === current ? " is-on" : ""),
+          type: "button",
+          text: labels[style] || style,
+          title: "先预览这一款：" + style,
           onclick: function () { state.cardStyle = style; loadCard(state.book); },
         }));
       });
-      bar.appendChild(UI.h("span", { class: "np-locked", text: "预览用，不会改配置" }));
-      return bar;
+      return rail;
+    }
+
+    function saveBtnFor(UI, data) {
+      var labels = data.style_labels || {};
+      var btn = UI.h("button", {
+        class: "btn np-save", type: "button", text: "保存配置",
+        title: "把现在这一款设为默认（私聊里 /看日记 也用它）",
+        onclick: function () { saveCardStyle(btn, data.style || "", labels); },
+      });
+      return UI.h("div", { class: "np-rail-save" }, [
+        btn,
+        UI.h("span", { class: "np-hint", text: "先挑款式看看，满意了再保存" }),
+      ]);
+    }
+
+    /* 导出为图片：**后端出图**（``diary/card-image``），拿回 data URL 让浏览器下载。
+       不在前端拿 iframe 自己画：浏览器没有"把 DOM 画成 PNG"的原生 API，要么引第三方
+       库（插件是零依赖的），要么只能截图糊弄——那样导出来的和 QQ 上那张就不是同一张图了。 */
+    async function exportCard(btn) {
+      if (btn.disabled) return;
+      var oldText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "导出中…";
+      try {
+        var data = await ctx.apiGet("diaryCardImage", {
+          book: state.book, date: state.cardDate, style: state.cardStyle, who: ctx.who(),
+        });
+        if (data && data.empty) { ctx.toast("这一页没有内容，导不出图", true); return; }
+        if (!data || !data.data_url) throw new Error("后端没有回图片数据");
+        var link = document.createElement("a");
+        link.href = data.data_url;
+        link.download = String(data.filename || "日记本.png");
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        ctx.toast("已导出 " + (data.filename || "图片"));
+      } catch (error) {
+        ctx.toast(String((error && error.message) || error), true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = oldText;
+      }
+    }
+
+    /* 保存配置：把当前预览的这一款落成默认款式。
+       走 ``settings`` 的 POST（校验 → 备份 → 落盘 → 热生效），所以面板和私聊
+       ``/看日记`` 看到的是同一份配置，不会"面板改了聊天里没变"。
+       body 只提交这一项 —— ``{changes: {"diary.card_style": …}}``；把整份配置原样发一遍
+       是 settings.js 那条明确禁止的旧做法（后端 applied 会变成字段总数，用户看不出自己改了几项）。 */
+    async function saveCardStyle(btn, style, labels) {
+      if (btn.disabled) return;
+      var name = (labels && labels[style]) || style;
+      btn.disabled = true;
+      btn.textContent = "保存中…";
+      try {
+        var result = await ctx.apiPost("settings", { changes: { "diary.card_style": style } });
+        if (!result || result.ok === false) {
+          ctx.toast("没保存：" + String((result && result.error) || "未知原因"), true);
+          return;
+        }
+        ctx.toast("已把「" + name + "」设为默认款式（/看日记 也用它）");
+      } catch (error) {
+        ctx.toast(String((error && error.message) || error), true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "保存配置";
+      }
     }
 
     function slot(book) {
@@ -485,6 +599,12 @@
        看不出来，但日历点日期 / 翻页会连点，一天下来叠出一堆旧面板。 */
     var contentSlot = null;
     var cardSlot = null;
+    /* 卡片预览的舞台与 iframe 本体，外加 resize 的绑定状态（第 18 步）。
+       换 tab 时 unmount 会把这几个清掉并摘监听，免得切一次挂一个。 */
+    var cardStage = null;
+    var cardFrame = null;
+    var resizeBound = false;
+    var resizeTimer = null;
     async function loadContent(book) {
       var UI = ctx.UI;
       var st = slot(book);
@@ -586,6 +706,8 @@
       contentSlot = null;      /* 整屏重画后旧引用已失效 */
       trashSlot = null;
       cardSlot = null;
+      cardStage = null;        /* 同样失效：留着会让 resize 去量一个已卸载的 iframe */
+      cardFrame = null;
       var books = state.books || [];
       books.forEach(function (info) {
         var st = slot(info.book);
@@ -642,7 +764,7 @@
             /* 正文 / 卡片 两个看法（第 16 步）。卡片看的是**真渲染**出来的那张，
                翻页就是按天翻——省得为了确认一句样式好不好看去 QQ 上戳一次。 */
             UI.h("div", { class: "seg np-view" }, [
-              ["text", "正文"], ["card", "卡片"],
+              ["text", "正文"], ["card", "日记本"],
             ].map(function (pair) {
               return UI.h("button", {
                 class: "seg-btn" + (state.view === pair[0] ? " is-on" : ""),
@@ -674,7 +796,17 @@
     return {
       mount: function (target) { holder = target; },
       refresh: refresh,
-      unmount: function () { holder = null; trashSlot = null; cardSlot = null; },
+      unmount: function () {
+        holder = null; trashSlot = null; cardSlot = null;
+        cardStage = null; cardFrame = null;
+        /* 摘掉 resize 监听：匿名函数挂上去就摘不掉，所以绑的是 onWindowResize。
+           不摘的话每切一次 tab 多挂一个，切几十次就几十个回调。 */
+        if (resizeBound) {
+          resizeBound = false;
+          window.removeEventListener("resize", onWindowResize);
+        }
+        if (resizeTimer) { clearTimeout(resizeTimer); resizeTimer = null; }
+      },
     };
   };
 })(window);
