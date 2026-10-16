@@ -164,6 +164,10 @@ astrbot_plugin_denia_diary/
 
 **心情暗号四道闸**（破免打扰，稀有性由四道闸保证）：① 只发 `love_peers` 名单内的**私聊**（没记录过 contact = 不知道往哪发，不发）；② 当下 valence 落最低档——判**衰减后**坐标（`snapshot`），阈值常量 **-0.7（待调）**：自报 -2 后约 4.5h、-1 后约 1.5h 内判中，语义是"她**现在**还在难受"；从没给过坐标的期间不触发；③ 独立冷却 3 天；④ 每天最多一次。
 
+**暗号总开关 `proactive.signal_enabled`（第 20 步补）**：之前这件事**关不掉**——唯一的"变相关掉"办法是把自己从 `love_peers` 里摘掉，而那会连带让恋爱日记对这份名单里的其他人也不可见（第 17 步的可见性规则）。为一个主动消息的观感问题去动日记可见性，代价完全不成比例，所以补了独立开关。
+
+关掉的效果是**一个候选都不产**（`Proactive._signal_candidate` 开头就 return），不是"产了再拦"。理由：留痕会让"为什么今天她一句都没说"这类排查看见一个没生效的开关，用户会以为配置没存上。既然关了，`signal_date` / `signal_last_at` 两个冷却键也不会攒——攒了就等于"欠着一条暗号"，哪天再打开会立刻发一条。
+
 **暗号穿透配额**：`_commit` 里 `slot == "signal"` **跳过配额复核**——防打扰的闸门不该挡住求助信号；稀有性已由四道闸保证。`today_count` 照常自增（暗号也是一条主动消息，计数不失真），所以私聊配额 2 时暗号最多 1 条 + 常规 1 条。
 
 **发送记录（`proactive-log.jsonl`）**：确认发出后追加一行 `{ts, umo, slot, fragment}`（ts 是确认时刻；slot / fragment 取决策暂存，重启丢失则 slot 回落 `last_slot`、fragment 记空串——"她什么时候找过谁"不丢）；append-only，保留最近 **200 行或 90 天**（裁剪时整文件重写一次）。它是面板「主动消息记录」的唯一数据源。
@@ -836,6 +840,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `proactive.daily_limit_group` | `1` | 群聊每日上限（0-10，0＝群里绝不主动） |
 | `proactive.min_interval_minutes` | `120` | 同会话最小间隔（0-1440） |
 | `proactive.signal_cooldown_days` | `3` | 暗号独立冷却（1-30） |
+| `proactive.signal_enabled` | `true` | 心情暗号总开关（第 20 步）。**关掉就一个候选都不产**，也不是"产了再拦"——连日志与冷却都不留痕，免得用户以为开关没生效 |
 | `proactive.pending_window_hours` | `6` | 待回窗口（1-48），喂 `trace_line` |
 | `proactive.quiet_days` | `3` | 久未联系阈值（1-30，待调） |
 | `proactive.signal_char` | `。` | 暗号字符（1~4 个字符） |

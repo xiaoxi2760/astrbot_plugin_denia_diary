@@ -302,6 +302,11 @@ class Proactive:
     def _signal_candidate(
         self, doc: dict[str, Any], cfg: dict[str, Any], moment: datetime
     ) -> triggers.Candidate | None:
+        # 总开关（第 20 步）：关掉就是**一个候选都不产**，不是"产了再拦"。
+        # 放在候选层而不是发送层，是为了连"为什么今天她一句都没说"这类排查都不会看见它——
+        # 一个关掉了的开关不该在日志里留痕，否则用户会以为暗号还在判定只是没赶上。
+        if not bool(cfg.get("signal_enabled", True)):
+            return None
         peers = tuple(self.settings.love_peers or ())
         if not peers:
             return None

@@ -174,6 +174,10 @@ MAX_PANEL_TEXT = 60
 # 频率与冷却默认值 = 第 4 步任务书 §2 的用户定稿值（§5 工期纪律：全部待调）。
 # 暗号触发阈值（当下 valence ≤ -0.7，判衰减后坐标）与各触发器的时段窗口是代码
 # 常量，不进配置——前者要浮点（面板 int 项装不下），后者属于"判定阈值"不是"频率"。
+#
+# ⚠️ `signal_enabled` 是**唯一能给暗号踩刹车的开关**（第 20 步加）。在它之前这件事没法关：
+# 唯一"变相关掉"的办法是把自己从 `love_peers` 里摘掉，而那会连带把恋爱日记也对这份名单
+# 里的其他人不可见——为了一个主动消息的观感问题去动可见性，代价完全不成比例。
 _PROACTIVE_DEFAULTS: dict[str, Any] = {
     "patrol_minutes": 15,  # 巡检间隔（cron 表达式分钟步长，1-59）
     "daily_limit_private": 2,  # 私聊每日上限
@@ -182,6 +186,7 @@ _PROACTIVE_DEFAULTS: dict[str, Any] = {
     "signal_cooldown_days": 3,  # 暗号独立冷却
     "pending_window_hours": 6,  # 待回窗口（喂 trace_line）
     "quiet_days": 3,  # 久未联系阈值（天，待调）
+    "signal_enabled": True,  # 心情暗号总开关（第 20 步）
     "signal_char": "。",  # 暗号字符（1~4 个字符）
 }
 
@@ -513,7 +518,13 @@ def _as_panel(value: Any, warnings: list[str]) -> dict[str, str]:
 
 
 def _as_proactive(value: Any, warnings: list[str]) -> dict[str, Any]:
-    """主动消息组：整数项按 ``INT_LIMITS`` 夹紧，``signal_char`` 是 1~4 个字符的短串。"""
+    """主动消息组：整数项按 ``INT_LIMITS`` 夹紧，``signal_char`` 是 1~4 个字符的短串，
+    ``signal_enabled`` 是布尔总开关。
+
+    ⚠️ **bool 分支必须排在 int 分支前面**：Python 里 ``isinstance(True, int)`` 为真，
+    布尔默认值落进 ``_as_int`` 就成了整数项——面板存 ``true`` 能过，存 ``"开"`` 的告警
+    文案也会错成"不是整数"，报错信息会把人引到错误的字段类型上。
+    """
     if value is not None and not isinstance(value, Mapping):
         warnings.append("proactive 不是对象，全部使用默认值")
     out: dict[str, Any] = {}
@@ -521,6 +532,8 @@ def _as_proactive(value: Any, warnings: list[str]) -> dict[str, Any]:
         raw = value.get(key) if isinstance(value, Mapping) else None
         if raw is None:
             out[key] = default
+        elif isinstance(default, bool):
+            out[key] = _as_bool(raw, default, f"proactive.{key}", warnings)
         elif isinstance(default, str):
             if not isinstance(raw, str):
                 warnings.append(f"proactive.{key} 不是字符串（{raw!r}），使用默认")

@@ -255,10 +255,16 @@
         "description": "久未联系阈值（天）",
         "hint": "1-30"
       },
+      "signal_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "心情暗号",
+        "hint": "开=她撑不住时会给你发一个暗号字符（穿透免打扰与配额）；关=完全不发这条信号。其余设置（暗号字符 / 冷却天数）在关着时无意义"
+      },
       "signal_char": {
         "type": "string",
         "default": "。",
-        "description": "心情暗号字符",
+        "description": "暗号字符",
         "hint": "1~4 个字符；整条消息只有它，不带解释。别用聊天里常见的字符"
       }
     }

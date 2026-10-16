@@ -683,6 +683,70 @@ class PatrolTest(TriggerCase):
         self.assertEqual(decision["slot"], "signal")
         self.assertEqual(decision["char"], "。")
 
+    # ---- 暗号总开关（第 20 步）------------------------------------------------
+
+    def test_signal_enabled_by_default(self) -> None:
+        """默认必须是开的——这是原设计的行为，不该因为补了开关就悄悄变味。"""
+        from core import settings as settings_mod
+
+        self.assertIs(settings_mod.load_settings({}).proactive["signal_enabled"], True)
+
+    def test_switch_off_produces_no_signal(self) -> None:
+        """关掉 → 连候选都不产（不是产了再拦），其他触发器照常。"""
+        stack = self.make({"love_peers": ["10001"], "proactive": {"signal_enabled": False}})
+        run(stack.notebook.note_add(self.peer(), kind="promise", text="周三考试", due_at="2026-10-04", now=SUN))
+        self.signal_ready(stack, now=SUN)
+        decision = run(stack.proactive.patrol(now=SUN))
+        assert decision is not None, "暗号关了也得有别的可说（到期约定），不能整个巡检空转"
+        self.assertNotEqual(decision["slot"], "signal")
+
+    def test_switch_off_with_nothing_else_returns_none(self) -> None:
+        """关掉且没有别的候选 → 什么都不发，而不是回落到别的暗号形态。"""
+        stack = self.make({"love_peers": ["10001"], "proactive": {"signal_enabled": False}})
+        self.signal_ready(stack, now=SUN)
+        self.assertIsNone(run(stack.proactive.patrol(now=SUN)))
+
+    def test_switch_off_writes_nothing_to_the_signal_cooldown(self) -> None:
+        """关着的时候不该攒 `signal_date` / `signal_last_at`——攒了就等于"欠着一条暗号"，
+        哪天再打开会立刻发一条，用户会以为开关没生效。"""
+        stack = self.make({"love_peers": ["10001"], "proactive": {"signal_enabled": False}})
+        self.signal_ready(stack, now=SUN)
+        run(stack.proactive.patrol(now=SUN))
+        run(stack.proactive.confirm_sent("aiocqhttp:FriendMessage:10001", now=SUN))
+        entry = read_proactive(stack)["sessions"].get("aiocqhttp:FriendMessage:10001", {})
+        self.assertNotIn("signal_date", entry)
+        self.assertNotIn("signal_last_at", entry)
+
+    def test_switch_off_never_reaches_the_log(self) -> None:
+        """主动消息记录里不该出现暗号行——关了就是没有这条信号。"""
+        stack = self.make({"love_peers": ["10001"], "proactive": {"signal_enabled": False}})
+        run(stack.notebook.note_add(self.peer(), kind="promise", text="周三考试", due_at="2026-10-04", now=SUN))
+        self.signal_ready(stack, now=SUN)
+        run(stack.proactive.patrol(now=SUN))
+        run(stack.proactive.confirm_sent("aiocqhttp:FriendMessage:10001", now=SUN))
+        slots = [line["slot"] for line in stack.proactive.store.read_log_lines()]
+        self.assertNotIn("signal", slots)
+
+    def test_switch_on_still_sends_a_configured_character(self) -> None:
+        """开着时字符照旧可改——开关管"发不发"，不管"发什么"。"""
+        stack = self.make({
+            "love_peers": ["10001"],
+            "proactive": {"signal_enabled": True, "signal_char": "…"},
+        })
+        self.signal_ready(stack, now=SUN)
+        decision = run(stack.proactive.patrol(now=SUN))
+        assert decision is not None
+        self.assertEqual(decision["kind"], "direct")
+        self.assertEqual(decision["char"], "…")
+
+    def test_bad_switch_value_keeps_the_default_on(self) -> None:
+        """写了看不懂的值 → 回落**开**（默认），并记一条 warning。"""
+        from core import settings as settings_mod
+
+        result = settings_mod.load_settings({"proactive": {"signal_enabled": "开"}})
+        self.assertIs(result.proactive["signal_enabled"], True)
+        self.assertTrue(any("signal_enabled" in w for w in result.warnings))
+
     def test_two_phase_quota_deducted_without_last_sent_at(self) -> None:
         stack = self.make()
         run(stack.notebook.note_add(self.peer(), kind="promise", text="周三考试", due_at="2026-10-04", now=SUN))
