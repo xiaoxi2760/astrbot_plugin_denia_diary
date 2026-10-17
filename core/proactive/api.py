@@ -383,6 +383,7 @@ class Proactive:
                 state=self.state,
                 affinity=self.affinity,
                 now=now,
+                strong_text=candidate.fragment,
             )
         label = SLOT_LABELS.get(candidate.slot, candidate.slot)
         at_rule = "" if candidate.session.is_private else "（群聊：开口必须先 @ TA，别裸发）"

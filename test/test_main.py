@@ -14,6 +14,7 @@ import re
 import sys
 import types
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -98,6 +99,9 @@ def _install_stubs(default_data_dir: Path) -> dict:
 
         def on_using_llm_tool(self, **kwargs):
             return self._record("on_using_llm_tool", None, kwargs)
+
+        def on_llm_tool_respond(self, **kwargs):
+            return self._record("on_llm_tool_respond", None, kwargs)
 
         def command(self, name=None, **kwargs):
             return self._record("command", name, kwargs)
@@ -290,6 +294,10 @@ class _FakeEvent:
     def get_extra(self, key: str, default=None):
         return self._extras.get(key, default)
 
+    def set_extra(self, key: str, value) -> None:
+        # 真身是 AstrMessageEvent.set_extra(key, value) → self._extras[key] = value
+        self._extras[key] = value
+
     def get_group_id(self) -> str:
         return self._group_id
 
@@ -298,6 +306,37 @@ class _FakeEvent:
 
     def get_sender_name(self) -> str:
         return self.message_obj.sender.nickname
+
+
+SENT_TOOL_TEXT = "Message sent to session aiocqhttp:FriendMessage:10001"
+"""宿主 ``send_message_to_user`` 成功时真正返回的字符串。
+
+``astrbot/core/tools/message_tools.py``：``return f"Message sent to session {target_session}"``。
+"""
+
+
+def _tool_result(text: str):
+    """``on_llm_tool_respond`` 收到的**结果对象**的忠实替身。
+
+    真身形状（宿主 ``astr_agent_tool_exec.py`` 的 ``_execute_local``）：``call()`` 的字符串
+    返回值被包成 ``mcp.types.CallToolResult(content=[mcp.types.TextContent(type="text", text=...)])``。
+    这里照着建同形对象——**判定必须真的读到成功文案**，不许拿裸字符串 / None / ``{}``
+    当"成功"糊过去（"读不懂的结果不算成功"另有专门的用例）。
+    """
+
+    return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], isError=False)
+
+
+def _sent_result(text: str = SENT_TOOL_TEXT):
+    """成功结果（宿主返回 ``Message sent to session ...``）。"""
+    return _tool_result(text)
+
+
+def _failed_result(
+    text: str = "error: failed to find platform for session aiocqhttp:FriendMessage:10001.",
+):
+    """失败结果（平台没找到 → ``sent`` 为假 → 宿主返回 ``error: ...``）。"""
+    return _tool_result(text)
 
 
 class _FakeCronManager:
@@ -380,7 +419,9 @@ class RegistrationTest(PluginCase):
         self.assertEqual(len(hooks), 1, "只允许一个提示挂载点")
         self.assertEqual(hooks[0][3].get("priority"), self.module.PROMPT_PRIORITY)
         confirms = [h for h in self.registry["hooks"] if h[0] == "on_using_llm_tool"]
-        self.assertEqual(len(confirms), 1, "只允许一个主动消息确认点")
+        self.assertEqual(len(confirms), 1, "只允许一个发送前改造钩子")
+        results = [h for h in self.registry["hooks"] if h[0] == "on_llm_tool_respond"]
+        self.assertEqual(len(results), 1, "只允许一个发送后确认钩子")
 
     def test_tool_docstrings_declare_typed_args(self) -> None:
         """AstrBot 在注册期用 docstring_parser 解析 Args，缺类型或类型不支持会直接报错。"""
@@ -908,8 +949,16 @@ class SpeechWiringTest(PluginCase):
         return SimpleNamespace(get_using_tts_provider_async=getter)
 
     async def _run_hook(self, plugin, event, tool_args) -> None:
+        """发送前改造（on_using_llm_tool）：清洗 + 语音就地改 tool_args。"""
         tool = SimpleNamespace(name="send_message_to_user")
         await plugin.note_proactive_sent(event, tool, tool_args)
+
+    async def _run_confirm(self, plugin, event, tool_args, result=None) -> None:
+        """发送后确认（on_llm_tool_respond）：结果说送达了才写轨迹。"""
+        tool = SimpleNamespace(name="send_message_to_user")
+        await plugin.confirm_proactive_sent(
+            event, tool, tool_args, _sent_result() if result is None else result
+        )
 
     def _proactive_event(self) -> "_FakeEvent":
         return _FakeEvent(extras={"cron_job": {"slot": "morning"}})
@@ -922,9 +971,13 @@ class SpeechWiringTest(PluginCase):
             umo = "aiocqhttp:FriendMessage:10001"
             plugin.proactive._pending_speak[umo] = True  # 巡检决策暂存（_decide_speak 落点）
             tool_args = {"messages": [{"type": "plain", "text": "早呀，今天也元气满满"}]}
-            await self._run_hook(plugin, self._proactive_event(), tool_args)
+            event = self._proactive_event()
+            await self._run_hook(plugin, event, tool_args)
+            messages = tool_args["messages"]
+            # 宿主真的把这条语音送出去了 → 确认点这时才写 last_sent_at
+            await self._run_confirm(plugin, event, tool_args)
             doc = json.loads((plugin.layout.proactive).read_text(encoding="utf-8"))
-            return tool_args["messages"], doc
+            return messages, doc
 
         messages, doc = asyncio.run(scenario())
         self.assertEqual(
@@ -1192,6 +1245,63 @@ class ScopeGateTest(PluginCase):
         self.assertIn("记好了", asyncio.run(plugin.note_add(self.group_event(), kind="fact", text="爱吃香菜")))
 
 
+class SendResultContractTest(PluginCase):
+    """``send_result_delivered``：宿主 ``on_llm_tool_respond`` 结果契约的判定（纯函数）。
+
+    只认**正向成功证据**（宿主 ``message_tools.py`` 的 ``"Message sent to session ..."``）；
+    "没报错"不算成功——宿主 ``_execute_local`` 包出来的 ``CallToolResult.isError`` 在失败
+    时也是默认 ``False``。
+    """
+
+    def test_host_success_result_is_delivered(self) -> None:
+        self.assertTrue(self.module.send_result_delivered(_sent_result()))
+
+    def test_host_failure_result_is_not_delivered(self) -> None:
+        self.assertFalse(self.module.send_result_delivered(_failed_result()))
+        self.assertFalse(
+            self.module.send_result_delivered(
+                _tool_result("error: messages parameter is empty or invalid.")
+            )
+        )
+
+    def test_is_error_flag_rejects_even_with_success_text(self) -> None:
+        result = _sent_result()
+        result.isError = True
+        self.assertFalse(self.module.send_result_delivered(result))
+
+    def test_none_and_unknown_shapes_are_not_delivered(self) -> None:
+        for value in (
+            None,
+            {},
+            [],
+            SimpleNamespace(),
+            SimpleNamespace(content=None),
+            SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")]),
+            SimpleNamespace(content=[SimpleNamespace(type="text", text="")]),
+        ):
+            self.assertFalse(
+                self.module.send_result_delivered(value), f"不该算送达：{value!r}"
+            )
+
+    def test_bare_success_string_is_tolerated(self) -> None:
+        """旧形态兜底：宿主若把 ``call()`` 的返回值原样交来（没包 ``CallToolResult``），
+        同一个成功标记照样认——但这**不是**宽松：错文案 / 失败文案依然不认。"""
+        self.assertTrue(self.module.send_result_delivered(SENT_TOOL_TEXT))
+        self.assertFalse(self.module.send_result_delivered("error: nope"))
+
+    def test_mark_matches_host_source(self) -> None:
+        """成功标记必须与宿主源码里的文案一字不差（改了这里就等于换了契约）。"""
+        host = (
+            Path(__file__).resolve().parents[2]
+            / "_race" / "a" / "astrbot" / "AstrBot-master"
+            / "astrbot" / "core" / "tools" / "message_tools.py"
+        )
+        if not host.exists():
+            self.skipTest("宿主源码快照不在（离线跑测试的正常情况）")
+        text = host.read_text(encoding="utf-8")
+        self.assertIn(self.module.SENT_TOOL_OK_MARK, text)
+
+
 class ProactiveCronTest(PluginCase):
     """第 4 步：巡检 job 重建（§0#2）/ 唤醒派发 / 确认点 / 暗号直发。"""
 
@@ -1295,37 +1405,185 @@ class ProactiveCronTest(PluginCase):
         asyncio.run(plugin._proactive_patrol())
         self.assertEqual(manager.active, [])
 
-    def test_confirmation_hook_writes_last_sent_at(self) -> None:
-        async def scenario() -> dict:
+    # ---- 确认点：宿主结果说送达了才写轨迹（两段式第二步） -------------------------
+
+    CONFIRM_UMO = "aiocqhttp:FriendMessage:10001"
+
+    def _proactive_event(self, umo: str = "aiocqhttp:FriendMessage:10001") -> "_FakeEvent":
+        """主动轮事件：宿主只在 cron 唤醒的事件上挂 ``cron_job`` extra。"""
+        return _FakeEvent(umo, extras={"cron_job": {"id": "j1"}})
+
+    async def _pre_send(self, plugin, event, tool_args: dict | None = None) -> None:
+        """发送前改造钩子（``on_using_llm_tool``）。"""
+        tool = SimpleNamespace(name="send_message_to_user")
+        await plugin.note_proactive_sent(event, tool, {} if tool_args is None else tool_args)
+
+    async def _respond(self, plugin, event, result, tool_name: str = "send_message_to_user") -> None:
+        """发送后确认钩子（``on_llm_tool_respond``）。"""
+        tool = SimpleNamespace(name=tool_name)
+        await plugin.confirm_proactive_sent(event, tool, {}, result)
+
+    def _seed_decision(self, plugin, slot: str = "promise", fragment: str = "周三考试") -> None:
+        """巡检决策暂存（两段式第一步 ``_commit`` 的落点）。"""
+        plugin.proactive._pending_log[self.CONFIRM_UMO] = {"slot": slot, "fragment": fragment}
+        plugin.proactive._pending_speak[self.CONFIRM_UMO] = True
+
+    def _entry(self, plugin) -> dict:
+        if not plugin.layout.proactive.exists():
+            return {}
+        doc = json.loads(plugin.layout.proactive.read_text(encoding="utf-8"))
+        return (doc.get("sessions") or {}).get(self.CONFIRM_UMO) or {}
+
+    def test_pre_send_hook_writes_nothing(self) -> None:
+        """**本步回归（这条就是那个 bug）**：``on_using_llm_tool`` 跑在发送**之前**，
+        结果还不存在——``last_sent_at`` / 发送记录一个字都不许写。"""
+        async def scenario() -> tuple[bool, bool]:
             plugin = self.make_plugin()
-            tool = SimpleNamespace(name="send_message_to_user")
-            event = _FakeEvent(extras={"cron_job": {"id": "j1"}})
-            await plugin.note_proactive_sent(event, tool, {})
-            return json.loads(plugin.layout.proactive.read_text(encoding="utf-8"))
+            self._seed_decision(plugin)
+            await self._pre_send(plugin, self._proactive_event())
+            return plugin.layout.proactive.exists(), plugin.layout.proactive_log.exists()
 
-        doc = asyncio.run(scenario())
-        entry = doc["sessions"]["aiocqhttp:FriendMessage:10001"]
-        self.assertIn("last_sent_at", entry)
+        proactive_exists, log_exists = asyncio.run(scenario())
+        self.assertFalse(proactive_exists, "发送前不许写 last_sent_at")
+        self.assertFalse(log_exists, "发送前不许追加发送记录")
 
-    def test_confirmation_ignores_passive_round(self) -> None:
-        """被动轮她回复用的也是 send_message_to_user——没带 cron_job extra 就不写。"""
-        async def scenario() -> dict:
+    def test_success_result_writes_last_sent_at_and_log(self) -> None:
+        """宿主返回成功文案 → 确认点落 ``last_sent_at`` + 发送记录（slot/fragment 取暂存）。"""
+        async def scenario() -> tuple[dict, list]:
             plugin = self.make_plugin()
-            tool = SimpleNamespace(name="send_message_to_user")
-            await plugin.note_proactive_sent(_FakeEvent(), tool, {})
-            return plugin.layout.proactive.exists()
+            plugin._now = lambda: NOW + timedelta(minutes=5)
+            self._seed_decision(plugin)
+            await self._respond(plugin, self._proactive_event(), _sent_result())
+            return self._entry(plugin), plugin.proactive.store.read_log_lines()
 
-        self.assertFalse(asyncio.run(scenario()))
+        entry, lines = asyncio.run(scenario())
+        self.assertEqual(entry["last_sent_at"], (NOW + timedelta(minutes=5)).isoformat(timespec="seconds"))
+        self.assertEqual(len(lines), 1, "一次送达一条记录")
+        self.assertEqual(
+            {k: lines[0][k] for k in ("umo", "slot", "fragment")},
+            {"umo": self.CONFIRM_UMO, "slot": "promise", "fragment": "周三考试"},
+        )
 
-    def test_confirmation_ignores_other_tools(self) -> None:
-        async def scenario() -> bool:
+    def test_failed_result_writes_nothing(self) -> None:
+        """宿主返回 ``error: ...``（平台没找到）→ 不写 ``last_sent_at``、不烧冷却、不记日志。
+
+        配额在决策时已经吃了（两段式第一步），这里是**故意不回滚**：换轨迹不撒谎。
+        """
+        async def scenario() -> tuple[bool, bool]:
             plugin = self.make_plugin()
-            tool = SimpleNamespace(name="diary_write")
-            event = _FakeEvent(extras={"cron_job": {"id": "j1"}})
-            await plugin.note_proactive_sent(event, tool, {})
-            return plugin.layout.proactive.exists()
+            plugin._now = lambda: NOW
+            self._seed_decision(plugin, slot="signal", fragment="暗号字符「。」")
+            await self._respond(plugin, self._proactive_event(), _failed_result())
+            return bool(plugin.proactive.store.read().get("sessions")), plugin.layout.proactive_log.exists()
 
-        self.assertFalse(asyncio.run(scenario()))
+        proactive_exists, log_exists = asyncio.run(scenario())
+        self.assertFalse(proactive_exists, "没送达不许写 last_sent_at / 暗号冷却")
+        self.assertFalse(log_exists, "没送达不许进发送记录")
+
+    def test_failure_then_success_records_the_pending_decision(self) -> None:
+        """先失败后成功（宿主重试）：失败不消耗决策暂存，成功那次记的是**原来的 slot/fragment**。"""
+        async def scenario() -> tuple[dict, list]:
+            plugin = self.make_plugin()
+            plugin._now = lambda: NOW
+            self._seed_decision(plugin, slot="promise", fragment="周三考试")
+            event = self._proactive_event()
+            await self._respond(plugin, event, _failed_result())
+            failed_entry = self._entry(plugin)
+            await self._respond(plugin, event, _sent_result())
+            return failed_entry, plugin.proactive.store.read_log_lines()
+
+        failed_entry, lines = asyncio.run(scenario())
+        self.assertEqual(failed_entry, {}, "失败那一次什么都没写")
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["slot"], "promise")
+        self.assertEqual(lines[0]["fragment"], "周三考试")
+
+    def test_passive_round_with_success_result_writes_nothing(self) -> None:
+        """被动轮她回复用的也是 ``send_message_to_user``（结果同样成功）——没带 ``cron_job``
+        extra 就不算她"找过你"。"""
+        async def scenario() -> tuple[bool, bool]:
+            plugin = self.make_plugin()
+            self._seed_decision(plugin)
+            await self._respond(plugin, _FakeEvent(), _sent_result())
+            return plugin.layout.proactive.exists(), plugin.layout.proactive_log.exists()
+
+        proactive_exists, log_exists = asyncio.run(scenario())
+        self.assertFalse(proactive_exists)
+        self.assertFalse(log_exists)
+
+    def test_other_tool_with_success_result_writes_nothing(self) -> None:
+        """同一轮里别的工具成功，不是"她发出了主动消息"。"""
+        async def scenario() -> tuple[bool, bool]:
+            plugin = self.make_plugin()
+            self._seed_decision(plugin)
+            await self._respond(
+                plugin, self._proactive_event(), _sent_result(), tool_name="diary_write"
+            )
+            return plugin.layout.proactive.exists(), plugin.layout.proactive_log.exists()
+
+        proactive_exists, log_exists = asyncio.run(scenario())
+        self.assertFalse(proactive_exists)
+        self.assertFalse(log_exists)
+
+    def test_unreadable_result_is_not_success(self) -> None:
+        """**读不懂的结果一律不算成功**（不许拿宽松桩当成功）：``None``（工具没有返回值 /
+        走直接发送通道）、空 content、文案里没有成功标记、根本不是结果对象。"""
+        cases = [
+            None,
+            SimpleNamespace(content=[]),
+            SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")]),
+            SimpleNamespace(content=[SimpleNamespace(type="image", data="x")]),
+            SimpleNamespace(content="error: whatever"),
+            {},
+        ]
+
+        async def scenario() -> list[dict]:
+            written = []
+            for index, result in enumerate(cases):
+                plugin = self.make_plugin(data_dir=self.root / f"case{index}")
+                self._seed_decision(plugin)
+                await self._respond(plugin, self._proactive_event(), result)
+                written.append(self._entry(plugin))
+            return written
+
+        entries = asyncio.run(scenario())
+        self.assertEqual(entries, [{} for _ in cases], f"都不该写轨迹：{entries!r}")
+
+    def test_duplicate_callback_records_only_once(self) -> None:
+        """重复回调（宿主重放同一个成功结果 / 她一轮连调两次）：``last_sent_at`` 不被二次改写，
+        发送记录只加一行——记录是"她这次找过你"的记账，不是平台消息条数。"""
+        async def scenario() -> tuple[dict, list, str]:
+            plugin = self.make_plugin()
+            self._seed_decision(plugin)
+            event = self._proactive_event()
+            plugin._now = lambda: NOW
+            await self._respond(plugin, event, _sent_result())
+            first = self._entry(plugin)["last_sent_at"]
+            plugin._now = lambda: NOW + timedelta(minutes=9)  # 第二次回调时间明显不同
+            await self._respond(plugin, event, _sent_result())
+            return self._entry(plugin), plugin.proactive.store.read_log_lines(), first
+
+        entry, lines, first = asyncio.run(scenario())
+        self.assertEqual(entry["last_sent_at"], first, "重复回调不许改写 last_sent_at")
+        self.assertEqual(entry["last_sent_at"], NOW.isoformat(timespec="seconds"))
+        self.assertEqual(len(lines), 1, "重复回调不许加第二条发送记录")
+        records = sys.modules["astrbot.api"].logger.records
+        self.assertTrue(
+            any(level == "info" and "重复回调" in message for level, message in records),
+            f"重复回调要留一条可排查的日志：{records!r}",
+        )
+
+    def test_consecutive_tool_calls_in_one_turn_record_once(self) -> None:
+        """一轮里调了两次工具（两次真实发送）：仍然只记一条——一次唤醒 = 一条记录。"""
+        async def scenario() -> list:
+            plugin = self.make_plugin()
+            self._seed_decision(plugin)
+            event = self._proactive_event()
+            await self._respond(plugin, event, _sent_result())
+            await self._respond(plugin, event, _sent_result())
+            return plugin.proactive.store.read_log_lines()
+
+        self.assertEqual(len(asyncio.run(scenario())), 1)
 
     def test_signal_send_success_confirms(self) -> None:
         async def scenario() -> dict:
@@ -1348,7 +1606,7 @@ class ProactiveCronTest(PluginCase):
             StarTools = sys.modules["astrbot.api.star"].StarTools
             StarTools.send_result = False
             await plugin._send_signal("aiocqhttp:FriendMessage:10001", "。")
-            return plugin.layout.proactive.exists()
+            return bool(plugin.proactive.store.read().get("sessions"))
 
         self.assertFalse(asyncio.run(scenario()))
 
@@ -1467,7 +1725,7 @@ class DiaryCardTest(PluginCase):
         self.assertEqual(event.images, [])
 
     def test_pretty_renders_html_and_escapes_content(self) -> None:
-        plugin = self.make_plugin({"diary": {"card_engine": "remote"}})
+        plugin = self.make_plugin({"diary": {"card_engine": "remote", "card_allow_remote": True}})
         asyncio.run(plugin.diary.write_async(
             private_session("10001"), text="正文 <b>与 & 符号</b>", mood="开心", now=NOW))
         captured: dict = {}
@@ -1493,7 +1751,7 @@ class DiaryCardTest(PluginCase):
         以前只要 ``html_render`` 挂了就降级；现在 PIL 是保底，那台机器装了 Pillow 就会把图
         接住。所以"验降级"必须**三个都弄挂**，否则测到的根本不是降级，是 PIL 正常工作。
         """
-        plugin = self.make_plugin()
+        plugin = self.make_plugin({"diary": {"card_allow_remote": True}})
         asyncio.run(plugin.diary.write_async(
             private_session("10001"), text="降级也要出图", now=NOW))
 
@@ -1584,7 +1842,7 @@ class DiaryCardTest(PluginCase):
         真浏览器/真 Pillow，``fake_render`` 永远不被调用——测试就变成"看这台机器装了什么"。
         钉死 remote 才是"验那条我自己写的分支"。
         """
-        merged = {"diary": {"card_engine": "remote", **(config or {}).get("diary", {})}}
+        merged = {"diary": {"card_engine": "remote", "card_allow_remote": True, **(config or {}).get("diary", {})}}
         merged.update({k: v for k, v in (config or {}).items() if k != "diary"})
         plugin = self.make_plugin(merged)
         asyncio.run(plugin.diary.write_async(
@@ -1602,7 +1860,7 @@ class DiaryCardTest(PluginCase):
     def test_render_options_override_the_host_defaults(self) -> None:
         """宿主的默认是 JPEG q40——那正是"字糊成一团"的来源，必须显式覆盖。"""
         _tmpl, _data = self._render_once()
-        plugin = self.make_plugin({"diary": {"card_engine": "remote"}})
+        plugin = self.make_plugin({"diary": {"card_engine": "remote", "card_allow_remote": True}})
         asyncio.run(plugin.diary.write_async(
             private_session("10001"), text="x", now=NOW))
         seen: dict = {}

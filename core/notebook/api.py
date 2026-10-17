@@ -8,7 +8,7 @@
   "合并"没有专门工具，就是删旧（note_forget）+ 写新（note_add）；
 - 可见性（§4.2，v0.2 收紧）：
   - **事实**只在与该人的**私聊**注入——同一个群 ≠ 该人在场，群里一律不出内容；
-  - **约定**在私聊出"关于眼前这个人"的未完成全文（过期排前）；群里只出一条
+  - **约定**在私聊选取"关于眼前这个人"的未完成条目（相关 / 临期优先）；群里只出一条
     脱敏计数行（"你还有 N 件答应过的事没办完"），不带到内容；
   - **改动**（完成 / 删）按条目归属判定：``about == session.person_id()`` 才允许动，
     私聊群聊同一套——判据收口在 ``session.py`` 的 ``person_id()``；
@@ -25,6 +25,7 @@ from typing import Any
 from .. import storage
 from ..session import Session
 from .store import NotebookStore
+from .selection import ranked, render_entries
 
 DISABLED = "小本本功能已关闭"
 FULL_MESSAGE = "本子满了，先删掉或合并几条再来"
@@ -310,21 +311,26 @@ class Notebook:
 
     # ---- 注入文案（compose 经 NotebookLike 调用） ------------------------------
 
-    def promise_line(self, session: Session, *, now: datetime | None = None) -> str:
-        """约定那一段：私聊出全文（过期排前）；群聊只出脱敏计数行。"""
+    def promise_line(
+        self, session: Session, *, now: datetime | None = None,
+        query: str = "", budget: int = 140,
+    ) -> str:
+        """约定注入：只挑少量相关/临期条目；群聊仍只出脱敏计数。"""
         if not self._enabled():
             return ""
         if not session.is_private:
             count = self._open_count()
             if not count:
                 return ""
-            return f"（小本本：你还有 {count} 件答应过的事没办完。）"
+            line = f"（小本本：你还有 {count} 件答应过的事没办完。）"
+            return line if len(line) <= budget else ""
         mine = self.promises_for(session, now=now)
         if not mine:
             return ""
-        today = (now or datetime.now(self._tz())).date().isoformat()
-        lines = []
-        for item in mine:
+        moment = now or datetime.now(self._tz())
+        today = moment.date().isoformat()
+
+        def format_item(item: dict[str, Any]) -> str:
             due = str(item.get("due_at") or "")
             marker = ""
             if due:
@@ -334,16 +340,37 @@ class Notebook:
                     marker = "（今天到期）"
                 else:
                     marker = f"（{due} 前）"
-            lines.append(f"- {item.get('text') or ''}{marker}")
-        return "【小本本】你答应过的事：\n" + "\n".join(lines)
+            return f"{item.get('text') or ''}{marker}"
 
-    def fact_line(self, session: Session, *, now: datetime | None = None) -> str:
-        """事实那一段：只在与该人的私聊出；群聊一律空。"""
+        return render_entries(
+            "【小本本】你答应过的事：",
+            ranked(mine, query=query, now=moment, promises=True),
+            format_item=format_item, budget=budget,
+        )
+
+    def fact_line(
+        self, session: Session, *, now: datetime | None = None,
+        query: str = "", budget: int = 100,
+    ) -> str:
+        """事实注入：按话题和最近更新取少量条目；群聊一律空。"""
         facts = self.facts_for(session)
         if not facts:
             return ""
-        lines = [f"- {item.get('text') or ''}" for item in facts]
-        return "【小本本】关于眼前这个人，你记着：\n" + "\n".join(lines)
+        return render_entries(
+            "【小本本】关于眼前这个人，你记着：",
+            ranked(facts, query=query, now=now or datetime.now(self._tz())),
+            format_item=lambda item: str(item.get("text") or ""), budget=budget,
+        )
+
+    def prompt_lines(
+        self, session: Session, *, now: datetime | None = None, query: str = "",
+        promise_budget: int = 140, fact_budget: int = 100,
+    ) -> tuple[str, str]:
+        """有界注入能力；compose 对旧版只提供 *_line 的门面仍兼容。"""
+        return (
+            self.promise_line(session, now=now, query=query, budget=promise_budget),
+            self.fact_line(session, now=now, query=query, budget=fact_budget),
+        )
 
 
 # ---- 小工具 --------------------------------------------------------------------

@@ -13,25 +13,21 @@
     var holder = null;
     var days = 30;
 
-    function toPoints(points, field) {
+    function toPoints(points, field, layer) {
       return (points || [])
-        .filter(function (item) { return item.layer === LAYER_NOW; })
+        .filter(function (item) { return item.layer === layer; })
         .map(function (item) {
+          var value = item[field];
           return {
-            y: Number(item[field]),
+            x: item.date,
+            y: typeof value === "number" && isFinite(value) ? value : null,
             label: item.date,
             strong: (item.n || 1) > 1,
-            title: item.date + "　情绪 " + item.valence + " / 精神 " + item.arousal +
-              (item.n > 1 ? "（当天 " + item.n + " 条）" : ""),
+            title: (layer === LAYER_BASELINE ? "基调 " : "当下 ") + item.date +
+              "　情绪 " + item.valence + " / 精神 " + item.arousal +
+              (item.n > 1 ? "（当天 " + item.n + " 条，显示首条）" : "") +
+              (typeof ctx.openDiaryDate === "function" ? " · 点击查看当天日记" : ""),
           };
-        });
-    }
-
-    function toBaseline(points, field) {
-      return (points || [])
-        .filter(function (item) { return item.layer === LAYER_BASELINE; })
-        .map(function (item) {
-          return { y: Number(item[field]), label: item.date, strong: true, title: "基调 " + item.date };
         });
     }
 
@@ -63,24 +59,37 @@
       if (history && history.error) {
         holder.appendChild(UI.errorBox("情绪历史：" + history.error));
       } else if (history) {
-        var now = toPoints(history.points, "valence");
-        var base = toBaseline(history.points, "valence");
+        var now = toPoints(history.points, "valence", LAYER_NOW);
+        var base = toPoints(history.points, "valence", LAYER_BASELINE);
+        function openPoint(point) { ctx.openDiaryDate(point.label); }
+        var onPointClick = typeof ctx.openDiaryDate === "function" ? openPoint : null;
         holder.appendChild(UI.lineChart({
-          points: base.concat(now), color: "#e69bb0", area: "rgba(230,155,176,.10)",
-          yMin: -1, yMax: 1,
+          series: [
+            { name: "当下情绪", points: now, color: "#e69bb0" },
+            { name: "基调情绪", points: base, color: "#6d7787" },
+          ],
+          yMin: -2, yMax: 2, label: "当下情绪与基调情绪，范围负2至正2", onPointClick: onPointClick,
         }));
         holder.appendChild(UI.legend([
           { color: "#e69bb0", text: "当下情绪（" + now.length + " 点）" },
           { color: "#6d7787", text: "基调情绪（" + base.length + " 点）" },
         ]));
         holder.appendChild(UI.lineChart({
-          points: toPoints(history.points, "arousal"), color: "#7fc8a9", yMin: -1, yMax: 1,
+          series: [
+            { name: "当下精神", points: toPoints(history.points, "arousal", LAYER_NOW), color: "#7fc8a9" },
+            { name: "基调精神", points: toPoints(history.points, "arousal", LAYER_BASELINE), color: "#6d7787" },
+          ],
+          yMin: -2, yMax: 2, label: "当下精神与基调精神，范围负2至正2", onPointClick: onPointClick,
         }));
-        holder.appendChild(UI.legend([{ color: "#7fc8a9", text: "当下精神（唤醒度）" }]));
+        holder.appendChild(UI.legend([
+          { color: "#7fc8a9", text: "当下精神（唤醒度）" },
+          { color: "#6d7787", text: "基调精神（唤醒度）" },
+        ]));
         holder.appendChild(UI.h("div", { class: "sub",
-          text: "共 " + now.length + " 个当下点、 " + base.length + " 个基调点" +
+          text: "共 " + now.length + " 个当下点、 " + base.length + " 个基调点 · 每日显示首条记录，空缺日期不补零" +
+            (onPointClick ? " · 点击日期或数据点查看当天日记" : "") +
             (history.truncated ? "　·　超出窗口的点已折叠（truncated=true）" : "") }));
-        if (!now.length) holder.appendChild(UI.empty("这个窗口里还没有情绪记录"));
+        if (!now.length && !base.length) holder.appendChild(UI.empty("这个窗口里还没有情绪记录"));
       }
 
       /* ---- 主动消息 ---- */
@@ -91,10 +100,25 @@
       }
       if (!proactive) return;
 
+      var diagnostic = proactive.diagnostic;
+      var checkBox = UI.h("div", { class: "card panel" }, [UI.h("h3", { text: "最近一次巡检 / 发送结果" })]);
+      if (!diagnostic) {
+        checkBox.appendChild(UI.empty("还没有巡检结果；下一次巡检后显示"));
+      } else {
+        checkBox.appendChild(UI.h("div", { class: "row-title", text: diagnostic.reason || "没有说明" }));
+        checkBox.appendChild(UI.h("div", { class: "row-sub", text: UI.shortTime(diagnostic.ts) + (diagnostic.umo ? " · " + diagnostic.umo : "") }));
+        (diagnostic.sessions || []).forEach(function (item) {
+          checkBox.appendChild(UI.kv(item.umo, item.reason));
+        });
+      }
+      holder.appendChild(checkBox);
+
       var sessions = proactive.sessions || [];
       /* 时段槽位是后端给的英文枚举（private/group/night/idle/greeting/platform），
          直接显示就是一片英文。翻成中文，认不出来的键退回原样，别显示成空白。 */
       var SLOT_CN = {
+        signal: "心情暗号", promise: "约定跟进", anniversary: "纪念日", care: "关怀",
+        quiet: "好久没聊", goodnight: "晚安", diary: "日记",
         private: "私聊", group: "群聊", night: "深夜", idle: "空闲",
         greeting: "打招呼", platform: "平台", morning: "早上", evening: "晚上",
       };
@@ -123,7 +147,7 @@
 
       var log = proactive.log || [];
       var lBox = UI.h("div", { class: "card panel" }, [
-        UI.h("h3", { text: "她主动说了什么（倒序，共 " + (proactive.log_total || 0) + " 条）" }),
+        UI.h("h3", { text: "已发送的主动消息素材（倒序，共 " + (proactive.log_total || 0) + " 条）" }),
       ]);
       if (!log.length) lBox.appendChild(UI.empty("还没有发送记录"));
       log.forEach(function (item) {

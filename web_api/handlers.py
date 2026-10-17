@@ -54,6 +54,11 @@ def build_handlers(deps: Any) -> dict[str, Callable[..., Any]]:
     return {
         "status": _make_status(deps),
         "diary_list": _make_diary_list(deps),
+        "diary_comments": _make_comments(deps),
+        "diary_comment_save": _make_comments(deps, "save"),
+        "diary_comment_publish": _make_comments(deps, "publish"),
+        "diary_comment_withdraw": _make_comments(deps, "withdraw"),
+        "diary_comment_delete": _make_comments(deps, "delete"),
         "diary_content": _make_diary_content(deps),
         "diary_rewrite": _make_diary_rewrite(deps),
         "diary_delete": _make_diary_delete(deps),
@@ -95,6 +100,37 @@ def _make_status(deps: Any) -> Callable[..., Any]:
             )
         )
 
+    return handler
+
+
+def _make_comments(deps: Any, action: str = "") -> Callable[..., Any]:
+    async def handler() -> Any:
+        try:
+            if not action:
+                book = _query_str(request, "book", fmt.NORMAL)
+                seg_id = _query_str(request, "seg_id", "")
+                if book not in fmt.BOOKS or not seg_id:
+                    return error_response("缺少有效的 book / seg_id", 400)
+                return json_response({"ok": True, "items": deps.comments.list_for(book, seg_id, settings=deps.settings)})
+            body = await _read_body(request)
+            if body is None:
+                return error_response("请求体必须是 JSON 对象", 400)
+            if action == "save":
+                book, seg_id, text = body.get("book"), body.get("seg_id"), body.get("text")
+                if not isinstance(book, str) or book not in fmt.BOOKS or not isinstance(seg_id, str) or not seg_id.strip() or not isinstance(text, str):
+                    return error_response("缺少有效的 book / seg_id / text", 400)
+                result = await deps.comments.save_draft(book, seg_id.strip(), text, deps._now())
+            else:
+                comment_id = body.get("id")
+                if not isinstance(comment_id, str) or not comment_id.strip():
+                    return error_response("缺少参数 id", 400)
+                if action == "publish":
+                    result = await deps.comments.publish(comment_id.strip(), deps._now(), settings=deps.settings)
+                else:
+                    result = await getattr(deps.comments, action)(comment_id.strip(), deps._now())
+            return json_response(result)
+        except (ValueError, OSError) as error:
+            return json_response({"ok": False, "error": str(error)})
     return handler
 
 

@@ -1306,3 +1306,12 @@ html[data-theme] {
 @media (max-width: 720px) {
   .stage-body { background: var(--bg); }
 }
+/* 日记留言与正文分区，沿用主题颜色。 */
+.np-comments { margin-top: 12px; border-top: 1px dashed var(--line-soft); padding-top: 8px; }
+.np-comments > summary { cursor: pointer; color: var(--fg-dim); font-size: 12px; }
+.np-comment-body { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.np-comment-row { padding: 10px; background: var(--bg-soft); border-radius: var(--radius-sm); }
+.np-comment-text { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.np-comment-note { color: var(--fg-faint); font-size: 11px; line-height: 1.6; }
+.np-comment-actions { flex-wrap: wrap; align-items: center; }
+.np-comment-input { min-height: 90px; }

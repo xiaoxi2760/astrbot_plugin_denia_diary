@@ -17,6 +17,26 @@
 ``diary.card_engine`` 选的是**优先用哪个**；``auto``（默认）＝按 :data:`ENGINE_ORDER` 的顺序
 挑第一个可用的。
 
+## 隐私闸门：能不能把日记发出去
+
+上面讲的是"**降级**"，这里讲的是"**许可**"。:func:`render_html` 另收一个
+``allow_remote``（对应配置 ``diary.card_allow_remote``，**默认 false**）：
+
+- 为**真**：行为和以前完全一样，整条梯子照走；
+- 为**假**：``remote`` 这一格**整条被拿掉**——不是"排在后面"，是压根不存在。选了 ``remote``
+  也一样：配置与禁止上传冲突时**以禁止为准**，日志会写明"remote 已从降级梯里拿掉"，
+  绝不"先试一下看看行不行"。
+
+为什么单独一格而不是复用 ``card_engine``：``card_engine`` 答的是"**先试谁**"（偏好），
+这一项答的是"**这条路能不能走**"（边界）。偏好可以降级，边界不能降级——一旦 remote 失败
+就默默去远端出图，等于"我没说要上传，你替我决定了"。
+
+:func:`render_html` 的 ``allow_remote`` **缺省就是 False**：漏传的调用方拿到的永远是
+"不出网"这一侧。隐私开关宁可在缺省方向上错，多出一张本机图，也不能因为漏传而上传日记。
+
+⚠️ 缓存也按这一项分namespace（:func:`_policy_key`）：关掉远端后，之前远端出的那张图
+不会被继续命中发出去。
+
 ## 顺序为什么是这个
 
 :data:`ENGINE_ORDER` 同时是**降级梯**：前一个失败就退到下一个。
@@ -32,6 +52,9 @@
 选了 ``pil`` 但 PIL 挂了，会继续退——**但每退一步都记一条日志**。理由和"页码数不出来就不出图"
 是同一条：一张出不成图的日记卡，对用户等于"今天读不到日记"，比"慢了 3 秒"严重得多。
 所以这里不存在"严格引擎"：配置项只决定**先试谁**，不决定"不许退"。
+
+唯一的例外是 **remote**：它降不降级不看引擎成败，看 :func:`render_html` 的 ``allow_remote``。
+本机引擎失败时该退就退，但**退的终点永远是本机引擎**，不会退到远端去。
 
 想知道自己实际用的是哪条，看日志（``[diary-card]`` 前缀）或看 ``card_engine`` 相关的 info。
 
@@ -68,11 +91,52 @@ pil 垫底不是因为它慢，是因为它**最不容易失效**（Pillow 是�
 _LOG = "diary-card"
 
 
-def _ladder(engine: str) -> tuple[str, ...]:
-    """把配置值变成"要依次试哪几个引擎"。``auto`` 与非法值都走整条梯子。"""
+def _ladder(engine: str, *, allow_remote: bool) -> tuple[str, ...]:
+    """把配置值变成"要依次试哪几个引擎"。
+
+    ⚠️ 这里有两层意思，别混：
+
+    1. **降级偏好**（``auto`` 与非法值都走整条梯子）；
+    2. **隐私边界**（``allow_remote=False`` 时 ``remote`` 这一格**整条被拿掉**，不是排在后面）。
+
+    第 2 条和第 1 条的优先级：隐私赢。``card_engine`` 是"先试谁"的偏好，
+    ``diary.card_allow_remote`` 是"**这条路根本不许走**"的约束——选了 ``remote`` 但禁止上传时，
+    不能"先试一下 remote 看看行不行"，而是当它压根不存在，直接落到本机引擎。
+
+    降级到只剩本机后仍然**永远返回非空梯子**（``playwright`` / ``pil`` 都在），所以"禁止远端"
+    不会把出图能力清零——最差结果是调用方退回文字。
+    """
     if engine in ENGINE_ORDER:
-        return (engine, *(name for name in ENGINE_ORDER if name != engine))
-    return ENGINE_ORDER
+        order = (engine, *(name for name in ENGINE_ORDER if name != engine))
+    else:
+        order = ENGINE_ORDER
+
+    if allow_remote:
+        return order
+
+    if engine in ("remote", "auto") or "remote" in order:
+        # 只在配置真的表达过"想用远端"时喊，避免每次出图都刷一条无意义的 warning
+        logger.warning(
+            "[%s] 禁止上传远端（card_allow_remote=false）：remote 引擎已从降级梯里拿掉，"
+            "本次只走本机引擎（engine=%s），日记不会被发到任何远端服务",
+            _LOG, engine,
+        )
+    return tuple(name for name in order if name != "remote")
+
+
+def _policy_key(key: str, *, allow_remote: bool) -> str:
+    """把缓存键按**出图策略**分个namespace。
+
+    为什么缓存也要算这笔账：缓存键里原本只有款式+模板+内容，**不含"这批图是在什么
+    许可下出的"**。于是关掉远端之后，之前远端出的那张图照样会被命中发出去——用户已经
+    明确表态"不许再上传"，却拿到一张在旧策略下产出的图，语义上是拧的。
+
+    反过来也成立：开了远端之后，本地出的图不该冒充"远端那张"（两者排版并不完全一样）。
+
+    做法是**只在禁止远端时加后缀**，允许远端时保持原键不变——这样升级后老用户本机已有的
+    缓存还能命中（不必因为升级而全体重出一遍图），且两个策略的产物互不顶替。
+    """
+    return key if allow_remote else f"{key}-localonly"
 
 
 def _staged() -> Path:
@@ -180,6 +244,7 @@ async def render_html(
     key: str,
     engine: str,
     remote: RemoteRenderer,
+    allow_remote: bool | None = None,
 ) -> Path | None:
     """把一张日记卡变成 PNG。**缓存命中 → 依次试引擎 → 全不行返回 None**。
 
@@ -192,21 +257,38 @@ async def render_html(
         key: :func:`card_cache.key_for` 或 :func:`card_cache.key_for_html` 算出的缓存键。
         engine: ``auto`` / ``playwright`` / ``remote`` / ``pil``（语义见 ``core.settings``）。
         remote: 注入的远端出图回调（测试传假实现）。
+        allow_remote: **隐私闸门**——对应 ``diary.card_allow_remote``。为假时 ``remote``
+            引擎**整条从梯子里被拿掉**，无论本机引擎成功还是失败都不会把日记发出去。
+
+            传 ``None``（**没传**）按 ``False`` 处理，并**记一条 warning**：漏接线的调用方
+            拿到的是"不出网"这一侧，而不是崩溃。这样隐私开关**只在不出网的方向上出错**——
+            漏传最多少出一张本机图，绝不会因为漏传而上传日记；同时日志会把"这个调用方还没
+            接上策略"喊出来，而不是安静地按新规则跑。
 
     Returns:
-        一张**存在的** PNG 的路径；三个引擎都出不了图返回 None（调用方负责降级并告知用户）。
+        一张**存在的** PNG 的路径；可用的引擎都出不了图返回 None（调用方负责降级并告知用户）。
     """
-    cached = card_cache.resolve(cache_dir, key)
+    if allow_remote is None:
+        logger.warning(
+            "[%s] 调用方没有传 card_allow_remote 策略，按「禁止上传远端」处理；"
+            "想用 remote 引擎请显式传 allow_remote=True",
+            _LOG,
+        )
+    allows_remote = bool(allow_remote)
+
+    # 缓存与出图走同一个"策略键"：允许远端时就是调用方给的键，不变老缓存。
+    scoped_key = _policy_key(key, allow_remote=allows_remote)
+    cached = card_cache.resolve(cache_dir, scoped_key)
     if cached is not None:
         return cached
 
     # 每次调用现读模块全局：测试替换掉某个引擎时，这张表就是替换后的那批。
     runners = {"playwright": render_playwright, "remote": render_remote, "pil": render_pil}
-    for position, name in enumerate(_ladder(engine)):
+    for position, name in enumerate(_ladder(engine, allow_remote=allows_remote)):
         if position:
             # 不是首选的那几步会说话：用户要知道图到底是谁出的、为什么没走他选的那条
             logger.warning("[%s] 降级到 %s 出图（engine=%s）", _LOG, name, engine)
-        rendered = await runners[name](html_text, ctx, cache_dir, key, remote)
+        rendered = await runners[name](html_text, ctx, cache_dir, scoped_key, remote)
         if rendered is not None:
             return rendered
     return None

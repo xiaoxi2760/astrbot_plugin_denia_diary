@@ -129,6 +129,7 @@ class CardImageHandlerCase(TmpDirCase):
                 key=key,
                 engine="remote",
                 remote=html_render,
+                allow_remote=True,
             ),
             html_render=html_render,
             _now=lambda: NOW,

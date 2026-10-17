@@ -289,8 +289,16 @@ class TestRenderChain(TmpDirCase):
         pil: bool = True,
         ctx_data: dict | None = None,
         spies: dict | None = None,
+        allow_remote: bool | None = True,
+        pass_policy: bool = True,
     ):
-        """跑一次编排。``playwright/remote/pil=False`` 表示"那条路确定出不了图"。"""
+        """跑一次编排。``playwright/remote/pil=False`` 表示"那条路确定出不了图"。
+
+        ``allow_remote`` 缺省**开**：这组降级测试盯的是"谁先谁后"，与隐私策略无关，
+        所以默认放行远端好让 ``remote`` 那格是通的。隐私那一侧由
+        :class:`TestRemotePolicy` 单独盯死（默认关）。
+        ``pass_policy=False`` 用来模拟**还没接上策略的旧调用方**（压根不传这个参数）。
+        """
         ok = {"playwright": playwright, "remote": remote, "pil": pil}
         self.remote = FakeRemote(self.root)
         self.remote.fail = not remote
@@ -318,11 +326,12 @@ class TestRenderChain(TmpDirCase):
         try:
 
             async def go():
+                extra = {"allow_remote": allow_remote} if pass_policy else {}
                 return await card_render.render_html(
                     self.html,
                     ctx() if ctx_data is None else ctx_data,
                     cache_dir=self.cache, key=key,
-                    engine=engine, remote=self.remote,
+                    engine=engine, remote=self.remote, **extra,
                 )
 
             return asyncio.run(go())
@@ -412,6 +421,179 @@ class TestRenderChain(TmpDirCase):
         self.run_chain(engine="pil", key="k4", playwright=False, remote=False, spies=spies)
         handed = [data for name, data in spies["seen"] if name == "pil"][0]
         self.assertEqual(handed, ctx())
+
+
+class TestRemotePolicy(TmpDirCase):
+    """**隐私闸门** ``allow_remote``：禁止上传时，remote 这条路整条消失。
+
+    这一组盯的是本任务最要紧的那句话：**"禁止远端时任何引擎失败都不能上传"**。所以断言一律
+    看**远端回调有没有被调用过**，而不是"最后出了什么图"——最后出了图（本机出的）是对的，
+    但如果 remote 在中间被叫过，那张图的内容就已经躺在别人机器上了。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.cache = self.root / "card-cache"
+        self.html = "<html><body>卡片</body></html>"
+
+    def run_chain(self, *, engine: str, key: str = "k1", ok: dict | None = None,
+                  allow_remote: bool | None = False, pass_policy: bool = True):
+        """跑一次真编排。``ok`` 决定哪条引擎"能出图"（默认只有 playwright 能）。"""
+        ok = {"playwright": True, "remote": True, "pil": True} if ok is None else ok
+        remote_spy = FakeRemote(self.root)
+
+        def fake(name: str):
+            async def render(html_text, ctx, cache_dir, cache_key, remote_cb):
+                self.calls.append(name)
+                if not ok.get(name, False):
+                    return None
+                if name == "remote":
+                    # 真去调远端回调：这样 spy 才可能记录到"上传发生过"。
+                    # 禁远端时 remote 压根不在梯子里，这行一次都不会走到——
+                    # 断言 spy.calls == [] 验的正是这一点。
+                    return card_cache.put(
+                        cache_dir, cache_key,
+                        Path(str(await remote_cb(html_text, ctx, return_url=False,
+                                                 options=card_mod.RENDER_OPTIONS))).read_bytes(),
+                    )
+                return card_cache.put(cache_dir, cache_key, PNG)
+
+            return render
+
+        self.calls = []
+        saved = {n: getattr(card_render, f"render_{n}") for n in card_render.ENGINE_ORDER}
+        for name in card_render.ENGINE_ORDER:
+            setattr(card_render, f"render_{name}", fake(name))
+        try:
+            extra = {"allow_remote": allow_remote} if pass_policy else {}
+
+            async def go():
+                return await card_render.render_html(
+                    self.html, ctx(),
+                    cache_dir=self.cache, key=key,
+                    engine=engine, remote=remote_spy, **extra,
+                )
+
+            result = asyncio.run(go())
+        finally:
+            for name, original in saved.items():
+                setattr(card_render, f"render_{name}", original)
+        return result, remote_spy
+
+    # ---- 拒绝远端 -------------------------------------------------------------
+
+    def test_denied_remote_is_never_called_when_playwright_works(self) -> None:
+        result, spy = self.run_chain(engine="auto", allow_remote=False)
+        self.assertIsNotNone(result)
+        self.assertEqual(self.calls, ["playwright"])
+        self.assertEqual(spy.calls, [], "禁止上传时远端回调一次都不能被叫")
+
+    def test_denied_remote_is_skipped_on_engine_failure(self) -> None:
+        """本机引擎失败时**降级到 pil**，不是降级到 remote。"""
+        result, spy = self.run_chain(
+            engine="auto", ok={"playwright": False, "remote": True, "pil": True},
+            allow_remote=False,
+        )
+        self.assertIsNotNone(result, "本机还有 pil 就该出图，不该因为禁远端就整条断掉")
+        self.assertEqual(self.calls, ["playwright", "pil"])
+        self.assertEqual(spy.calls, [], "引擎失败不许偷偷改成上传")
+
+    def test_denied_remote_all_local_fail_returns_none_instead_of_uploading(self) -> None:
+        """本机全挂 → 返回 None 交给调用方退文字，**绝不**退到远端。"""
+        result, spy = self.run_chain(
+            engine="auto", ok={"playwright": False, "remote": True, "pil": False},
+            allow_remote=False,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(self.calls, ["playwright", "pil"])
+        self.assertEqual(spy.calls, [], "出不了图就退文字，不能拿日记去换一张图")
+
+    def test_explicit_remote_engine_conflicts_with_deny(self) -> None:
+        """配置选了 remote 但禁止上传：**以禁止为准**，本机引擎接手。"""
+        result, spy = self.run_chain(engine="remote", allow_remote=False)
+        self.assertIsNotNone(result)
+        self.assertEqual(self.calls, ["playwright"], "冲突时该降级到本机，而不是先试 remote")
+        self.assertEqual(spy.calls, [])
+
+    def test_denied_auto_with_explicit_remote_engine_leaves_only_local_engines(self) -> None:
+        """auto + 禁止上传：梯子里压根不该有 remote 这一格。"""
+        ladder = card_render._ladder("auto", allow_remote=False)
+        self.assertNotIn("remote", ladder)
+        self.assertEqual(ladder, ("playwright", "pil"))
+
+    def test_ladder_never_goes_empty_when_remote_is_denied(self) -> None:
+        """禁远端不等于不能出图：梯子必须还剩本机引擎（最差退回文字，不至于全灭）。"""
+        for engine in card_render.ENGINE_ORDER + ("auto", "乱填的值"):
+            with self.subTest(engine=engine):
+                self.assertTrue(card_render._ladder(engine, allow_remote=False))
+
+    # ---- 漏接线 ---------------------------------------------------------------
+
+    def test_missing_policy_argument_is_treated_as_denied(self) -> None:
+        """调用方压根没传这个参数 → 按**禁止**处理，且远端一次都不许被叫。"""
+        result, spy = self.run_chain(
+            engine="auto", ok={"playwright": False, "remote": True, "pil": True},
+            allow_remote=None, pass_policy=False,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(self.calls, ["playwright", "pil"])
+        self.assertEqual(spy.calls, [], "漏传只能少出图，绝不能变成上传")
+
+    def test_missing_policy_argument_on_explicit_remote_engine(self) -> None:
+        _, spy = self.run_chain(engine="remote", allow_remote=None, pass_policy=False)
+        self.assertEqual(spy.calls, [])
+        self.assertNotIn("remote", self.calls)
+
+    # ---- 显式允许 -------------------------------------------------------------
+
+    def test_explicitly_allowed_still_reaches_remote(self) -> None:
+        """显式允许时行为和以前一模一样：remote 还在梯子里，且能被选中。"""
+        result, spy = self.run_chain(
+            engine="auto", ok={"playwright": False, "remote": True, "pil": False},
+            allow_remote=True,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(self.calls, ["playwright", "remote"])
+        self.assertEqual(len(spy.calls), 1, "允许远端时 remote 该照常被叫")
+
+    def test_allowed_ladder_keeps_remote_in_place(self) -> None:
+        self.assertEqual(
+            card_render._ladder("auto", allow_remote=True), card_render.ENGINE_ORDER
+        )
+        self.assertEqual(
+            card_render._ladder("remote", allow_remote=True),
+            ("remote", "playwright", "pil"),
+        )
+
+    # ---- 缓存不能绕过策略 -----------------------------------------------------
+
+    def test_denied_policy_does_not_reuse_a_remote_made_cache_entry(self) -> None:
+        """关掉远端后，之前远端出的那张图**不该**被命中发出去。"""
+        card_cache.store(self.cache, "k1", PNG)  # 允许远端时的键：没后缀
+        result, spy = self.run_chain(engine="auto", key="k1", allow_remote=False)
+        self.assertEqual(self.calls, ["playwright"], "该重出一张本机图，不是拿旧缓存顶上")
+        self.assertIsNotNone(result)
+        self.assertEqual(spy.calls, [])
+
+    def test_allowed_policy_reuses_the_unsuffixed_cache_entry(self) -> None:
+        """允许远端时键不变：老用户升级后本机已有的缓存照样命中（不必全体重出）。"""
+        card_cache.store(self.cache, "k1", PNG)
+        result = self.run_chain(engine="auto", key="k1", allow_remote=True)[0]
+        self.assertIsNotNone(result)
+        self.assertEqual(self.calls, [], "允许远端时键就是原键，该直接命中")
+
+    def test_the_two_policies_do_not_share_cache_entries(self) -> None:
+        """两种策略下的产物互不顶替：禁远端那张不会冒充"远端出的那张"。"""
+        card_cache.store(self.cache, "k1-localonly", PNG)
+        result, spy = self.run_chain(engine="auto", key="k1", allow_remote=True)
+        self.assertEqual(self.calls, ["playwright"], "远端策略不该捡起禁远端时出的那张")
+        self.assertIsNotNone(result)
+        self.assertEqual(spy.calls, [])
+
+    def test_denied_policy_caches_under_its_own_key(self) -> None:
+        self.run_chain(engine="auto", key="k7", allow_remote=False)
+        self.assertIsNotNone(card_cache.resolve(self.cache, "k7-localonly"))
+        self.assertIsNone(card_cache.resolve(self.cache, "k7"))
 
 
 class _null:

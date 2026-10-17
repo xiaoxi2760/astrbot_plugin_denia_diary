@@ -969,7 +969,9 @@ def proactive_payload(
     cap = max(int(limit or 0), 0)
     if cap and len(log) > cap:
         log = log[:cap]
-    return {"ok": True, "sessions": sessions, "log": log, "log_total": len(lines)}
+    diagnostic = doc.get("diagnostic")
+    return {"ok": True, "sessions": sessions, "log": log, "log_total": len(lines),
+            "diagnostic": dict(diagnostic) if isinstance(diagnostic, dict) else None}
 
 
 # ---- 小工具 -------------------------------------------------------------------

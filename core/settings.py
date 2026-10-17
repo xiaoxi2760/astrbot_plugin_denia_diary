@@ -112,6 +112,23 @@ CARD_ENGINE_DEFAULT = "auto"
 
 探测逻辑只有一处（各引擎自己的 ``probe()``），默认值不重复实现一遍。"""
 
+CARD_ALLOW_REMOTE_DEFAULT = False
+"""**出图时允不允许把日记发到远端服务**（``diary.card_allow_remote``）。
+
+**默认 False（不出网）**，而且它是**独立于** ``card_engine`` 的一条硬约束：``card_engine``
+决定"先试谁"，这一项决定"**remote 这条路根本不许走**"。两者冲突时以本项为准——
+选了 ``remote`` / ``auto`` 但本项为假，就当 ``remote`` 不存在，降级到本机引擎
+（``playwright`` → ``pil``），出不了图再由调用方退回文字。
+
+⚠️ 为什么默认是"不许"：``remote`` 引擎要把**整张日记卡（含正文、日期、和谁）**发给第三方
+文转图端点。这不是"顺手调个 API"，是把私人内容交到别人机器上。默认关上意味着"装完的人
+不会在没意识到的情况下把日记传出去"，而想要六款官方样式的用户显式打开即可——知情同意的
+方向只能是"默认关"。
+
+⚠️ 这一项**优先于** ``card_engine`` 且不与它争辩：引擎档位是**性能/样式偏好**，这项是
+**隐私边界**。冲突时日志会明确写出"配置想走远端但禁止上传，已改走本机引擎"。
+"""
+
 FIELD_CHOICES: dict[str, tuple[str, ...]] = {
     "diary.card_render": CARD_RENDER_CHOICES,
     "diary.card_style": CARD_STYLE_CHOICES,
@@ -227,6 +244,7 @@ def default_config() -> dict[str, Any]:
             "card_style": CARD_STYLE_DEFAULT,
             "card_font": CARD_FONT_DEFAULT,
             "card_engine": CARD_ENGINE_DEFAULT,
+            "card_allow_remote": CARD_ALLOW_REMOTE_DEFAULT,
             "panel_edit_unlimited": PANEL_EDIT_UNLIMITED_DEFAULT,
         },
         "notebook": dict(_NOTEBOOK_DEFAULTS),
@@ -256,6 +274,7 @@ class Settings:
         "card_style": CARD_STYLE_DEFAULT,
         "card_font": CARD_FONT_DEFAULT,
         "card_engine": CARD_ENGINE_DEFAULT,
+        "card_allow_remote": CARD_ALLOW_REMOTE_DEFAULT,
         "panel_edit_unlimited": PANEL_EDIT_UNLIMITED_DEFAULT,
     })
     notebook: Mapping[str, int] = field(default_factory=lambda: dict(_NOTEBOOK_DEFAULTS))
@@ -343,6 +362,15 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
     diary["card_engine"] = _as_choice(
         raw_diary.get("card_engine") if isinstance(raw_diary, Mapping) else None,
         CARD_ENGINE_CHOICES, CARD_ENGINE_DEFAULT, "diary.card_engine", warnings,
+    )
+    # 出图时允不允许走远端（第 20 步的隐私约束）：独立 bool，**默认 False**。
+    # 这里**不**和 card_engine 打架——引擎档位是偏好，这项是硬约束，冲突由
+    # ``card_render`` 降级处理并在日志里说清楚（见 ``core.diary.card_render._ladder``）。
+    diary["card_allow_remote"] = _as_bool(
+        raw_diary.get("card_allow_remote") if isinstance(raw_diary, Mapping) else None,
+        CARD_ALLOW_REMOTE_DEFAULT,
+        "diary.card_allow_remote",
+        warnings,
     )
     # 面板改删豁免窗（bool）：缺键静默用默认 False，写了非 bool 才 warning。
     diary["panel_edit_unlimited"] = _as_bool(

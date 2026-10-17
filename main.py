@@ -13,8 +13,10 @@
 - 主动消息（第 4 步）：``initialize()`` 重建巡检 job（basic handler 只在内存注册表，
   热重载即失效 → 必须删旧建新）；巡检 handler 里闸门与触发器都在 core 判定，这里只
   负责出站——``add_active_job`` 唤醒她本人 / ``StarTools.send_message`` 直发暗号；
-  ``on_using_llm_tool`` 是"真的发出去了"的确认点（只认主动轮的
-  ``send_message_to_user``，被动轮她回复用的同一个工具不算）；
+  ``on_using_llm_tool`` 只做**发送前**的原地改造（出站清洗 + 语音转换）——它跑在工具
+  执行之前，"发没发出去"这时还不知道，在这儿写 ``last_sent_at`` 就是"发送失败也记成功"；
+  **"真的发出去了"的确认点是 ``on_llm_tool_respond``**（工具执行后，看宿主返回的成功
+  文案；只认主动轮的 ``send_message_to_user``，被动轮她回复用的同一个工具不算）；
 - 早晚安记录（``core/greeting``）：``on_llm_request`` 里整条消息匹配问候词就记，
   记上后调 ``Proactive.mark_slot_today`` 占掉当天同款主动问候（双向防重）。
 - 语音出口（F1 第一步，``core/voice``）：巡检决策时掷定"这条要不要转语音"
@@ -56,11 +58,13 @@ from .core.diary import card_pil
 from .core.diary import card_render
 from .core.diary import format as fmt
 from .core.diary.api import Diary
+from .core.diary.comments import CommentStore
 from .core.diary.store import DiaryStore, person_id_by_name
 from .core.greeting.api import Greeting
 from .core.greeting.store import GreetingStore
 from .core.notebook import Notebook, NotebookStore
 from .core.proactive import Proactive
+from .core.proactive import diagnostics
 from .core.proactive.store import ProactiveStore
 from .core.session import Session
 from .core.state import Affinity, State
@@ -98,6 +102,26 @@ PROACTIVE_JOB_NAME = f"{PLUGIN_NAME}#proactive-patrol"
 ACTIVE_JOB_NAME = f"{PLUGIN_NAME}#proactive-wake"
 """cron job 命名：``initialize()`` 按 name 找旧 job 删掉重建（僵尸一律清，
 不留"库里还有同名 job 但 handler 已失效"的残骸）。"""
+
+SENT_TOOL_OK_MARK = "Message sent to session"
+"""宿主 ``send_message_to_user`` **成功**时的返回文案前缀（结果契约的正向证据）。
+
+实证（``_race/a`` 快照，``_race/b`` 快照同哈希）：
+``astrbot/core/tools/message_tools.py`` 的 ``SendMessageToUserTool.call`` 成功走
+``return f"Message sent to session {target_session}"``，**所有失败路径一律返回
+``f"error: ..."``**（空 messages / 组件非法 / 平台没找到 / 发送抛异常）。
+
+只认这个正向标记，不认"没有 error 就算成功"：宿主改了成功文案时确认点会**静默地少记**
+（宁可少记，不可错记——两段式的全部意义就是"换轨迹不撒谎"）。
+"""
+
+CONFIRMED_EXTRA = f"{PLUGIN_NAME}#proactive-confirmed"
+"""事件上的"本轮已确认"标记。
+
+一次唤醒（一个事件）至多记一条主动消息记录：``on_llm_tool_respond`` 对同一个事件的
+重复回调（宿主重放 / 她一轮里连调两次同一个工具）不再重复写 ``last_sent_at`` 与
+发送记录——记录是"她这次找过你"的记账，不是平台消息条数。
+"""
 
 CARD_TEMPLATE_DIR = Path(__file__).resolve().parent / "template"
 """/看日记 的 Jinja2 模板目录（纸感 / 墨信 / 明信片）。模板在**插件目录**而不是数据目录：
@@ -186,6 +210,64 @@ def _card_markdown(date: str, weekday: str, book_name: str, entries: list[dict])
     return "\n".join(lines).strip()
 
 
+def _is_proactive_send(event: object, tool: object) -> bool:
+    """这次工具调用算不算"主动轮在发消息"：工具名对 + 事件带 ``cron_job`` extra。
+
+    宿主只在 cron 唤醒的事件上挂 ``cron_job``（§0#4/#5）；被动轮她回复用的是同一个
+    ``send_message_to_user``，靠这个区分。工具名走 ``core.outbound.OUTBOUND_TOOL``——
+    清洗与确认认的是同一个名字，不在这儿再抄一份字面量。
+    """
+    if getattr(tool, "name", "") != outbound_mod.OUTBOUND_TOOL:
+        return False
+    getter = getattr(event, "get_extra", None)
+    return bool(getter("cron_job", None)) if callable(getter) else False
+
+
+def _already_confirmed(event: object) -> bool:
+    """本事件是否已经确认过一条主动消息（``CONFIRMED_EXTRA`` 标记，读不到按未确认）。"""
+    getter = getattr(event, "get_extra", None)
+    return bool(getter(CONFIRMED_EXTRA, False)) if callable(getter) else False
+
+
+def send_result_delivered(tool_result: object, expected_session: str = "") -> bool:
+    """``send_message_to_user`` 的调用结果算不算"真的送达"（**只认正向成功证据**）。
+
+    结果契约（宿主源码实证，见 ``SENT_TOOL_OK_MARK`` 与 ``confirm_proactive_sent``）：
+
+    - ``on_llm_tool_respond`` 交来的是 ``CallToolResult | None``：
+      ``CallToolResult(content=[TextContent(text="Message sent to session ...")])``
+      是成功，``content=[TextContent(text="error: ...")]`` 是失败，``None`` 是"工具没有
+      返回值 / 走了直接发送通道"；
+    - 形状不认识（没有 ``content``、组件没有 ``text``、结果是别的类型）一律算**未送达**。
+
+    两个刻意的保守选择：
+
+    1. **不看 ``isError`` 就放行**不行：宿主 ``_execute_local`` 包字符串时
+       ``CallToolResult`` 的 ``isError`` 保持默认 ``False``——失败结果也是"没报错"的
+       对象，靠它判断等于把失败记成成功（本步修的就是这类错误）；
+    2. **不认"没有 error 就算成功"**：只认成功文案本身。宿主换了文案时宁可少记一次
+       （下次巡检还会再试），也不能把没送达记成送出了——两段式的全部意义。
+    """
+    if getattr(tool_result, "isError", False):
+        return False
+    def matches(text):
+        if not isinstance(text, str):
+            return False
+        if expected_session:
+            return text.strip() == f"{SENT_TOOL_OK_MARK} {expected_session}"
+        return text.strip().startswith(SENT_TOOL_OK_MARK + " ")
+    if isinstance(tool_result, str):  # 兼容"宿主直接把 return 值交过来"的旧形态
+        return matches(tool_result)
+    content = getattr(tool_result, "content", None)
+    if not isinstance(content, (list, tuple)):
+        return False
+    for item in content:
+        text = getattr(item, "text", None)
+        if matches(text):
+            return True
+    return False
+
+
 @register(
     PLUGIN_NAME,
     "xiaoxi2760",
@@ -256,6 +338,7 @@ class DeniaDiary(Star):
             locks=self.locks,
         )
         self.portraits = webui_portrait.PortraitStore(layout=self.layout, locks=self.locks)
+        self.comments = CommentStore(self.layout, self.locks, self.diary.store)
         logger.info("[%s] 数据目录：%s", PLUGIN_NAME, self.layout.base_dir)
         for message in self.settings.warnings:
             logger.warning("[%s] 配置降级：%s", PLUGIN_NAME, message)
@@ -419,12 +502,15 @@ class DeniaDiary(Star):
         core 判定（``proactive.patrol``），这里只把决策送出去。首行判开关——面板上
         改配置不用重载插件，下一个 tick 就生效。"""
         if not self.settings.subsystem("proactive"):
+            await diagnostics.record_check(self.proactive, None, now=self._now())
             return
         try:
             decision = await self.proactive.patrol(now=self._now())
         except Exception as error:  # noqa: BLE001 - 巡检失败只留日志
             logger.warning("[%s] 主动消息巡检失败：%s", PLUGIN_NAME, error)
+            await diagnostics.record(self.proactive, {"ts": self._now().isoformat(), "status": "failed", "reason": "巡检失败，请查看日志", "sessions": []})
             return
+        await diagnostics.record_check(self.proactive, decision, now=self._now())
         if not decision:
             return
         umo = str(decision["umo"])
@@ -447,8 +533,14 @@ class DeniaDiary(Star):
         根本不会挂上——§0#3/#4）。"""
         manager = getattr(self.context, "cron_manager", None)
         if manager is None:
+            await diagnostics.delivery(self.proactive, umo, success=False, now=self._now(), reason="宿主没有任务调度器")
             return
+        receipt = ""
         try:
+            comment = await self._comment_with_receipt(Session.from_umo(umo))
+            receipt = comment.get("receipt") or ""
+            if comment.get("text"):
+                note = note + "\n" + comment["text"]
             await manager.add_active_job(
                 name=ACTIVE_JOB_NAME,
                 cron_expression=None,  # 复核 #1：该参数没有默认值，必须显式传
@@ -457,6 +549,12 @@ class DeniaDiary(Star):
                 run_at=self._now(),
             )
         except Exception as error:  # noqa: BLE001 - 派发失败只留日志，配额已扣（两段式）
+            if receipt:
+                try:
+                    await self.comments.release(receipt, now=self._now())
+                except Exception as release_error:
+                    logger.warning("[%s] 未派发留言归还失败：%s", PLUGIN_NAME, release_error)
+            await diagnostics.delivery(self.proactive, umo, success=False, now=self._now(), reason="唤醒任务派发失败")
             logger.warning("[%s] 主动唤醒派发失败（配额已扣，轨迹未写）：%s", PLUGIN_NAME, error)
 
     async def _send_signal(self, umo: str, char: str) -> None:
@@ -469,12 +567,15 @@ class DeniaDiary(Star):
         except Exception as error:  # noqa: BLE001
             logger.warning("[%s] 暗号直发异常（不写 last_sent_at、不烧冷却，下次巡检还会再试）：%s",
                            PLUGIN_NAME, error)
+            await diagnostics.delivery(self.proactive, umo, success=False, now=self._now(), reason="暗号发送异常")
             return
         if sent is not True:
+            await diagnostics.delivery(self.proactive, umo, success=False, now=self._now(), reason="平台未确认暗号发送成功")
             logger.warning("[%s] 暗号直发未送达（不写 last_sent_at、不烧冷却，下次巡检还会再试）→ %s",
                            PLUGIN_NAME, umo)
             return
         await self.proactive.confirm_sent(umo, now=self._now())
+        await diagnostics.delivery(self.proactive, umo, success=True, now=self._now())
         logger.info("[%s] 暗号已发出 → %s", PLUGIN_NAME, umo)
 
     # ---- 内部 ----------------------------------------------------------------
@@ -945,6 +1046,7 @@ Args:
             key=key,
             engine=self._card_engine(),
             remote=self.html_render,
+            allow_remote=self.settings.diary.get("card_allow_remote") is True,
         )
 
     @filter.command("看日记", alias={"日记卡"})
@@ -1014,18 +1116,14 @@ Args:
         if render == "off":
             yield event.plain_result(markdown)
             return
+        data = card.card_context(
+            date=day, weekday=weekday, book_name=book_name, entries=entries,
+            font_css=card.font_css(self.settings.diary.get("card_font")),
+            page_index=page_index, page_total=page_total,
+        )
         if render == "pretty":
             # ⚠️ 日记正文是她的原话：转义在 ``card.card_context`` 里统一做（那条
             # 渲染链没有 autoescape），面板预览走同一份，看到的就是真效果。
-            data = card.card_context(
-                date=day,
-                weekday=weekday,
-                book_name=book_name,
-                entries=entries,
-                font_css=card.font_css(self.settings.diary.get("card_font")),
-                page_index=page_index,
-                page_total=page_total,
-            )
             try:
                 tmpl = (CARD_TEMPLATE_DIR / f"diary_card_{style}.html.j2").read_text(
                     encoding="utf-8"
@@ -1045,7 +1143,15 @@ Args:
                     return
                 logger.warning("[%s] 日记卡出图没成功，降级 Markdown", PLUGIN_NAME)
         try:
-            path = await self.text_to_image(markdown)
+            if render == "pretty" and self.settings.diary.get("card_allow_remote") is True:
+                path = await self.text_to_image(markdown)
+            else:
+                # Host text_to_image may call a remote t2i service too. Local-only
+                # policy must apply to this fallback, not just the pretty ladder.
+                key = card_cache.key_for_html(markdown, salt="plain-local")
+                path = await card_render.render_pil("", data, self.layout.card_cache, key, self.html_render)
+                if path is None:
+                    raise RuntimeError("本地朴素出图不可用，改发文本")
             yield event.image_result(path)
             return
         except Exception as error:  # noqa: BLE001 - 本地 Pillow 也失败就发纯文本
@@ -1137,6 +1243,7 @@ Args:
                 "morning" if greeted.get("kind") == "morning" else "goodnight",
                 now=self._now(),
             )
+        comment = await self._comment_context(session)
         text = compose.compose_prompt(
             self.diary,
             session,
@@ -1145,10 +1252,24 @@ Args:
             affinity=self.affinity,
             greeting=self.greeting,
             now=self._now(),
+            strong_text=str(getattr(event, "message_str", "") or ""),
+            budget=compose.PROMPT_BUDGET - (len(comment) + 1 if comment else 0),
         )
+        if comment:
+            text += comment + "\n"
         if not text:
             return
         self._attach_hint(req, text)
+
+    async def _comment_context(self, session: Session) -> str:
+        return (await self._comment_with_receipt(session)).get("text") or ""
+
+    async def _comment_with_receipt(self, session: Session) -> dict:
+        try:
+            return await self.comments.take_with_receipt(session, self.settings, self._now())
+        except Exception as error:
+            logger.warning("[%s] 日记留言暂不可读，本轮跳过：%s", PLUGIN_NAME, error)
+            return {"text": "", "id": "", "receipt": ""}
 
     def _attach_hint(self, req: ProviderRequest, text: str) -> None:
         """把渲染结果挂进本次请求——**绝不拼 ``system_prompt``**。
@@ -1181,34 +1302,87 @@ Args:
             )
             req.system_prompt = (req.system_prompt or "") + text
 
-    # ---- 确认点（主动轮） ------------------------------------------------------
+    # ---- 主动轮：发送前改造 + 发送后确认 -----------------------------------------
 
     @filter.on_using_llm_tool()
     async def note_proactive_sent(
         self, event: AstrMessageEvent, tool, tool_args
     ) -> None:
-        """"真的发出去了"的确认点（§0#7）：主动唤醒路径里她真调了
-        ``send_message_to_user`` → 写 ``last_sent_at``（两段式第二步）。
+        """**发送前**的原地改造（不是确认点）：出站文本清洗 + 语音转换。
 
-        被动轮她回复用的也是同一个工具——靠事件上的 ``cron_job`` extra 区分：
-        只有 cron 唤醒的事件带它（§0#4/#5）。全程吞异常：确认失败只影响轨迹措辞，
-        不能带崩她的回复。
+        两件事都必须赶在工具执行之前：它们改的都是 ``tool_args["messages"]``，而宿主
+        紧接着把**同一个 dict** 展开进 ``execute(**valid_params)``——改晚了就没用
+        （见 ``core/outbound.py`` 头注释与 F1 语音一节的机制说明）。
+
+        **确认不在这里**：这个钩子跑在工具执行之前，"发没发出去"此刻还不存在。真正的
+        确认点是下面的 ``confirm_proactive_sent``（``on_llm_tool_respond``，宿主把工具
+        跑完并把结果交回来之后）——在这里写 ``last_sent_at`` 就是本步修掉的 bug：
+        发送失败照样记成成功。
+
+        被动轮她回复用的是同一个工具，标记照样会漏给用户 → 清洗对**所有轮次**都做；
+        语音只对主动轮做（靠事件上的 ``cron_job`` extra 区分）。
         """
         try:
-            # 第 5.1 步：出站文本清洗。**必须排在下面的确认点之前**——被动轮她回复时
-            # 下面会因没有 cron extra 提前 return，但标记照样会漏给用户。
+            # 第 5.1 步：出站文本清洗。**必须排在最前面**——被动轮会因下面的主动轮判定
+            # 提前 return，但标记照样会漏给用户。
             self._strip_outbound_marks(tool, tool_args)
-            if getattr(tool, "name", "") != "send_message_to_user":
-                return
-            getter = getattr(event, "get_extra", None)
-            cron_extra = getter("cron_job", None) if callable(getter) else None
-            if not cron_extra:
+            if not _is_proactive_send(event, tool):
                 return
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             if not umo:
                 return
             await self._maybe_speak(umo, tool_args)
+        except Exception as error:  # noqa: BLE001 - 改造失败不能带崩她的发送
+            logger.warning("[%s] 主动消息发送前处理失败（按原样发送）：%s", PLUGIN_NAME, error)
+
+    @filter.on_llm_tool_respond()
+    async def confirm_proactive_sent(
+        self, event: AstrMessageEvent, tool, tool_args, tool_result
+    ) -> None:
+        """**真正的确认点**（两段式第二步）：宿主把工具跑完了、结果说真送达了，
+        才写 ``last_sent_at`` + 追加发送记录 + 暗号冷却。
+
+        **结果契约**（``on_llm_tool_respond`` 的 ``tool_result: CallToolResult | None``，
+        实证见 ``_race/a`` 快照）：
+
+        - ``astrbot/core/agent/runners/tool_loop_agent_runner.py``：``on_tool_end`` 把
+          ``_final_resp``（``CallToolResult | None``）交给钩子；
+        - ``astrbot/core/astr_agent_tool_exec.py`` 的 ``_execute_local``：``call()`` 返回的
+          字符串被包成 ``CallToolResult(content=[TextContent(text=...)])``；返回 ``None``
+          （工具没有返回值 / 走"直接发送"通道）则 ``tool_result`` 是 ``None``；
+        - ``astrbot/core/tools/message_tools.py``：成功
+          ``"Message sent to session ..."``、失败 ``"error: ..."``。
+
+        判定收在纯函数 ``send_result_delivered``：**只认正向成功标记**。失败 / ``None`` /
+        读不懂的结果一律**不写** ``last_sent_at``、不烧暗号冷却、不进发送记录——配额白吃
+        一次，换轨迹不撒谎（``confirm_sent`` 的注释把这条记账规则写全了）。
+
+        只认主动轮的 ``send_message_to_user``（事件带 ``cron_job`` extra）：被动轮她回复
+        用的也是同一个工具，不算她"找过你"。全程吞异常——确认失败只影响轨迹措辞，
+        不能带崩她的回复。
+        """
+        try:
+            if not _is_proactive_send(event, tool):
+                return
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if not umo:
+                return
+            if not send_result_delivered(tool_result, umo):
+                await diagnostics.delivery(self.proactive, umo, success=False, now=self._now())
+                logger.warning(
+                    "[%s] 主动消息未送达，不写轨迹（确认点看到失败结果）→ %s",
+                    PLUGIN_NAME,
+                    umo,
+                )
+                return
+            if _already_confirmed(event):
+                logger.info("[%s] 主动消息确认点重复回调，已忽略 → %s", PLUGIN_NAME, umo)
+                return
             await self.proactive.confirm_sent(umo, now=self._now())
+            await diagnostics.delivery(self.proactive, umo, success=True, now=self._now())
+            setter = getattr(event, "set_extra", None)
+            if callable(setter):
+                setter(CONFIRMED_EXTRA, True)
             logger.info("[%s] 主动消息已发出（确认点命中）→ %s", PLUGIN_NAME, umo)
         except Exception as error:  # noqa: BLE001
             logger.warning("[%s] 主动消息确认点失败：%s", PLUGIN_NAME, error)

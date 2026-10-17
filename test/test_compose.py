@@ -52,9 +52,25 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("D" * 30, text, "低优先级整段被砍，而不是切一半")
         self.assertLessEqual(len(text.rstrip("\n")), 40)
 
-    def test_first_section_is_truncated_if_it_alone_exceeds_budget(self) -> None:
-        text = compose.render([compose.Section("promise", "P" * 100, 30)], budget=10)
-        self.assertEqual(text, "P" * 10 + "\n")
+    def test_oversized_section_is_skipped_without_slicing_and_later_state_survives(self) -> None:
+        text = compose.render([
+            compose.Section("promise", "P" * 100, 30),
+            compose.Section("state", "现在很困。", 10),
+        ], budget=10)
+        self.assertEqual(text, "现在很困。\n")
+
+    def test_newlines_are_part_of_budget(self) -> None:
+        text = compose.render([compose.Section("a", "1234"), compose.Section("b", "5678")], budget=9)
+        self.assertEqual(text, "1234\n")
+        self.assertLessEqual(len(text), 9)
+
+    def test_large_middle_section_does_not_hide_shorter_later_one(self) -> None:
+        text = compose.render([
+            compose.Section("promise", "P" * 20, 30),
+            compose.Section("fact", "F" * 30, 20),
+            compose.Section("state", "S" * 10, 10),
+        ], budget=40)
+        self.assertIn("S" * 10, text)
 
     def test_whitespace_only_sections_are_skipped(self) -> None:
         text = compose.render(

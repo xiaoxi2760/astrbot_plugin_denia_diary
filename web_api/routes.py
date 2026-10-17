@@ -29,6 +29,11 @@ RouteSpec = tuple[str, str, tuple[str, ...], str]
 ROUTES: tuple[RouteSpec, ...] = (
     ("status", "status", ("GET",), "总览：情绪、作息、今日主动计数与文件体检"),
     ("diary/list", "diary_list", ("GET",), "两本日记的篇数、字数与最近更新"),
+    ("diary/comments", "diary_comments", ("GET",), "查看一段日记的留言"),
+    ("diary/comments/save", "diary_comment_save", ("POST",), "保存留言草稿，不通知她"),
+    ("diary/comments/publish", "diary_comment_publish", ("POST",), "让她下次私聊时看到这条留言"),
+    ("diary/comments/withdraw", "diary_comment_withdraw", ("POST",), "撤回尚未交付的留言"),
+    ("diary/comments/delete", "diary_comment_delete", ("POST",), "归档删除留言"),
     ("diary/content", "diary_content", ("GET",), "读日记正文（含每段的 seg_id 与可否改）"),
     ("diary/rewrite", "diary_rewrite", ("POST",), "改一段日记的正文（头行不动）"),
     ("diary/delete", "diary_delete", ("POST",), "删一段日记（先进回收站）"),

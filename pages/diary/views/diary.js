@@ -46,6 +46,7 @@
 
   global.createDiaryView = function createDiaryView(ctx) {
     var holder = null;
+    var contentGeneration = 0;
     /* 两本日记各自一套状态：翻月 / 选中哪天 / 分页 / 折叠，都按 book 分开存 */
     var state = {
       book: "normal", tail: 20, collapsed: {},
@@ -457,7 +458,137 @@
       if (!body.children.length) body.appendChild(UI.h("p", { class: "np-p muted", text: "（这条是空的）" }));
       node.appendChild(body);
       node.appendChild(entryActions(UI, book, entry, editable, window_));
+      if (entry.seg_id) node.appendChild(commentsFor(UI, book, entry));
       return node;
+    }
+
+    /* 留言独立于正文保存；展开才读取，保存草稿和发布始终是两个动作。 */
+    function commentsFor(UI, book, entry) {
+      var generation = contentGeneration;
+      var box = UI.h("details", { class: "np-comments" });
+      box.appendChild(UI.h("summary", { text: "留言" }));
+      var body = UI.h("div", { class: "np-comment-body" });
+      box.appendChild(body);
+      var items = [], loaded = false, busy = false, message = "", failed = false;
+      var draftText = null;
+      function alive() {
+        return !!holder && generation === contentGeneration && holder.contains(box);
+      }
+      function errorText(error) { return String((error && error.message) || error || "未知错误"); }
+      function check(result) {
+        if (!result || result.ok === false) throw new Error(String(result && result.error || "留言操作失败"));
+        return result;
+      }
+      function paint() {
+        if (!alive()) return;
+        UI.clear(body);
+        if (message) body.appendChild(UI.h("div", { class: failed ? "err-box" : "np-comment-note", role: "status", text: message }));
+        if (!loaded) {
+          body.appendChild(UI.h("button", {
+            class: "btn btn-sm", type: "button", text: busy ? "读取留言中…" : "重试读取留言", disabled: busy,
+            onclick: function () { return load(); },
+          }));
+          return;
+        }
+        if (!items.length) body.appendChild(UI.h("div", { class: "muted", text: "还没有留言，写一句回应吧。" }));
+        items.filter(function (item) { return item.status !== "deleted"; }).forEach(function (item) {
+          var labels = { draft: "草稿", pending: "待交给她", retired: "已交给她", withdrawn: "已撤回" };
+          var label = item.status === "retired" && item.retired_reason === "source_changed" ? "来源失效" : labels[item.status] || "未知状态";
+          var row = UI.h("div", { class: "np-comment-row" }, [
+            UI.h("span", { class: "tag", text: label }),
+            UI.h("p", { class: "np-comment-text", text: String(item.text || "") }),
+          ]);
+          var actions = UI.h("div", { class: "row-actions np-comment-actions" });
+          function button(text, handler) {
+            actions.appendChild(UI.h("button", { class: "btn btn-sm", type: "button", text: text, disabled: busy, onclick: handler }));
+          }
+          if (item.status === "draft" && item.source_valid === true && item.publishable === true) {
+            button("让她知道", function () { return act("diaryCommentPublish", { id: item.id }, "已发布，等你们下次私聊时交给她。"); });
+          }
+          if (item.status === "pending") {
+            button("撤回", function () { return act("diaryCommentWithdraw", { id: item.id }, "已撤回，尚未交付的留言不会再交给她。"); });
+          }
+          if (item.status !== "pending") {
+            button(item.status === "draft" ? "编辑草稿" : "编辑为新草稿", function () {
+              if (busy || !alive()) return;
+              draftText = String(item.text || ""); paint();
+              var area = body.querySelector("textarea");
+              if (area) area.focus();
+            });
+          }
+          button("删除留言", function () { return act("diaryCommentDelete", { id: item.id }, "留言已删除；批注容量满时会清理已删除记录。"); });
+          if (item.source_valid !== true) row.appendChild(UI.h("div", { class: "np-comment-note", text: "原日记已改写、删除或归属变化，不能发布此留言。" }));
+          else if (item.status === "draft" && item.publishable !== true) row.appendChild(UI.h("div", { class: "np-comment-note", text: item.publish_reason || "这条日记没有明确的私聊归属，可保存草稿，暂不能交给她。" }));
+          row.appendChild(actions);
+          body.appendChild(row);
+        });
+        var area = UI.h("textarea", {
+          class: "np-editor-text np-comment-input", rows: "3", maxlength: "600", spellcheck: "false",
+          "aria-label": "给这篇日记留言", placeholder: "给这篇日记留一句回应（最多 300 字）",
+        });
+        if (draftText === null) {
+          var draft = items.filter(function (item) { return item.status === "draft"; }).slice(-1)[0];
+          draftText = draft ? String(draft.text || "") : "";
+        }
+        area.value = draftText;
+        area.disabled = busy;
+        var counter = UI.h("span", { class: "np-comment-note", text: Array.from(area.value).length + "/300 字" });
+        area.addEventListener("input", function () {
+          area.value = Array.from(area.value).slice(0, 300).join("");
+          draftText = area.value; counter.textContent = Array.from(area.value).length + "/300 字";
+        });
+        body.appendChild(area);
+        body.appendChild(UI.h("div", { class: "row-actions np-comment-actions" }, [
+          UI.h("button", {
+            class: "btn btn-sm", type: "button", text: "保存草稿", disabled: busy,
+            onclick: function () {
+              if (busy || !alive()) return;
+              draftText = area.value;
+              var text = draftText.trim();
+              if (!text || Array.from(text).length > 300) {
+                failed = true; message = !text ? "留言不能为空。" : "每条留言最多 300 字。"; paint(); return;
+              }
+              return act("diaryCommentSave", { book: book, seg_id: entry.seg_id, text: text }, "草稿已保存；点“让她知道”才会交给她。", true);
+            },
+          }), counter,
+        ]));
+        body.appendChild(UI.h("div", { class: "np-comment-note", text: "草稿只留在这里；发布后会在对应人的下一次私聊中交给她。" }));
+      }
+      async function fetchItems() {
+        var result = check(await ctx.apiGet("diaryComments", { book: book, seg_id: entry.seg_id }));
+        if (!alive()) return;
+        items = Array.isArray(result.items) ? result.items : [];
+        loaded = true;
+      }
+      async function load() {
+        if (busy || !alive()) return;
+        busy = true; failed = false; message = ""; paint();
+        try { await fetchItems(); }
+        catch (error) { if (alive()) { failed = true; message = "读取留言失败：" + errorText(error); } }
+        finally { if (alive()) { busy = false; paint(); } }
+      }
+      async function act(key, payload, success, resetDraft) {
+        if (busy || !alive()) return;
+        busy = true; failed = false; message = "正在保存…"; paint();
+        var posted = false;
+        try {
+          check(await ctx.apiPost(key, payload));
+          posted = true;
+          if (!alive()) return;
+          if (resetDraft || key === "diaryCommentPublish" || key === "diaryCommentDelete") draftText = null;
+          message = success;
+          /* 写接口不含实时来源权限，必须重读再决定是否给发布按钮。 */
+          await fetchItems();
+        } catch (error) {
+          if (alive()) {
+            failed = true;
+            if (posted) loaded = false;
+            message = (posted ? "操作已保存，但刷新留言失败，请重试读取：" : "留言操作失败：") + errorText(error);
+          }
+        } finally { if (alive()) { busy = false; paint(); } }
+      }
+      box.addEventListener("toggle", function () { if (box.open && !loaded) return load(); });
+      return box;
     }
 
     /* 不可改的原因：给 title 用，也是"为什么没有按钮"的解释。 */
@@ -606,6 +737,8 @@
     var resizeBound = false;
     var resizeTimer = null;
     async function loadContent(book) {
+      if (!holder) return;
+      var generation = ++contentGeneration;
       var UI = ctx.UI;
       var st = slot(book);
       if (contentSlot) contentSlot.remove();
@@ -617,6 +750,7 @@
           book: book, date: st.date, tail: st.date ? 0 : state.tail,
           who: ctx.who(),
         });
+        if (!holder || generation !== contentGeneration || contentSlot !== box) return;
         /* 窗口口径以本次拉到的为准（别缓存：设置里那个开关一改就变了） */
         var window_ = data.edit_window || null;
         state.window = window_;
@@ -629,6 +763,7 @@
         }
         if (tools.children.length) box.appendChild(tools);
       } catch (error) {
+        if (!holder || generation !== contentGeneration || contentSlot !== box) return;
         UI.clear(box);
         box.appendChild(UI.errorBox(String(error && error.message ? error.message : error)));
       }
@@ -701,6 +836,7 @@
 
     /* ---- 整屏重画：书头 + 日历 + 正文 ---- */
     function render() {
+      contentGeneration += 1;
       var UI = ctx.UI;
       UI.clear(holder);
       contentSlot = null;      /* 整屏重画后旧引用已失效 */
@@ -785,11 +921,25 @@
     }
 
     async function refresh() {
+      if (!holder) return;
+      var generation = ++contentGeneration;
+      var jumpDate = ctx.state && ctx.state.diaryDate;
+      if (jumpDate && parseYmd(jumpDate)) {
+        state.per.normal.date = jumpDate;
+        state.per.normal.month = jumpDate.slice(0, 7);
+        state.per.love.date = jumpDate;
+        state.per.love.month = jumpDate.slice(0, 7);
+        state.cardDate = jumpDate;
+        state.view = "text";
+        delete ctx.state.diaryDate;
+      }
       var data = await ctx.apiGet("diaryList", { who: ctx.who() });
+      if (!holder || generation !== contentGeneration) return;
       state.books = data.books || [];
       render();
       if (state.view === "card") await loadCard(state.book);
       else await loadContent(state.book);
+      if (!holder) return;
       await loadTrash();
     }
 
@@ -797,6 +947,7 @@
       mount: function (target) { holder = target; },
       refresh: refresh,
       unmount: function () {
+        contentGeneration += 1;
         holder = null; trashSlot = null; cardSlot = null;
         cardStage = null; cardFrame = null;
         /* 摘掉 resize 监听：匿名函数挂上去就摘不掉，所以绑的是 onWindowResize。

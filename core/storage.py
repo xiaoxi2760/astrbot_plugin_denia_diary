@@ -43,6 +43,7 @@ DIARY_JSONL_FILE = "日记.jsonl"
 LOVE_DIARY_JSONL_FILE = "恋爱日记.jsonl"
 """日记的**权威存储**（第 17 步）：一行一段 JSON，键序冻结见 ``format.ENTRY_LINE_KEYS``。"""
 NOTEBOOK_FILE = "notebook.json"
+COMMENTS_FILE = "comments.json"
 STATE_FILE = "state.json"
 STATE_HISTORY_FILE = "state_history.jsonl"
 AFFINITY_FILE = "affinity.json"
@@ -59,6 +60,7 @@ CARD_CACHE_DIR = "card-cache"
 
 JSON_FILES = (
     NOTEBOOK_FILE,
+    COMMENTS_FILE,
     STATE_FILE,
     AFFINITY_FILE,
     PROACTIVE_FILE,
@@ -137,6 +139,10 @@ class Layout:
         return self.base_dir / NAMES_FILE
 
     @property
+    def comments(self) -> Path:
+        return self.base_dir / COMMENTS_FILE
+
+    @property
     def diary_nudge(self) -> Path:
         return self.base_dir / DIARY_NUDGE_FILE
 
@@ -160,6 +166,7 @@ class Layout:
             self.diary_jsonl,
             self.love_diary_jsonl,
             self.notebook,
+            self.comments,
             self.state,
             self.state_history,
             self.affinity,

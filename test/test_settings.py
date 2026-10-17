@@ -358,5 +358,87 @@ class PanelEditUnlimitedTest(unittest.TestCase):
         self.assertTrue(result.diary["panel_edit_unlimited"])
 
 
+class CardAllowRemoteTest(unittest.TestCase):
+    """``diary.card_allow_remote``：**默认关**（不许把日记发到远端），非法值回落 + warning。
+
+    默认 False 不是保守——``remote`` 引擎要把整张日记卡（正文、日期、和谁）发给第三方文转图
+    服务。"装完的人没意识到就把日记传出去"比"少一款官方样式"严重得多，所以知情同意的方向
+    只能是默认关、想要显式打开。
+    """
+
+    def test_defaults_to_denied(self) -> None:
+        result = settings_mod.load_settings(None)
+        self.assertFalse(result.diary["card_allow_remote"])
+        self.assertEqual(result.warnings, ())
+        self.assertFalse(settings_mod.default_config()["diary"]["card_allow_remote"])
+        self.assertFalse(settings_mod.CARD_ALLOW_REMOTE_DEFAULT)
+
+    def test_explicit_true_is_kept(self) -> None:
+        """显式允许：这是用户知情之后自己打开的，不该被回落掉。"""
+        result = settings_mod.load_settings({"diary": {"card_allow_remote": True}})
+        self.assertTrue(result.diary["card_allow_remote"])
+        self.assertEqual(result.warnings, ())
+
+    def test_explicit_false_is_kept(self) -> None:
+        result = settings_mod.load_settings({"diary": {"card_allow_remote": False}})
+        self.assertFalse(result.diary["card_allow_remote"])
+        self.assertEqual(result.warnings, ())
+
+    def test_non_bool_falls_back_to_denied_with_warning(self) -> None:
+        """字符串 "true" 不算数——面板传上来的就该是 JSON 布尔。
+
+        ⚠️ 往**允许上传**的方向上出错才是事故，所以回落必须落回 False。
+        """
+        result = settings_mod.load_settings({"diary": {"card_allow_remote": "true"}})
+        self.assertFalse(result.diary["card_allow_remote"])
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("diary.card_allow_remote", result.warnings[0])
+
+    def test_zero_and_one_are_accepted_as_bool(self) -> None:
+        """``_as_bool`` 一贯认 0/1（subsystems / outbound 都用它，不在这里另立一套）。"""
+        on = settings_mod.load_settings({"diary": {"card_allow_remote": 1}})
+        off = settings_mod.load_settings({"diary": {"card_allow_remote": 0}})
+        self.assertTrue(on.diary["card_allow_remote"])
+        self.assertFalse(off.diary["card_allow_remote"])
+        self.assertEqual(on.warnings, ())
+        self.assertEqual(off.warnings, ())
+
+    def test_it_is_independent_of_card_engine(self) -> None:
+        """选 ``remote`` **不等于**允许上传：两个键各管各的，冲突留给 card_render 去降级。
+
+        这里刻意**不**在这里改写 ``card_engine``——配置校验只负责"取值合不合法"，
+        "禁止上传时该走哪条路"是出图编排的判断，住在 ``core/diary/card_render``。
+        """
+        result = settings_mod.load_settings(
+            {"diary": {"card_engine": "remote", "card_allow_remote": False}}
+        )
+        self.assertEqual(result.diary["card_engine"], "remote")
+        self.assertFalse(result.diary["card_allow_remote"])
+
+    def test_it_lives_in_diary_group_with_the_other_card_keys(self) -> None:
+        diary = settings_mod.default_config()["diary"]
+        self.assertEqual(diary["card_allow_remote"], settings_mod.CARD_ALLOW_REMOTE_DEFAULT)
+
+
+class CardAllowRemoteSchemaTest(unittest.TestCase):
+    """``_conf_schema.json`` 与代码默认值表必须双向对齐，否则面板存的值会在重载时丢失。"""
+
+    def schema(self) -> dict:
+        path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_schema_declares_the_key_as_bool_off(self) -> None:
+        spec = self.schema()["diary"]["items"]["card_allow_remote"]
+        self.assertEqual(spec["type"], "bool")
+        self.assertIs(spec["default"], False)
+        self.assertTrue(spec["description"].strip())
+        self.assertTrue(spec["hint"].strip())
+
+    def test_schema_default_matches_code_default(self) -> None:
+        spec = self.schema()["diary"]["items"]["card_allow_remote"]
+        code = settings_mod.default_config()["diary"]["card_allow_remote"]
+        self.assertEqual(spec["default"], code)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

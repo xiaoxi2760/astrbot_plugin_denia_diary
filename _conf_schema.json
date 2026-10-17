@@ -142,7 +142,7 @@
         "type": "string",
         "default": "pretty",
         "description": "日记卡渲染方式（/看日记）",
-        "hint": "pretty=精美卡片（经文转图服务，需联网）；plain=朴素图（本地可离线）；off=只发文本。非法值回落 pretty"
+        "hint": "pretty=精美卡片；plain=本地朴素图；off=只发文本。默认禁止上传日记，允许远端出图需另开开关"
       },
       "card_style": {
         "type": "string",
@@ -161,6 +161,12 @@
         "default": "auto",
         "description": "日记卡出图引擎（pretty 档）",
         "hint": "playwright=本机 Chrome/Edge 截图（约1秒，排版最贴模板）；remote=AstrBot 官方转图服务（约4-6秒，六款样式都能选）；pil=Pillow 直接画（完全离线，但只画纸感那一款）；auto=按前三者顺序挑第一个可用的（默认）。选中的引擎失败会自动往下退并记日志。非法值回落 auto"
+      },
+      "card_allow_remote": {
+        "type": "bool",
+        "default": false,
+        "description": "允许把日记发到远端转图服务",
+        "hint": "关（默认）＝日记只在本机出图（playwright → pil），任何引擎失败都不会上传到远端；开＝允许 remote 引擎上传整张日记卡到 AstrBot 官方转图服务。这一项优先于上面的引擎选择：选了 remote/auto 但这里是关的，就当 remote 不存在，改走本机引擎并在日志里说明"
       }
     }
   },

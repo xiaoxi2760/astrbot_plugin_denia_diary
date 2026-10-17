@@ -8,9 +8,8 @@
 所有系统想说的话都必须经这里合成，**禁止各系统各挂一个钩子各塞一段**。
 本模块只做"渲染"（拼文本 + 按预算裁剪），不做查询——跨系统的只读查询在 ``core/sources.py``（第 2 步建）。
 
-注入预算：总量 ≤ ``PROMPT_BUDGET`` 字，按优先级从高到低保留，超限从低优先级开始砍
-（第 3 步起总量 400、五个类目，砍序见 ``PRIORITY``；"先砍基调保当下"这类类目内部的
-领域规则留在各自的系统里，这里只做整档的拼接与兜底）。
+注入预算：总量 ≤ ``PROMPT_BUDGET`` 字（含换行）。先给状态、互动轨迹预留预算，
+再按话题选少量小本本条目；各段按 ``PRIORITY`` 拼接，放不下的整段跳过，继续尝试短段。
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ PROMPT_BUDGET = 400
 """``system_prompt`` 里允许追加的总字数（方案 §三，v0.5 由 300 扩到 400）。"""
 
 PRIORITY: dict[str, int] = {
-    "promise": 30,  # 相关约定（不可省）
+    "promise": 30,  # 有界的相关约定优先展示
     "fact": 20,  # 关于当前人的事实 + 熟悉度档位词
     "trace": 15,  # 互动轨迹（第 3 步新增，插在 fact 与 state 之间）
     "state": 10,  # 情绪 / 作息
@@ -104,9 +103,8 @@ class Section:
 def render(sections: Iterable[Section], *, budget: int = PROMPT_BUDGET) -> str:
     """按优先级拼成一段，超预算从低优先级开始砍。
 
-    - 已经保留了内容、又装不下下一段 → 直接停（不把段落切一半）；
-    - 第一段就超过预算 → 截断到预算（总比什么都没有强）；
-    - 空文本的段直接跳过。
+    装不下的整段跳过，继续尝试后面的短段；不截半句话。
+    总预算包含段落间和末尾的换行。
     """
     kept: list[str] = []
     used = 0
@@ -114,16 +112,28 @@ def render(sections: Iterable[Section], *, budget: int = PROMPT_BUDGET) -> str:
         text = (section.text or "").strip("\n")
         if not text:
             continue
-        room = budget - used
+        room = budget - used - 1  # 每个保留段末尾的换行也算预算
         if room <= 0:
             break
         if len(text) > room:
-            if kept:
-                break
-            text = text[:room]
+            continue
         kept.append(text)
-        used += len(text)
+        used += len(text) + 1
     return "\n".join(kept) + ("\n" if kept else "")
+
+
+def _fit_lines(text: str, budget: int) -> str:
+    """Legacy providers can return arbitrary text; only retain complete lines."""
+    lines: list[str] = []
+    used = 0
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        extra = len(line) + bool(lines)
+        if used + extra <= budget:
+            lines.append(line)
+            used += extra
+    return "\n".join(lines)
 
 
 def compose_prompt(
@@ -141,8 +151,7 @@ def compose_prompt(
 ) -> str:
     """当前全部注入内容：小本本（约定 / 事实）+ 互动轨迹 + 状态（作息 / 情绪）+ 日记段。
 
-    不回归保险丝：``state=None`` 且 ``affinity=None`` 时，输出与第 2 步逐字节相同
-    （PRIORITY 里旧键的数值不动，新增的只有 ``trace``；有测试钉住）。
+    短文本沿用原来的展示顺序；长记忆只在注入时选取，完整清单仍由 note_list 提供。
     熟悉度档位词并进 fact 档（§2.6 的表：100 字配额含档位词）；
     state 与 affinity 各自的渲染规则留在 ``core/state/`` 内部。
 
@@ -151,35 +160,47 @@ def compose_prompt(
     PROMPT_BUDGET 与 PRIORITY 一个字节不动。
     """
     sections: list[Section] = []
+    state_text = ""
+    if state is not None:
+        state_text = "\n".join(text for text in (
+            state.rhythm_line(now=now), state.mood_line(session, now=now)
+        ) if text)
+    trace_parts: list[str] = []
+    if affinity is not None:
+        trace_parts.append(affinity.trace_line(session, now=now))
+    if greeting is not None:
+        trace_parts.append(greeting.line(session, now=now))
+    trace_text = _fit_lines("\n".join(text for text in trace_parts if text), 70)
+    band = affinity.line(session, now=now) if affinity is not None else ""
+    # Give state and continuity room before sampling notes. Notebook entries
+    # consume at most 140 + 100 chars, even when no state provider is installed.
+    available = max(0, budget - len(state_text) - len(trace_text) - 4)
+    promise_budget = min(140, available)
+    fact_budget = min(100, max(0, available - promise_budget))
+    note_fact_budget = max(0, fact_budget - len(band) - bool(band))
     fact_text = ""
     if notebook is not None:
-        promise = notebook.promise_line(session, now=now)
+        select = getattr(notebook, "prompt_lines", None)
+        if callable(select):
+            promise, fact_text = select(
+                session, now=now, query=strong_text,
+                promise_budget=promise_budget, fact_budget=note_fact_budget,
+            )
+        else:
+            # Keep old protocol implementations and test doubles compatible.
+            promise = notebook.promise_line(session, now=now)
+            fact_text = notebook.fact_line(session, now=now)
+        promise = _fit_lines(promise, promise_budget)
+        fact_text = _fit_lines(fact_text, note_fact_budget)
         if promise:
             sections.append(Section("promise", promise, PRIORITY["promise"]))
-        fact_text = notebook.fact_line(session, now=now)
-    band = affinity.line(session, now=now) if affinity is not None else ""
     fact_parts = [text for text in (fact_text, band) if text]
     if fact_parts:
         sections.append(Section("fact", "\n".join(fact_parts), PRIORITY["fact"]))
-    trace_parts: list[str] = []
-    if affinity is not None:
-        trace = affinity.trace_line(session, now=now)
-        if trace:
-            trace_parts.append(trace)
-    if greeting is not None:
-        hello = greeting.line(session, now=now)
-        if hello:
-            trace_parts.append(hello)
-    if trace_parts:
-        sections.append(Section("trace", "\n".join(trace_parts), PRIORITY["trace"]))
-    if state is not None:
-        parts = [
-            text
-            for text in (state.rhythm_line(now=now), state.mood_line(session, now=now))
-            if text
-        ]
-        if parts:
-            sections.append(Section("state", "\n".join(parts), PRIORITY["state"]))
+    if trace_text:
+        sections.append(Section("trace", trace_text, PRIORITY["trace"]))
+    if state_text:
+        sections.append(Section("state", state_text, PRIORITY["state"]))
     hint = diary.event_hint(
         session, strong_text=strong_text, exchange_who=exchange_who, now=now
     )

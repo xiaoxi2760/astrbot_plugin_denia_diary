@@ -179,7 +179,8 @@ class LayoutTest(TmpDirCase):
         self.assertTrue(str(layout.diary_jsonl).endswith(storage.DIARY_JSONL_FILE))
         self.assertTrue(str(layout.love_diary_jsonl).endswith(storage.LOVE_DIARY_JSONL_FILE))
         self.assertTrue(str(layout.trash_dir).endswith(storage.TRASH_DIR))
-        self.assertEqual(len(layout.files()), 13)
+        self.assertEqual(layout.comments.name, "comments.json")
+        self.assertEqual(len(layout.files()), 14)
 
     def test_all_files_live_directly_under_base_dir(self) -> None:
         layout = storage.Layout(self.root / "data")

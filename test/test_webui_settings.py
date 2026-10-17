@@ -864,7 +864,7 @@ class TestSettingsResetAndErrors(TestSettingsHandlers):
         self.assertEqual([spec[2] for spec in reset_routes], [("POST",)])
         self.assertEqual([spec[1] for spec in reset_routes], ["settings_reset"])
         self.assertEqual(
-            len(self.routes.ROUTES), 22,
+            len(self.routes.ROUTES), 27,
             "12 条既有 + settings/reset + 立绘 4 条 + 日记改删/回收站 4 条 + 日记本预览 1 条 + 导出图片 1 条",
         )
 

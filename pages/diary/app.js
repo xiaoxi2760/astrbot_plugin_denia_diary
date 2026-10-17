@@ -23,6 +23,11 @@
     diaryRestore: "diary/restore",
     diaryCard: "diary/card",
     diaryCardImage: "diary/card-image",
+    diaryComments: "diary/comments",
+    diaryCommentSave: "diary/comments/save",
+    diaryCommentPublish: "diary/comments/publish",
+    diaryCommentWithdraw: "diary/comments/withdraw",
+    diaryCommentDelete: "diary/comments/delete",
     notebook: "notebook",
     notebookComplete: "notebook/complete",
     notebookDelete: "notebook/delete",
@@ -466,6 +471,11 @@ document.addEventListener("error", function (event) {
       },
       mergeOptions: mergeOptions,
       show: show,
+      openDiaryDate: function (date) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) return;
+        state.diaryDate = date;
+        return show("diary");
+      },
       toast: UI.toast,
       /* 设置页保存后把新档位推给顶栏，两个入口永远显示同一个值 */
       setScope: function (value) {

@@ -1009,8 +1009,8 @@ class ComposeStep3Test(TmpDirCase):
         )
         self.assertIn("还没回", text)
 
-    def test_five_full_categories_are_cut_in_reverse_priority(self) -> None:
-        """五类同时写满时按砍序整档丢弃：日记 → 状态 → 轨迹 → 事实；约定不砍。"""
+    def test_long_memory_does_not_starve_current_state(self) -> None:
+        """超长记忆不截成半句，也不能挤掉当下状态。"""
         text = compose.compose_prompt(
             diary=_FakeDiary(line="D" * 50),
             session=self.SESSION,
@@ -1018,9 +1018,11 @@ class ComposeStep3Test(TmpDirCase):
             state=_FakeState(mood="S" * 70),
             affinity=_FakeAffinity(trace="T" * 80),
         )
-        expected = "P" * 200 + "\n" + "F" * 150 + "\n"
-        self.assertEqual(text, expected, "350 + 80 > 400，轨迹整档砍掉，状态与日记更早")
-        self.assertLessEqual(len(text.rstrip("\n")), compose.PROMPT_BUDGET)
+        self.assertIn("S" * 70, text)
+        self.assertIn("D" * 50, text)
+        self.assertNotIn("P", text)
+        self.assertNotIn("F", text)
+        self.assertLessEqual(len(text), compose.PROMPT_BUDGET)
 
     def test_real_objects_degrade_gracefully_in_compose(self) -> None:
         """真实 State / Affinity（无 proactive.json、无情绪）不炸、不占预算。"""

@@ -133,34 +133,66 @@
     ]);
   }
 
-  /* 手写 SVG 折线图：points = [{x, y, title}]，画轴 + 折线 + 圆点 + 提示。
-     不引任何图表库（受限 iframe + CSP）。 */
+  /* series = [{name, color, points:[{x, y, label, title}]}]。
+     x 为 YYYY-MM-DD 时按真实日距共享横轴；旧 points 调用仍可按索引绘制。
+     缺测保留为断点，不能用 Number(null) 把它画成 0。 */
   function lineChart(options) {
     var width = options.width || 720;
     var height = options.height || 210;
     var padLeft = 34, padRight = 10, padTop = 12, padBottom = 24;
-    var points = (options.points || []).filter(function (p) {
-      return typeof p.y === "number" && !isNaN(p.y);
-    });
-    var svg = s("svg", { class: "chart", viewBox: "0 0 " + width + " " + height, preserveAspectRatio: "none" });
-
     var innerW = Math.max(width - padLeft - padRight, 1);
     var innerH = Math.max(height - padTop - padBottom, 1);
     var yMin = typeof options.yMin === "number" ? options.yMin : -1;
     var yMax = typeof options.yMax === "number" ? options.yMax : 1;
+    var svg = s("svg", {
+      class: "chart", viewBox: "0 0 " + width + " " + height, preserveAspectRatio: "none",
+      role: "group", "aria-label": options.label || "情绪曲线",
+    });
+    var series = options.series || [{ points: options.points || [], color: options.color, area: options.area }];
+    var all = [];
+    var dated = !!options.series || (options.points || []).some(function (p) { return p.x !== undefined; });
 
-    function px(index) {
-      if (points.length <= 1) return padLeft + innerW / 2;
-      return padLeft + (innerW * index) / (points.length - 1);
+    function xValue(value) {
+      if (typeof value === "number" && isFinite(value)) return value;
+      if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+      var stamp = Date.parse(value + "T00:00:00Z");
+      return isFinite(stamp) && new Date(stamp).toISOString().slice(0, 10) === value ? stamp : null;
+    }
+    function validY(value) { return typeof value === "number" && isFinite(value); }
+    var prepared = series.map(function (item) {
+      var points = (item.points || []).map(function (p, index) {
+        return { point: p, x: dated ? xValue(p.x) : index };
+      }).filter(function (entry) { return entry.x !== null; });
+      points.sort(function (a, b) { return a.x - b.x; });
+      points.forEach(function (entry) { all.push(entry); });
+      return { points: points, color: item.color || options.color || "var(--accent)", area: item.area, name: item.name || "" };
+    });
+    all.sort(function (a, b) { return a.x - b.x; });
+    var xMin = all.length ? all[0].x : 0;
+    var xMax = all.length ? all[all.length - 1].x : 0;
+    function px(value) {
+      return xMin === xMax ? padLeft + innerW / 2 : padLeft + innerW * (value - xMin) / (xMax - xMin);
     }
     function py(value) {
-      var span = (yMax - yMin) || 1;
-      var ratio = (value - yMin) / span;
-      return padTop + innerH - innerH * ratio;
+      return padTop + innerH - innerH * (value - yMin) / ((yMax - yMin) || 1);
+    }
+    function activate(node, point) {
+      if (typeof options.onPointClick !== "function") return;
+      node.setAttribute("role", "button");
+      node.setAttribute("tabindex", "0");
+      node.setAttribute("aria-label", "查看 " + (point.label || point.x || "") + " 的日记");
+      node.style.cursor = "pointer";
+      node.addEventListener("click", function () { options.onPointClick(point); });
+      node.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault(); options.onPointClick(point);
+        }
+      });
     }
 
-    /* 网格与刻度：0 线 + 上下界。颜色走 CSS 变量，好跟着主题换。 */
-    [yMax, 0, yMin].forEach(function (value) {
+    [yMax, 0, yMin].filter(function (value, index, list) {
+      return value >= yMin && value <= yMax && list.indexOf(value) === index;
+    }).forEach(function (value) {
       var y = py(value);
       svg.appendChild(s("line", {
         x1: padLeft, y1: y, x2: width - padRight, y2: y,
@@ -171,7 +203,7 @@
       }));
     });
 
-    if (!points.length) {
+    if (!all.some(function (entry) { return validY(entry.point.y); })) {
       svg.appendChild(s("text", {
         x: width / 2, y: height / 2, style: "fill:var(--fg-faint);font-size:12px",
         "text-anchor": "middle", text: "还没有情绪数据",
@@ -179,44 +211,57 @@
       return svg;
     }
 
-    var d = points.map(function (p, i) {
-      return (i === 0 ? "M" : "L") + px(i).toFixed(1) + " " + py(p.y).toFixed(1);
-    }).join(" ");
-
-    if (options.area) {
-      svg.appendChild(s("path", {
-        d: d + " L" + px(points.length - 1).toFixed(1) + " " + py(yMin).toFixed(1) +
-           " L" + px(0).toFixed(1) + " " + py(yMin).toFixed(1) + " Z",
-        style: "fill:" + options.area + ";stroke:none",
-      }));
-    }
-    svg.appendChild(s("path", {
-      d: d, style: "fill:none;stroke:" + (options.color || "var(--accent)") +
-        ";stroke-width:1.9;stroke-linejoin:round;stroke-linecap:round",
-    }));
-    points.forEach(function (p, i) {
-      var dot = s("circle", {
-        cx: px(i).toFixed(1), cy: py(p.y).toFixed(1), r: p.strong ? 3.2 : 2.2,
-        style: "fill:" + (p.strong ? (options.color || "var(--accent)") : "var(--bg)") +
-          ";stroke:" + (options.color || "var(--accent)") + ";stroke-width:1.2",
+    prepared.forEach(function (item) {
+      var segments = [], segment = [];
+      item.points.forEach(function (entry) {
+        if (validY(entry.point.y)) segment.push(entry);
+        else if (segment.length) { segments.push(segment); segment = []; }
       });
-      dot.appendChild(s("title", { text: String(p.title || "") }));
-      svg.appendChild(dot);
+      if (segment.length) segments.push(segment);
+      var paths = segments.map(function (part) {
+        return part.map(function (entry, index) {
+          return (index === 0 ? "M" : "L") + px(entry.x).toFixed(1) + " " + py(entry.point.y).toFixed(1);
+        }).join(" ");
+      });
+      if (item.area) {
+        segments.forEach(function (part, index) {
+          svg.appendChild(s("path", {
+            d: paths[index] + " L" + px(part[part.length - 1].x).toFixed(1) + " " + py(yMin).toFixed(1) +
+              " L" + px(part[0].x).toFixed(1) + " " + py(yMin).toFixed(1) + " Z",
+            style: "fill:" + item.area + ";stroke:none",
+          }));
+        });
+      }
+      if (paths.length) svg.appendChild(s("path", {
+        d: paths.join(" "), "data-series": item.name,
+        style: "fill:none;stroke:" + item.color + ";stroke-width:1.9;stroke-linejoin:round;stroke-linecap:round",
+      }));
+      item.points.forEach(function (entry) {
+        var p = entry.point;
+        if (!validY(p.y)) return;
+        var dot = s("circle", {
+          cx: px(entry.x).toFixed(1), cy: py(p.y).toFixed(1), r: p.strong ? 3.2 : 2.2,
+          "data-date": p.label || p.x,
+          style: "fill:" + (p.strong ? item.color : "var(--bg)") + ";stroke:" + item.color + ";stroke-width:1.2",
+        });
+        dot.appendChild(s("title", { text: String(p.title || p.label || "") }));
+        activate(dot, p);
+        svg.appendChild(dot);
+      });
     });
 
-    /* x 轴：只标首尾，别挤成一团 */
-    if (points.length) {
-      svg.appendChild(s("text", {
-        x: padLeft, y: height - 6, style: "fill:var(--fg-faint);font-size:9px",
-        text: String(points[0].label || ""),
-      }));
-      if (points.length > 1) {
-        svg.appendChild(s("text", {
-          x: width - padRight, y: height - 6, style: "fill:var(--fg-faint);font-size:9px",
-          "text-anchor": "end", text: String(points[points.length - 1].label || ""),
-        }));
-      }
-    }
+    /* 首尾刻度共用横轴；日期点可用鼠标或键盘打开当天日记。 */
+    [all[0], all[all.length - 1]].filter(function (entry, index) {
+      return index === 0 || xMin !== xMax;
+    }).forEach(function (entry, index) {
+      var label = s("text", {
+        x: px(entry.x), y: height - 6, style: "fill:var(--fg-faint);font-size:9px",
+        "text-anchor": xMin === xMax ? "middle" : index ? "end" : "start",
+        text: String(entry.point.label || ""),
+      });
+      activate(label, entry.point);
+      svg.appendChild(label);
+    });
     return svg;
   }
 

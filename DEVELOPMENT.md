@@ -70,10 +70,11 @@ astrbot_plugin_denia_diary/
 | `note_forget` | 删一条（先过归属判定，进 `trash` 回收站） |
 | `mood_report` | 心情自报（`word` 原词 + 可选 `valence` / `arousal` 字符串打分）；**没有 `affinity_*` 工具**，她不碰熟悉度数值 |
 | `sleep_check` | 查**眼前人**的作息记录（早晚安时间 / 睡眠时长 / 连续天数）；私聊限定（口径同 diary_read），没记录就明说——工具描述写明「记不到就说没有，别编」 |
-| `@filter.command("看日记")`（别名 /日记卡） | **用户指令，不是 LLM 工具**（第 14 步）：人主动敲才跑，把一天渲染成图片卡。读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（`text_to_image`，本地 Pillow 可离线）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape）。六款模板 + 自定义字体见 [日记卡](#日记卡第-15-步重做) |
-| `@filter.command("日记款式")`（别名 /日记卡样式、/换日记款式） | **换卡片款式**（第 15 步，同属用户指令）：`/日记款式 手帐`。落盘 + 热生效，走 `apply_settings`；认不出的款式明说不静默回落 |读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（`text_to_image`，本地 Pillow 可离线）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape）。六款模板 + 自定义字体见 [日记卡](#日记卡第-15-步重做) |
+| `@filter.command("看日记")`（别名 /日记卡） | **用户指令，不是 LLM 工具**（第 14 步）：人主动敲才跑，把一天渲染成图片卡。读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（本机 `card_pil`）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape）。六款模板 + 自定义字体见 [日记卡](#日记卡第-15-步重做) |
+| `@filter.command("日记款式")`（别名 /日记卡样式、/换日记款式） | **换卡片款式**（第 15 步，同属用户指令）：`/日记款式 手帐`。落盘 + 热生效，走 `apply_settings`；认不出的款式明说不静默回落 |读取走 `read_day_for`（结构化 + 可见性与 `read_for` 同源）；渲染三档降级链 pretty（`html_render` + `template/diary_card_*.html.j2`，日记正文 POST 给文转图端点）→ plain（本机 `card_pil`）→ 纯文本；**群聊不落正文**（口径同 note_list 只报数）；正文进模板前一律 `html.escape`（该链路无 autoescape）。六款模板 + 自定义字体见 [日记卡](#日记卡第-15-步重做) |
 | `on_llm_request`（priority=5） | 先 `affinity.touch`（私聊 private / 群聊 mention）+ `proactive.note_contact`（person→会话反查表）+ `greeting.observe`（整条消息是问候才记，记上后 `mark_slot_today` 双向防重），再把 `core.compose` 渲染的一段挂进 `req.extra_user_content_parts`（见下）；**主动轮不触发它**，那边走 `payload.note` |
-| `on_using_llm_tool` | **确认点**：主动唤醒路径里她真调了 `send_message_to_user`（事件带 `cron_job` extra）→ 写 `last_sent_at`；被动轮同一工具不算。主动轮在确认点之前先过 `_maybe_speak`（F1：文本就地转语音，见「语音」一节） |
+| `on_using_llm_tool` | 发送前清洗标记、转换主动语音；不确认发送。 |
+| `on_llm_tool_respond` | 仅匹配主动轮、消息工具、与当前会话一致的成功结果，才写发送轨迹；同一事件只确认一次。 |
 | `initialize` / `terminate` | 生命周期。`initialize()` 重建巡检 job（basic handler 只在内存注册表，热重载即失效 → 按 name 查旧 job 一律 delete 再 add）；`terminate()` 冲熟悉度合并写窗口 |
 
 工具描述是**行为规范**（"别写成工作汇报"、"开头那行不动"、"只记两类"、"闲聊情绪玩笑不记"），不是注释——改文案等于改她的行为，`test/test_main.py` 逐条钉住了这些关键词。
@@ -158,7 +159,7 @@ astrbot_plugin_denia_diary/
 2. **闸门（该不该说）**：**先闸门后内容**——免打扰是全局闸（常规内容整个静默），配额 / 最小间隔是会话闸（先算出"今天还能对谁说话"，触发器只对这些会话取料，巡检 15min 一天 96 次不白翻日记原文）；然后按优先级逐个问触发器，**一 tick 至多放行一条**。三条硬约束：免打扰时段（`is_late_night`）、私聊每日 2 条 / 群聊每日 1 条、同会话最小间隔 2 小时。**群聊克制**：除约定跟进 / 纪念日外，其余触发器只在私聊出（纪念日的内容源 `facts_for` 本就只在私聊可见，实际能进群的只有约定跟进）。
 3. **出站（怎么说）**：默认**唤醒她本人**——`add_active_job(payload={"session": umo, "note": …}, run_once=True)`；`note` = `compose_prompt` 的完整注入（人格一致，不另写渲染器）+ ≤100 字上下文包（`【类目】指令 素材：原文片段`，压掉换行——note 经宿主 `json.dumps` 进 system prompt，预算按转义后算）。**直发只用于心情暗号**：整条消息就是那个字符（默认 `。`，可配 `signal_char`），`StarTools.send_message` 返回 `True` 才算发出（平台没找到 / 异常都不写 `last_sent_at`）。
 
-**两段式 `last_sent_at`**：决策时只扣 `today_count` / `last_slot` / `slots_today`；`last_sent_at` 等**真的发出去**才写——唤醒路径的确认点是 `on_using_llm_tool`（她真调了 `send_message_to_user` 且事件带 `cron_job` extra），直发路径是 `send_message` 返回 `True`。中间失败 = 配额白吃一次，换轨迹永不替她说"她找过你了"。日志里"已派发"与"已发出"分开记。
+**两段式 `last_sent_at`**：决策时只扣 `today_count` / `last_slot` / `slots_today`；`last_sent_at` 等**真的发出去**才写——唤醒路径的确认点是 `on_llm_tool_respond`（工具返回目标会话一致的成功结果，且事件带 `cron_job` extra），直发路径是 `send_message` 返回 `True`。中间失败 = 配额白吃一次，换轨迹永不替她说"她找过你了"。日志里"已派发"与"已发出"分开记。
 
 **暗号的冷却也在确认点才写**：`signal_date`（每日一次）与 `signal_last_at`（3 天独立冷却）原先记在 `_commit`（决策时），发送失败不回滚——结果"一次没送达 = 她 3 天不能再用暗号"，而她本人和用户都不知道为什么。现在两个键挪进 `confirm_sent`，只有真送达才落；发失败时下一次巡检会**再试**（每 `patrol_minutes` 一次，直到送出或她缓过来为止），`today_count` 照常每一步都自增（配额按"决策"计，这是刻意的）。
 
@@ -225,7 +226,7 @@ gscore / 麦麦那类「用户发起」的早晚安互动：**记录归系统、
 2. 表情包插件唯一的处理点在 `on_decorating_result`，而它第一行就是 `event.get_result()`——**直发路径没有 result 对象，拦不到**；
 3. `on_using_llm_tool` 拿到的 `tool_args` 紧接着就被 `execute(**valid_params)` 展开成**同一个 dict** → 在钩子里改真的生效。
 
-**做法**：在现有的 `on_using_llm_tool` 钩子（主动消息确认点就在那儿）最前面加一步清洗，`tool_args["messages"] = clean_messages(...)` **原地改**。判断在 `core/outbound.py`（纯函数、零 astrbot 依赖）。
+**做法**：在现有的 `on_using_llm_tool` 发送前钩子最前面加一步清洗，`tool_args["messages"] = clean_messages(...)` **原地改**。判断在 `core/outbound.py`（纯函数、零 astrbot 依赖）。
 
 | 规则 | 说明 |
 | :--- | :--- |
@@ -825,7 +826,7 @@ endpoint **不带插件名前缀**、**不带前导斜杠**（前端写 `"status
 | `diary.event_hint_cooldown_min` | 30 | 5–1440 |
 | `diary.fallback_hint_cooldown_min` | 90 | 15–1440 |
 | `diary.exchange_window_min` | 30 | 5–1440 |
-| `diary.card_render` | `pretty` | `/看日记` 的渲染方式：`pretty`（HTML 模板，经文转图服务）/ `plain`（Markdown，本地可离线）/ `off`（只发文本）；非法回落 pretty。pretty 档会把日记正文 POST 给渲染端点（README 有声明） |
+| `diary.card_render` | `pretty` | 精美卡片 / 本机朴素图 / 文本。远端路径统一受 `diary.card_allow_remote` 控制，默认禁止；朴素档始终只走本机 PIL。 |
 | `diary.card_style` | `paper` | pretty 档的模板款式：`paper`（纸感，面板同款）/ `ink`（墨信）/ `postcard`（明信片）；非法回落 paper |
 | `notebook.promise_limit` | 20 | 1–200；约定上限（每人，按未完成计） |
 | `notebook.fact_limit` | 15 | 1–200；事实上限（每人） |
@@ -892,3 +893,12 @@ py tools/webui_selfcheck.py
 - 消息启发式的自动情感分析、自动记笔记（噪音毁信任）；
 - 签到 / 打卡 / 积分 / 熟悉度游戏化；
 - 独立的待办备忘系统（并入日记）。
+
+## 1.7.0 陪伴连续性与发送校验
+
+- 发送前钩子仅清洗与转语音；发送后钩子精确匹配宿主成功文案中的会话，才确认送达。失败仍保留决策素材，单事件去重。
+- `diary.card_allow_remote=false` 为默认值；出图编排和精美卡片文字转图兜底均受它控制，本机不可用时返回文本。两种隐私策略分开缓存。
+- 曲线使用真实日期横轴，独立绘制当下与基调，坐标范围 -2~2，缺测不补零；日期点击通过 `ctx.openDiaryDate` 打开日记。
+- 小本本完整存储及工具查询不变，只有提示按话题、近期更新和到期程度选取完整条目，并为状态与互动轨迹预留预算。被动轮使用当前消息，主动轮使用候选素材作为查询词。
+- `proactive.json.diagnostic` 保存最近一次巡检或发送结果，不保存正文；诊断计算/写盘失败不影响派发。
+- `comments.json` 为旁挂批注文件。面板的 `diary/comments`、`save`、`publish`、`withdraw`、`delete` 五条接口分别列出、存草稿、发布、撤回和归档。草稿不会注入，已发布批注仅交给源归属人的私聊一次；再次校验启用范围、恋爱名单和源段落内容地址。被动轮批注与其它动态内容合计不超过 400 字，主动轮追加最多 100 字批注素材。

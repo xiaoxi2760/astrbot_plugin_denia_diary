@@ -485,6 +485,94 @@ class _FakeNotebook:
 
 
 class ComposeIntegrationTest(TmpDirCase):
+    def test_long_notes_leave_room_for_state_and_stay_complete_in_tool(self) -> None:
+        nb = make_notebook(self.root)
+        long_text = "这是一条不能从中间切开的长约定。" * 100
+        run(nb.note_add(private_session(), kind="promise", text=long_text, now=NOW))
+        run(nb.note_add(private_session(), kind="promise", text="今晚一起看电影", now=NOW))
+
+        class State:
+            def rhythm_line(self, *, now=None):
+                return "现在这个点，她该睡了。"
+
+            def mood_line(self, session, *, now=None):
+                return "这会儿她有点开心。"
+
+        text = compose.compose_prompt(_FakeDiary(), private_session(), notebook=nb, state=State(), now=NOW)
+        self.assertIn("今晚一起看电影", text)
+        self.assertIn("她该睡了", text)
+        self.assertIn("她有点开心", text)
+        self.assertIn("note_list", text)
+        self.assertNotIn(long_text[:20], text)
+        self.assertLessEqual(len(text), 400)
+        self.assertEqual(nb.note_list(private_session())["promises"][0]["text"], long_text)
+        self.assertEqual(len(nb.promises_for(private_session(), now=NOW)), 2)
+
+    def test_query_reaches_selection_and_related_fact_wins(self) -> None:
+        nb = make_notebook(self.root)
+        run(nb.note_add(private_session(), kind="fact", text="喜欢吃草莓蛋糕", now=NOW - timedelta(days=60)))
+        for i in range(4):
+            run(nb.note_add(private_session(), kind="fact", text=f"最近第{i}个周末喜欢听歌", now=NOW))
+        text = compose.compose_prompt(
+            _FakeDiary(), private_session(), notebook=nb, now=NOW, strong_text="今天想买草莓蛋糕"
+        )
+        rows = [line for line in text.splitlines() if line.startswith("- ")]
+        self.assertIn("草莓蛋糕", rows[0])
+        self.assertLessEqual(len(nb.fact_line(private_session(), query="草莓蛋糕", now=NOW)), 100)
+        self.assertEqual(len(nb.note_list(private_session())["facts"]), 5)
+
+    def test_recently_updated_fact_wins_without_topic(self) -> None:
+        nb = make_notebook(self.root)
+        run(nb.note_add(private_session(), kind="fact", text="旧习惯", now=NOW - timedelta(days=60)))
+        run(nb.note_add(private_session(), kind="fact", text="新习惯", now=NOW))
+        line = nb.fact_line(private_session(), now=NOW)
+        self.assertLess(line.index("新习惯"), line.index("旧习惯"))
+
+    def test_list_hint_cannot_displace_the_highest_relevance_fact(self) -> None:
+        nb = make_notebook(self.root)
+        important = (
+            "对青霉素严重过敏，曾经因过敏出现呼吸困难，医生要求以后就诊和开药前"
+            "都明确告知医护人员这个过敏史。他随身携带急救卡。"
+        )
+        run(nb.note_add(private_session(), kind="fact", text=important, now=NOW))
+        for text in ("喜欢听歌", "喜欢电影", "喜欢散步"):
+            run(nb.note_add(private_session(), kind="fact", text=text, now=NOW))
+        line = nb.fact_line(private_session(), now=NOW, query="青霉素过敏开药")
+        self.assertIn(important, line)
+        self.assertLessEqual(len(line), 100)
+        self.assertLess(line.index(important), line.index("喜欢听歌"))
+        self.assertEqual(len(nb.note_list(private_session())["facts"]), 4)
+
+    def test_fitting_fact_survives_even_without_room_for_any_list_hint(self) -> None:
+        nb = make_notebook(self.root)
+        title = "【小本本】关于眼前这个人，你记着："
+        budget = len(title) + len("- 青霉素过敏") + 1
+        run(nb.note_add(private_session(), kind="fact", text="青霉素过敏", now=NOW))
+        run(nb.note_add(private_session(), kind="fact", text="喜欢听歌", now=NOW))
+        line = nb.fact_line(private_session(), now=NOW, query="青霉素", budget=budget)
+        self.assertEqual(line, title + "\n- 青霉素过敏")
+        self.assertLessEqual(len(line), budget)
+
+    def test_approaching_deadline_beats_new_undated_promises(self) -> None:
+        nb = make_notebook(self.root)
+        run(nb.note_add(private_session(), kind="promise", text="明天陪他复查", due_at="2026-10-05", now=NOW - timedelta(days=60)))
+        for i in range(5):
+            run(nb.note_add(private_session(), kind="promise", text=f"以后一起完成第{i}件事", now=NOW))
+        line = nb.promise_line(private_session(), now=NOW)
+        self.assertIn("明天陪他复查", line)
+        self.assertLess(line.index("明天陪他复查"), line.index("以后一起完成"))
+        self.assertLessEqual(len(line), 140)
+
+    def test_selected_group_prompt_stays_count_only_even_when_query_matches_secret(self) -> None:
+        nb = make_notebook(self.root)
+        run(nb.note_add(private_session(), kind="fact", text="秘密病例", now=NOW))
+        run(nb.note_add(private_session(), kind="promise", text="陪他去秘密医院", now=NOW))
+        text = compose.compose_prompt(
+            _FakeDiary(), group_session(), notebook=nb, now=NOW, strong_text="秘密病例秘密医院"
+        )
+        self.assertIn("1 件", text)
+        self.assertNotIn("秘密", text)
+
     def test_without_notebook_output_matches_step1(self) -> None:
         """保险丝：不传 notebook 时输出与第 1 步逐字节一致，两个挂载点不动。"""
         diary = _FakeDiary(line="日记那行", hint="提醒那句")
@@ -509,7 +597,7 @@ class ComposeIntegrationTest(TmpDirCase):
 
     def test_budget_cuts_from_diary_first(self) -> None:
         diary = _FakeDiary(line="日记那行" * 75)
-        notebook = _FakeNotebook(promise="约定那段" * 40, fact="事实那段")
+        notebook = _FakeNotebook(promise="约定那段" * 30, fact="事实那段")
         text = compose.compose_prompt(
             diary, private_session(), notebook=notebook, budget=compose.PROMPT_BUDGET
         )
