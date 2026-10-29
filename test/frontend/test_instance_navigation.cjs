@@ -79,6 +79,9 @@ async function fixture(options = {}) {
           return instancePayload;
         }
         if (pending.has(endpoint)) return pending.get(endpoint).promise;
+        if (endpoint === 'settings' && options.settings) {
+          return { ok: true, values: options.settings[params.scope_id || 'legacy'] || {} };
+        }
         if (endpoint === 'status') {
           return { ok: true, who_options: [{ id: 'u_1001', name: '希', is_owner: true }] };
         }
@@ -86,6 +89,7 @@ async function fixture(options = {}) {
       },
       apiPost: async (endpoint, body) => {
         posts.push({ endpoint, body });
+        if (pending.has('POST:' + endpoint)) return pending.get('POST:' + endpoint).promise;
         return { ok: true };
       },
       upload: async (endpoint, file) => { uploads.push({ endpoint, file }); return { ok: true }; },
@@ -268,4 +272,107 @@ test('an unavailable instance registry does not start unscoped business requests
   assert.equal(f.gets.length, 1);
   assert.equal(f.gets[0].endpoint, 'instances');
   assert.equal(f.posts.length, 0);
+});
+
+function scopeButton(f, value) {
+  return f.document.getElementById('scope-bar').firstChild.children
+    .find(button => button.getAttribute('data-scope') === value);
+}
+async function pickMode(f, value) {
+  scopeButton(f, value).events.click();
+  await new Promise(resolve => setImmediate(resolve));
+}
+
+test('startup loads the selected instance settings for the header and rename editor', async () => {
+  const f = await fixture({ settings: { 'scope-a': {
+    scope: { mode: 'owner' }, panel: { brand: '甲的日记' }, name_preference: { u_1001: '旧名字' },
+  } } });
+  assert.ok(f.gets.some(g => g.endpoint === 'settings' && g.params.scope_id === 'scope-a'));
+  assert.equal(f.panel.state.scope, 'owner');
+  assert.equal(scopeButton(f, 'owner').getAttribute('aria-pressed'), 'true');
+  assert.equal(f.document.getElementById('brand').textContent, '甲的日记');
+  f.panel.ctxFor('scope-a').setWho('u_1001');
+  f.document.getElementById('who-name-edit').hidden = true;
+  f.document.getElementById('who-rename').events.click();
+  assert.equal(f.document.getElementById('who-name-input').value, '旧名字');
+});
+
+test('the actual header control posts its instance and reloads status', async () => {
+  const f = await fixture();
+  const count = f.gets.filter(g => g.endpoint === 'status').length;
+  await pickMode(f, 'all');
+  assert.equal(f.posts.length, 1);
+  assert.equal(f.posts[0].endpoint, 'settings');
+  assert.equal(f.posts[0].body.scope_id, 'scope-a');
+  assert.equal(f.posts[0].body.changes['scope.mode'], 'all');
+  assert.equal(f.panel.state.scope, 'all');
+  assert.ok(f.gets.filter(g => g.endpoint === 'status').length > count);
+  assert.ok(f.gets.filter(g => g.endpoint === 'status').every(g => g.params.scope_id === 'scope-a'));
+  assert.doesNotMatch(f.document.getElementById('toast').textContent, /not defined|没切/);
+});
+
+test('a failed header write rolls back the current instance control', async () => {
+  const f = await fixture();
+  const result = deferred(); f.pending.set('POST:settings', result);
+  await pickMode(f, 'all');
+  result.resolve({ ok: false, error: '保存失败' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.posts.length, 1);
+  assert.equal(f.panel.state.scope, 'private');
+  assert.equal(scopeButton(f, 'private').getAttribute('aria-pressed'), 'true');
+  assert.match(f.document.getElementById('toast').textContent, /保存失败/);
+});
+
+test('a late header write cannot roll back the next instance mode', async () => {
+  const f = await fixture({ settings: { 'scope-b': { scope: { mode: 'owner' } } } });
+  const result = deferred(); f.pending.set('POST:settings', result);
+  await pickMode(f, 'all');
+  await f.panel.switchScope('scope-b');
+  result.resolve({ ok: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.panel.state.scope, 'owner');
+  assert.equal(scopeButton(f, 'owner').getAttribute('aria-pressed'), 'true');
+  assert.equal(f.posts[0].body.scope_id, 'scope-a');
+});
+
+test('renaming merges existing names and writes only the selected instance', async () => {
+  const f = await fixture({ settings: { 'scope-a': { name_preference: { u_2002: '保留' } } } });
+  f.panel.ctxFor('scope-a').setWho('u_1001');
+  await new Promise(resolve => setImmediate(resolve));
+  f.document.getElementById('who-name-input').value = '新名字';
+  await f.document.getElementById('who-name-ok').events.click();
+  assert.equal(f.posts.length, 1);
+  const body = f.posts[0].body;
+  assert.equal(body.scope_id, 'scope-a');
+  assert.equal(body.changes.name_preference.u_2002, '保留');
+  assert.equal(body.changes.name_preference.u_1001, '新名字');
+  assert.equal(f.panel.state.options.find(o => o.id === 'u_1001').name, '新名字');
+});
+
+test('a rename reply from a previous visit cannot alter names after switching away and back', async () => {
+  const f = await fixture({ settings: { 'scope-a': { name_preference: { u_1001: '服务器名字' } } } });
+  f.panel.ctxFor('scope-a').setWho('u_1001');
+  await new Promise(resolve => setImmediate(resolve));
+  const result = deferred(); f.pending.set('POST:settings', result);
+  f.document.getElementById('who-name-input').value = '旧请求的名字';
+  const saving = f.document.getElementById('who-name-ok').events.click();
+  await f.panel.switchScope('scope-b');
+  await f.panel.switchScope('scope-a');
+  f.document.getElementById('who-name-edit').hidden = true;
+  f.document.getElementById('who-rename').events.click();
+  result.resolve({ ok: true }); await saving;
+  assert.equal(f.document.getElementById('who-name-edit').hidden, false);
+  assert.equal(f.document.getElementById('who-name-input').value, '服务器名字');
+  assert.notEqual(f.panel.state.options.find(o => o.id === 'u_1001').name, '旧请求的名字');
+  assert.doesNotMatch(f.document.getElementById('toast').textContent, /没改成/);
+});
+
+test('legacy header settings remain unscoped', async () => {
+  const f = await fixture({ instances: { ok: true, isolation_enabled: false, items: [] },
+    settings: { legacy: { scope: { mode: 'owner' } } } });
+  assert.equal(f.panel.state.scope, 'owner');
+  await pickMode(f, 'all');
+  assert.equal(f.posts.length, 1);
+  assert.equal(f.posts[0].body.scope_id, undefined);
+  assert.equal(f.posts[0].body.changes['scope.mode'], 'all');
 });

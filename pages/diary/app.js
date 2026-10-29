@@ -610,15 +610,18 @@
 
   async function switchScope(next, prev) {
     /* 先乐观切过去（控件内部已经切了），失败再回滚到 prev。 */
+    var scopeId = state.scopeId, epoch = scopeEpoch;
     try {
       var changes = {};
       changes[SCOPE_PATH] = next;
-      var result = await apiPost("settings", { changes: changes });
+      var result = await apiPostScoped(scopeId, "settings", { changes: changes });
+      if (epoch !== scopeEpoch) return;
       if (result && result.ok === false) throw new Error(String(result.error || "未知原因"));
       state.scope = next;
       UI.toast("启用范围：" + UI.scopeLabel(next));
-      await reloadAfterScope();
+      await reloadAfterScope(scopeId, epoch);
     } catch (error) {
+      if (epoch !== scopeEpoch) return;
       state.scope = prev;
       if (scopeCtl) scopeCtl.set(prev);      /* 回滚显示，别停在假切换态 */
       UI.toast("启用范围没切：" + String((error && error.message) || error), true);
@@ -628,15 +631,18 @@
   /* 切档之后「对谁」要跟着动（第 8 步）：重拉 /status 拿新的 who_options +
      scope_mode（分区、主人置顶随之重建），再把当前 tab 整个刷一遍。
      拉不到也不该把面板弄坏——退化成只重画当前 tab。 */
-  async function reloadAfterScope() {
+  async function reloadAfterScope(scopeId, epoch) {
     try {
-      var st = await apiGet("status", { who: state.who });
+      var st = await apiGetScoped(scopeId, "status", { who: state.who });
+      if (epoch !== scopeEpoch) return;
       applyScopeMode(st && st.scope_mode);
       mergeOptions(st && st.who_options);
     } catch (error) { /* 老后端可能还没 scope_mode，继续刷 tab */ }
+    if (epoch !== scopeEpoch) return;
     try {
       await show(state.current);
     } catch (error) { /* 视图自己会兜底 */ }
+    if (epoch !== scopeEpoch) return;
     var cur = currentOption();
     if (cur && cur.out_of_scope) {
       UI.toast("「" + optionText(cur).replace(" · 主人", "") + "」在当前档位外：她不会在 TA 的会话里工作，面板照常能看", true);
@@ -673,6 +679,7 @@
   async function saveName() {
     var input = document.getElementById("who-name-input");
     var who = state.who;
+    var scopeId = state.scopeId, epoch = scopeEpoch;
     if (!input || !who) { UI.toast("先在上面选一个人", true); return; }
     var text = String(input.value || "").trim();
     /* 合并：别人的名字一条都不能少。留空 = 删掉这个人这一条。 */
@@ -681,10 +688,11 @@
     var changes = {};
     changes[NAME_PATH] = merged;
     try {
-      var result = await apiPost("settings", { changes: changes });
+      var result = await apiPostScoped(scopeId, "settings", { changes: changes });
+      if (epoch !== scopeEpoch) return;
       if (result && result.ok === false) throw new Error(String(result.error || "未知原因"));
       namePref = merged;
-      closeNameEditor();
+      if (state.who === who) closeNameEditor();
       /* 立刻把新名字显示出来：下拉文本是 label(后端给的) || name || id，
          这里手动把 name 补上，**不等**后端把 contacts 写完。 */
       var hit = state.options.filter(function (one) { return one.id === who; })[0];
@@ -695,6 +703,7 @@
       }
       UI.toast(text ? "名字已记为「" + text + "」" : "已删掉这个名字");
     } catch (error) {
+      if (epoch !== scopeEpoch) return;
       /* 失败就不改显示**，让下拉维持原样。 */
       UI.toast("没改成：" + String((error && error.message) || error), true);
     }
@@ -966,13 +975,16 @@ document.addEventListener("error", function (event) {
     /* 顶栏三段的初始档位：从 settings 的 values 里点分路径读。
        读不到就留在默认档（private）并且**不报错**——面板永远可用，
        这只是显示当前值，不该因为它把整个面板拖下水。 */
+    var initialEpoch = scopeEpoch;
     try {
-      var st0 = await apiGet("settings", {});
+      var st0 = await apiGetScoped(state.scopeId, "settings", {});
+      if (initialEpoch !== scopeEpoch) return;
       loadNamePref(st0 && st0.values);
       applyPanel(st0 && st0.values && st0.values.panel);
       var v = (((st0 || {}).values || {}).scope || {}).mode;
       if (v) { applyScopeMode(v); renderWhoPicker(); }
     } catch (error) { /* 读不到就按默认档显示，不打扰用户 */ }
+    if (initialEpoch !== scopeEpoch) return;
 
     await show("overview");
   }
