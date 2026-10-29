@@ -199,3 +199,27 @@ test('a late comment GET cannot modify a page that has been replaced, and diary 
   assert.equal(allText(oldBox), before);
   assert.doesNotMatch(allText(f.holder), /late reply/);
 });
+
+test('deleting an old comment preserves the unsaved reply across view recreation', async () => {
+  const f = await fixture({items:[{id:'old',text:'旧留言',status:'draft',source_valid:true,publishable:true}]});
+  const box = await f.open(), area = nodes(box,'textarea')[0];
+  area.value = '我正在写的半句话'; area.events.input();
+  await click(box, '删除留言');
+  const fresh = await fixture({state:f.context.state,items:f.items});
+  const restored = await fresh.open();
+  assert.equal(nodes(restored,'textarea')[0].value, '我正在写的半句话');
+});
+
+test('publishing clears matching text but preserves a different unfinished reply', async () => {
+  for (const text of ['已保存的留言','还在输入的新回复']) {
+    const f = await fixture({items:[{id:'old',text:'已保存的留言',status:'draft',source_valid:true,publishable:true}]});
+    const box = await f.open(), area = nodes(box,'textarea')[0];
+    area.value = text; area.events.input();
+    await click(box, '让她知道');
+    assert.equal(area.value, text==='已保存的留言' ? '' : text);
+    if (!area.value) {
+      await click(box,'保存草稿');
+      assert.equal(f.posts.length, 1, '已发布内容不能通过残留输入框再次保存');
+    }
+  }
+});

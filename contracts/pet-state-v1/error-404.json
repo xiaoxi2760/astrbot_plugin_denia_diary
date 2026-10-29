@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "error": {
+    "code": "not_found",
+    "message": "无法读取角色状态"
+  }
+}

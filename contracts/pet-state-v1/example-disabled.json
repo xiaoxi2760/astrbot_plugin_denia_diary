@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "agent_id": "yaya",
+  "device_id": "device-fixture",
+  "server_time": "2026-10-27T14:30:00+08:00",
+  "timezone": "Asia/Shanghai",
+  "ttl_seconds": 60,
+  "valid_until": "2026-10-27T14:31:00+08:00",
+  "refresh_after_seconds": 15,
+  "life": {
+    "enabled": false,
+    "status": "disabled",
+    "date": "2026-10-27",
+    "revision": 3,
+    "current": null,
+    "next": null
+  },
+  "mood": {
+    "status": "disabled",
+    "word": null,
+    "observed_at": null,
+    "valid_until": null
+  },
+  "presentation": {
+    "expression": "neutral"
+  }
+}

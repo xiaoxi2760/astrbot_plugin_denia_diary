@@ -291,6 +291,14 @@
               default: "private", editable: true, note: "", editor: "scope",
               options: ["owner", "private", "all"] },
           ] },
+        { path: "pet_bridge", key: "pet_bridge", type: "object", description: "桌宠状态同步",
+          hint: "离线预览不会启动真实监听器；实际设备管理在已登录面板完成。",
+          children: [
+            { path: "pet_bridge.enabled", key: "enabled", type: "bool", description: "开启设备状态服务", default: false, editable: true },
+            { path: "pet_bridge.host", key: "host", type: "string", description: "监听 IP", default: "127.0.0.1", editable: true },
+            { path: "pet_bridge.port", key: "port", type: "int", description: "状态服务端口", default: 6196, min: 1024, max: 65535, editable: true },
+            { path: "pet_bridge.agent_id", key: "agent_id", type: "string", description: "角色 ID", default: "yaya", editable: true },
+          ] },
         { path: "love_peers", key: "love_peers", type: "list", description: "最亲密名单",
           hint: "填用户 id（字符串）。名单内的人的私聊日记进入“恋爱日记”",
           default: [], editable: true, note: "" },
@@ -305,6 +313,7 @@
         state: { rhythm: "06:00|刚醒\n09:00|精神不错\n13:00|有点犯困\n18:00|晚饭后放松\n23:00|该睡了",
                  rhythm_weekend: "", late_night: "23:30-06:30" },
         scope: { mode: "private" },
+        pet_bridge: { enabled: false, host: "127.0.0.1", port: 6196, agent_id: "yaya" },
         love_peers: ["u_1001"], name_preference: { u_1001: "希" },
       },
       defaults: {
@@ -313,12 +322,13 @@
         diary: { max_chars: 1200, nudge_after_hour: 22, card_render: "pretty", card_style: "paper", card_font: "" },
         state: { rhythm: "06:00|刚醒\n09:00|精神不错\n23:00|该睡了" },
         scope: { mode: "private" },
+        pet_bridge: { enabled: false, host: "127.0.0.1", port: 6196, agent_id: "yaya" },
         love_peers: [], name_preference: {},
       },
-      warnings: ["proactive.patrol_minutes=999 超出 [1, 59]，已夹紧"],
+      warnings: [],
       editable_paths: ["enabled", "timezone", "diary.max_chars", "diary.nudge_after_hour",
         "state.rhythm", "scope.mode", "panel.brand", "panel.brand_sub",
-        "love_peers", "name_preference"],
+        "love_peers", "name_preference", "pet_bridge.enabled", "pet_bridge.host", "pet_bridge.port", "pet_bridge.agent_id"],
       notices: ["关掉总开关后日记、小本本、状态、主动消息全部不可用（数据保留）。"],
     },
   };
@@ -418,9 +428,84 @@
     return list;
   }
 
+  /* 今天页的离线演示：固定在中午，修改仅在内存，不调用模型。 */
+  var lifePreview = {
+    ok: true, enabled: true, date: todayStr, timezone: "Asia/Shanghai", revision: 1,
+    generation: { status: "ready", error: "", attempts: 1, max_attempts: 3, next_retry_at: "" },
+    updated_at: todayStr + "T08:00:00+08:00",
+    activities: [
+      { id: "preview-past", start: "09:00", end: "10:00", title: "读一篇短篇", location: "书桌", status: "done", outcome: "记下了一句想聊给你听的话" },
+      { id: "preview-now", start: "11:00", end: "13:00", title: "整理读书笔记", location: "窗边", status: "current", outcome: "" },
+      { id: "preview-next", start: "14:00", end: "15:00", title: "去河边散步", location: "河边", status: "planned", outcome: "" },
+    ],
+  };
+  function copyLife() {
+    var out = JSON.parse(JSON.stringify(lifePreview));
+    out.current = out.activities.find(function (a) { return a.status === "current"; }) || null;
+    out.next = out.activities.find(function (a) { return a.status === "planned"; }) || null;
+    out.recent = out.activities.filter(function (a) { return a.status === "done" || a.status === "skipped"; }).slice(-2);
+    return out;
+  }
+
   global.AstrBotPluginPage = {
     ready: function () { return Promise.resolve(); },
     apiGet: function (endpoint, params) {
+      if (endpoint === "pet/chat-devices") return Promise.resolve({
+        ok: true, available: true, protocol_version: 2, scope_id: (params || {}).scope_id || "personal", agent_id: "yaya",
+        subjects: [{id: "u_1001", nickname: "希"}], devices: [],
+        listener: {running: false, host: "127.0.0.1", port: 6196, error: "离线预览未启动连接服务。"},
+      });
+      if (endpoint === "core/snapshot") return Promise.resolve({
+        ok: true, protocol_version: 1, scope_id: (params || {}).scope_id || "", subject_id: (params || {}).who || "u_1001",
+        subjects: [{id: "u_1001", nickname: "希"}],
+        presets: [{id: "preview-persona", name: "达妮娅 · 预览人设", description: "仅用于页面预览", system_prompt: "这里显示核心所管理的人设提示词。", revision: "preview"}],
+        active: {preset_id: "preview-persona", namespace: "preview", revision: "preview"},
+        styles: [{key: "短", name: "日常对话", preset_id: "preview-persona", namespace: "preview"}],
+        memory: [{id: 1, value: "预览：喜欢在下雨时喝热咖啡。", importance: 0.7, revision: "preview"}],
+        archived_memory: [], history: [{role: "user", text: "今天一起看书吧。", created_at: "2026-10-29T09:00:00+08:00"}, {role: "assistant", text: "那你把窗边的位置留给我。", created_at: "2026-10-29T09:00:01+08:00"}],
+        affection: {score: 128}, observation: {balance: 30}, offset: 0, has_more: false,
+      });
+      if (endpoint === "instances") {
+        if (new URLSearchParams(location.search).get("instances") === "1") {
+          return {ok: true, isolation_enabled: true, legacy_scope_id: "personal",
+            default_scope_id: "personal", items: [
+              {scope_id: "personal", label: "个人 Bot（预览）", legacy: true},
+              {scope_id: "official", label: "官方 Bot（预览）", legacy: false},
+            ]};
+        }
+        return Promise.resolve({
+          ok: true, isolation_enabled: false, legacy_scope_id: "", items: [],
+        });
+      }
+      if (endpoint === "pet/devices") return Promise.resolve({
+        ok: true,
+        owners: ((((FAKE.settings || {}).values || {}).love_peers) || []).map(String),
+        agent_id: "yaya",
+        listener: { running: false, host: "127.0.0.1", port: 6196, error: "离线预览：没有连接或启动真实监听器。" },
+        devices: [],
+      });
+      if (endpoint === "social") return Promise.resolve({
+        ok: true, enabled: false, scope_mode: "private", self_names: [],
+        groups: [], seen: [], decisions: [], config: {},
+      });
+      if (endpoint === "voice/status") return Promise.resolve({
+        ok: true, device_verified: false,
+        active: { tts: { available: null, detail: "离线预览，未连接宿主语音提供方" },
+          max_segments: 3, tts_timeout_seconds: 20, tts_total_seconds: 60 },
+        listen: { effective: "none", detail: "离线预览无法探测语音识别" },
+        file_service: { mode: "path", detail: "离线预览，未验证协议端可达性" },
+        artifacts: { tracked: 0, retention_hours: 6 }, events: [],
+      });
+      if (endpoint === "imagery") return Promise.resolve({
+        ok: true, enabled: false, provider: "a1111", provider_label: "本地 A1111（离线预览，未连接模型）",
+        base_url: "", model: "", api_key_env: "", api_key_present: false,
+        size: "512x512", steps: 20, seed: -1, denoising: 60, use_reference: true,
+        timeout_seconds: 90, reference_ready: false, daily: { date: todayStr, used: 0, limit: 3 }, latest: null,
+        capabilities: { known: true, reference_image: true, seed: true, negative_prompt: true,
+          size_mode: "w+h", consistency_note: "离线预览只展示界面，不会调用生图模型。" }
+      });
+      if (endpoint === "imagery/image") return Promise.resolve({ ok: false, error: "离线预览没有真实生成图片。" });
+      if (endpoint === "life") return Promise.resolve(copyLife());
       if (endpoint === "portrait") return Promise.resolve(copyPortrait());
       /* 日记正文**现算**：桩的日记本会被改删还原，静态 FAKE 表跟不上（第 15 步）。 */
       /* 卡片预览（第 16 步）。真后端是**服务端渲染**好再给 HTML 的（core/diary/card.py，
@@ -524,6 +609,55 @@
       return Promise.resolve(out);
     },
     apiPost: function (endpoint, body) {
+      if (endpoint === "pet/chat-devices/issue" || endpoint === "pet/chat-devices/revoke") return Promise.resolve({ok: false, error: "离线预览不会签发或撤销真实设备。"});
+      if (endpoint === "core/action") return Promise.resolve({ok: false, error: "离线预览不保存核心数据。"});
+      /* 隔离模式下立绘上传走这个 JSON 接口（官方 bridge.upload 只收一个文件、
+         且禁止拼 query，所以隔离模式必须换成 data_url 走 POST）。 */
+      if (endpoint === "portrait/upload-data") {
+        var payload = body || {};
+        var dataUrl = String(payload.data_url || "");
+        if (!dataUrl) return Promise.reject(new Error("预览桩：没有 data_url"));
+        var upId = "p_preview" + (portraitStore.items.length + 1) + "_" + Date.now();
+        var upItem = {
+          id: upId,
+          name: String(payload.name || "上传图片"),
+          mime: "image/png",
+          bytes: Math.round(dataUrl.length * 0.75),
+          created_at: new Date().toISOString(),
+          data_url: dataUrl,
+        };
+        portraitStore.items = portraitStore.items.concat([upItem]);
+        portraitStore.current = upId;
+        return Promise.resolve({ ok: true, id: upId, item: upItem });
+      }
+
+      if (endpoint === "pet/devices/issue") return Promise.resolve({
+        ok: true, demo: true,
+        device_id: "preview-device",
+        agent_id: "yaya",
+        credential: "DEMO-ONLY-NOT-A-REAL-CREDENTIAL",
+        notice: "离线预览演示值，不是可用凭据，不会授权任何真实设备。",
+      });
+      if (endpoint === "pet/devices/revoke") return Promise.resolve({
+        ok: false, error: "离线预览不会撤销真实设备。",
+      });
+      if (endpoint.indexOf("life/") === 0) {
+        if (!body || body.date !== lifePreview.date || body.timezone !== lifePreview.timezone || body.expected_revision !== lifePreview.revision) {
+          return Promise.resolve({ ok: false, conflict: true, error: "安排已变化，请刷新后检查。", snapshot: copyLife() });
+        }
+        if (endpoint === "life/replace") {
+          lifePreview.activities = lifePreview.activities.filter(function (a) { return a.status !== "planned"; }).concat((body.activities || []).map(function (a, i) {
+            return Object.assign({}, a, { id: "preview-future-" + i, status: "planned", outcome: "" });
+          }));
+        } else if (endpoint === "life/record") {
+          var item = lifePreview.activities.find(function (a) { return a.id === body.activity_id; });
+          if (item) { item.status = body.status; item.outcome = body.outcome || ""; }
+        } else if (endpoint === "life/generate") {
+          return Promise.resolve({ ok: false, error: "离线预览不调用模型；可直接编辑未来安排。", snapshot: copyLife() });
+        }
+        lifePreview.revision += 1;
+        return Promise.resolve({ ok: true, snapshot: copyLife() });
+      }
       if (endpoint === "portrait/select") {
         var want = body && body.id;
         var hit = portraitStore.items.some(function (x) { return x.id === want; });

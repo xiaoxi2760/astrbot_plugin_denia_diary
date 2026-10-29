@@ -25,9 +25,12 @@ def check_snapshot(proactive: Any, decision: dict | None, *, now: datetime) -> d
     doc = proactive.store.read()
     contacts = proactive.store.contacts(doc)
     groups = [str(c.get("umo") or "") for c in contacts.values() if isinstance(c, dict) and c.get("kind") == "group"]
+    social = getattr(proactive, "social", None)
+    extra = list(social.enabled_group_umos()) if social is not None else []
     targets = scope.proactive_targets(
         str(proactive.settings.scope.get("mode") or ""), contacts=contacts,
         love_peers=proactive.settings.love_peers, sessions=proactive.store.sessions(doc), known_groups=groups,
+        extra_groups=extra,
     )
     if not targets:
         result.update(status="no_target", reason="当前启用范围内还没有可联系的会话")

@@ -99,6 +99,11 @@ class State:
         history: list[dict[str, Any]] = []  # 闭包内攒行，state.json 落盘后锁外统一追加
 
         def update(mood: dict[str, Any]) -> dict[str, Any]:
+            # 旧记录没有 word_at：先冻结旧词的观察时间，再更新坐标时间。
+            # 否则一次坐标打分会把几小时前的旧词重新变成 fresh。
+            if mood.get("word") and not mood.get("word_at"):
+                previous = _parse_iso(str(mood.get("updated_at") or ""))
+                mood["word_at"] = previous.isoformat() if previous else "1970-01-01T00:00:00+00:00"
             mood = _normalise_mood(mood, stamp)
             old_v, old_a = mood["valence"], mood["arousal"]
             if word_text:
@@ -224,6 +229,37 @@ class State:
                 "late_night": self.is_late_night(now=moment),
             },
         }
+
+    def public_mood(self, *, now: datetime | None = None) -> dict[str, Any]:
+        """设备可读的情绪词及独立有效期，不暴露坐标或私人记录。"""
+        empty = {"status": "empty", "word": None, "observed_at": None, "valid_until": None}
+        if not self._enabled():
+            return {**empty, "status": "disabled"}
+        moment = now or datetime.now(self._tz())
+        try:
+            path = self.store.path()
+            if not path.exists():
+                return empty
+            document = storage.read_json(path, default={"_pet_unreadable": True})
+            if document.get("_pet_unreadable") or document.get("schema_version", 1) != 1:
+                return {**empty, "status": "unavailable"}
+            mood = document.get("mood", {})
+            if not isinstance(mood, dict):
+                return {**empty, "status": "unavailable"}
+            word = str(mood.get("word") or "").strip()[:60]
+            observed = _parse_iso(str(mood.get("word_at") or mood.get("updated_at") or ""))
+            if not word or observed is None or observed.tzinfo is None or observed > moment:
+                return empty
+            expires = observed + MOOD_TTL
+            fresh = moment < expires
+            return {
+                "status": "fresh" if fresh else "stale",
+                "word": word if fresh else None,
+                "observed_at": observed.isoformat(),
+                "valid_until": expires.isoformat(),
+            }
+        except Exception:
+            return {**empty, "status": "unavailable"}
 
     # ---- 内部 ---------------------------------------------------------------
 

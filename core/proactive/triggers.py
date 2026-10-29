@@ -36,9 +36,12 @@ PRIORITY_ORDER: tuple[str, ...] = (
     "morning",  # 早安（早晚安触发器 · 早）
     "goodnight",  # 晚安（早晚安触发器 · 晚）
     "diary",  # 日记驱动
+    "group_topic",  # 群聊接话（群社交任务：主人登记且启用的群）
+    "group_share",  # 分享当前日程（公开角色生活，允许进群）
 )
 """一 tick 的问询顺序（软内容排最后，频率上限先挤掉最像打卡的那类）。
-早晚安在任务书里是一类触发器，slot 拆成两个键是为了"早晚各一次"的当天防重。"""
+早晚安在任务书里是一类触发器，slot 拆成两个键是为了"早晚各一次"的当天防重。
+两个群 slot 排在**最末**：私聊关系永远优先，群聊只有在私聊没有可说的时候才轮到。"""
 
 CARE_SLEEP_WINDOW = ((22, 30), (23, 30))
 CARE_MEAL_WINDOWS = (((11, 30), (13, 0)), ((17, 30), (19, 0)))
@@ -357,6 +360,62 @@ def find_diary_hooks(deps: Any, doc: dict[str, Any], *, now: datetime, allowed: 
     return out
 
 
+# ---- 群社交触发器（群社交任务） --------------------------------------------------
+#
+# 素材全部来自 ``deps.social``（群社交门面，未注入时静默跳过）：群是主人登记且
+# 启用的，话题只来自**已裁剪**的近期群消息，日程来自 ``Life`` 的公开快照——
+# 私聊日记 / 小本本 / 留言在这条链路上根本取不到（见 core/social/api.py）。
+
+
+def _group_allowed(allowed: Any) -> list[str]:
+    """会话闸放行的群 umo（保序）。``allowed`` 是 umo → kind 的映射（见 api 层）。"""
+    if isinstance(allowed, dict):
+        return [str(umo) for umo, kind in allowed.items() if kind == "group"]
+    return []
+
+
+def find_group_topics(deps: Any, doc: dict[str, Any], *, now: datetime, allowed: Any = None) -> list[Candidate]:
+    """群聊接话：主人登记且启用的群里，接最近一条公开话题。
+
+    会话闸（配额/间隔）已经把 ``allowed`` 算好了，这里只对放行的群取料；
+    没有新鲜素材（TTL 过期 / 话题关了）就不出候选——有内容才发的老规矩。
+    """
+    social = getattr(deps, "social", None)
+    if social is None:
+        return []
+    for umo in _group_allowed(allowed):
+        if _already_sent(doc, umo, "group_topic", now=now):
+            continue
+        material = social.topic_material(umo, now=now)
+        if not material:
+            continue
+        out = _candidate(
+            "group_topic", umo, Session.from_umo(umo),
+            str(material.get("fragment") or ""), str(material.get("instruction") or ""),
+        )
+        return [out]  # 一 tick 至多一条
+    return []
+
+
+def find_group_shares(deps: Any, doc: dict[str, Any], *, now: datetime, allowed: Any = None) -> list[Candidate]:
+    """分享当前日程：公开角色生活（Life 快照），自然地在群里提一句正在做的事。"""
+    social = getattr(deps, "social", None)
+    if social is None:
+        return []
+    for umo in _group_allowed(allowed):
+        if _already_sent(doc, umo, "group_share", now=now):
+            continue
+        material = social.share_material(umo, now=now)
+        if not material:
+            continue
+        out = _candidate(
+            "group_share", umo, Session.from_umo(umo),
+            str(material.get("fragment") or ""), str(material.get("instruction") or ""),
+        )
+        return [out]  # 一 tick 至多一条
+    return []
+
+
 FINDERS: tuple[Finder, ...] = (
     find_promises,
     find_anniversaries,
@@ -364,8 +423,11 @@ FINDERS: tuple[Finder, ...] = (
     find_quiet,
     find_greetings,
     find_diary_hooks,
+    find_group_topics,
+    find_group_shares,
 )
-"""常规触发器按优先级排好的问询顺序（暗号不在里面——它走独立四道闸）。"""
+"""常规触发器按优先级排好的问询顺序（暗号不在里面——它走独立四道闸；
+两个群触发器排最末：私聊优先，群聊垫底）。"""
 
 
 def _date_hits_today(text: str, now: datetime) -> bool:

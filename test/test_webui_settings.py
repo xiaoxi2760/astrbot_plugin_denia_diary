@@ -106,10 +106,12 @@ class TestSchemaDescribe(unittest.TestCase):
         self.assertIn("diary.max_chars", webui_settings.editable_paths(self.fields))
 
     def test_every_schema_leaf_is_reachable(self) -> None:
-        expected = {"enabled", "timezone", "data_dir", "love_peers", "name_preference"}
+        expected = set()
         for group, spec in SCHEMA.items():
             if spec.get("type") == "object":
                 expected.update(f"{group}.{key}" for key in spec.get("items", {}))
+            else:
+                expected.add(group)
         self.assertEqual({field["path"] for field in self.fields}, expected)
 
     def test_broken_schema_does_not_raise(self) -> None:
@@ -679,7 +681,7 @@ class TestSectionsTree(unittest.TestCase):
     def test_real_schema_fully_covered(self) -> None:
         """当前 schema：4 个大类、11 个分组（= 顶层键），组内 keys 与 fields 对得上。"""
         payload = webui_settings.sections_payload(SCHEMA)
-        self.assertEqual([s["key"] for s in payload["sections"]], ["basic", "content", "proactive", "outbound"])
+        self.assertEqual([s["key"] for s in payload["sections"]], ["basic", "content", "life", "proactive", "outbound"])
         self.assertEqual([g["name"] for g in payload["groups"]], [name for name, _ in webui_settings.CONFIG_GROUPS])
         self.assertEqual(len(payload["groups"]), len(SCHEMA), "分组数 = schema 顶层键数")
         _, fields = webui_settings.describe_schema(SCHEMA)
@@ -864,8 +866,8 @@ class TestSettingsResetAndErrors(TestSettingsHandlers):
         self.assertEqual([spec[2] for spec in reset_routes], [("POST",)])
         self.assertEqual([spec[1] for spec in reset_routes], ["settings_reset"])
         self.assertEqual(
-            len(self.routes.ROUTES), 27,
-            "12 条既有 + settings/reset + 立绘 4 条 + 日记改删/回收站 4 条 + 日记本预览 1 条 + 导出图片 1 条",
+            len(self.routes.ROUTES), 49,
+            "既有42条 + 实例列表、按实例图片上传和核心管理两条",
         )
 
     def test_get_carries_sections_and_problems(self) -> None:
@@ -873,7 +875,7 @@ class TestSettingsResetAndErrors(TestSettingsHandlers):
         self.assertIn("sections", data)
         self.assertIn("problems", data)
         self.assertEqual(data["problems"], [], "当前 schema 与代码是对齐的")
-        self.assertEqual(len(data["sections"]["sections"]), 4)
+        self.assertEqual(len(data["sections"]["sections"]), 5)
 
     def test_post_mixed_errors_are_listed_per_field(self) -> None:
         response = self.call(

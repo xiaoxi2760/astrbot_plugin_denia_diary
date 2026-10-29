@@ -936,6 +936,46 @@ code { background: var(--bg-soft); border: 1px solid var(--line-soft); padding: 
 .np-tools { margin-top: 10px; }
 .np-tail { margin-top: 10px; }
 
+/* ---- 单本常驻切换（第 19 步）----
+   两本日记不再各占一张大卡、恋爱本默认收起：改成顶上一排**常驻**的两段控件，
+   面板里永远只有一本在展开。切换器必须一眼看得见、一次点到，
+   不藏在任何"展开/收起"后面。 */
+.np-headslot { margin-bottom: 2px; }
+.np-bookrow { align-items: center; }
+.np-bookrow .row-main { min-width: 0; }
+.np-bookseg { flex-wrap: wrap; }
+.np-bookseg .seg-btn { font-size: 13px; }
+/* 三段控件的宽度分配沿用 .set-row 的惯例，按钮铺满一行更好点 */
+@media (max-width: 520px) {
+  .np-bookrow { flex-direction: column; align-items: stretch; gap: 8px; }
+  .np-bookseg { width: 100%; }
+  .np-bookseg .seg-btn { flex: 1; }
+}
+/* 正文等待态：旧内容**留在屏幕上**，只多一条小提示。
+   np-busy 挡住点击——旧内容还在，但此刻是过期的，不许点（防止改到已经换掉的段）。 */
+.np-busybar {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--bg-soft);
+  border: 1px solid var(--line-soft);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.np-busy { position: relative; }
+.np-busy > *:not(.np-busybar) { pointer-events: none; opacity: .55; }
+
+/* 外壳四块本身不加卡片底色：留白本身就是分组，别再套一层边框把层级弄乱 */
+.np-calwrap, .np-ctrlslot { margin-top: 10px; }
+.np-trash { margin-top: 16px; }
+
+/* ---- 留言：列表与输入框分成两块（第 20 步）----
+   写操作只重画上面那块 list，输入框是常驻节点——旧版每次保存都重建 textarea，
+   用户的焦点和光标位置会被冲掉（长留言要重新点回去找）。 */
+.np-comment-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.np-comment-composer { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+
 /* ---- 改 / 删 / 回收站（第 15 步）----
    正文与按钮之间留一道虚线：那是"这一条的操作区"，不是正文的延续。
    按钮一律排在正文**下面**，别做成悬在标题右侧的图标——悬停才显形的东西在
@@ -1315,3 +1355,116 @@ html[data-theme] {
 .np-comment-note { color: var(--fg-faint); font-size: 11px; line-height: 1.6; }
 .np-comment-actions { flex-wrap: wrap; align-items: center; }
 .np-comment-input { min-height: 90px; }
+
+/* 今天：当前与下一项保持在首屏，编辑和结果就在时间线里完成。 */
+.life-view { display: flex; flex-direction: column; gap: 14px; }
+.life-view > .panel { margin: 0; }
+.life-header h2 { margin: 0 0 6px; font-size: 23px; font-weight: 650; }
+.life-view .sub { color: var(--fg-dim); font-size: 12px; line-height: 1.65; }
+.life-now { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.life-now .row-main { min-width: 0; }
+.life-now .card { height: 100%; box-sizing: border-box; border-color: var(--accent-line); }
+.life-note { padding: 2px 0; }
+.life-actions .row-actions { justify-content: flex-start; flex-wrap: wrap; }
+.life-view [data-activity-id] { flex-wrap: wrap; gap: 10px; align-items: flex-start; }
+.life-view [data-act="record-editor"] { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; }
+.life-view [data-act="record-editor"] > label { width: 100%; }
+.life-view [data-act="plan-row"] input { width: 100%; min-width: 0; box-sizing: border-box; }
+.life-view .err-box { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.app[data-view="life"] #who-picker,
+.app[data-view="life"] #who-rename,
+.app[data-view="life"] #who-name-edit,
+.app[data-view="life"] #who-hint,
+.app[data-view="life"] label[for="who-picker"],
+.app[data-view="life"] #scope-bar,
+.app[data-view="social"] #who-picker,
+.app[data-view="social"] #who-rename,
+.app[data-view="social"] #who-name-edit,
+.app[data-view="social"] #who-hint,
+.app[data-view="social"] label[for="who-picker"],
+.app[data-view="imagery"] #who-picker,
+.app[data-view="imagery"] #who-rename,
+.app[data-view="imagery"] #who-name-edit,
+.app[data-view="imagery"] #who-hint,
+.app[data-view="imagery"] label[for="who-picker"],
+.app[data-view="imagery"] #scope-bar { display: none !important; }
+@media (max-width: 720px) {
+  .nav { flex-wrap: wrap; overflow: visible; box-sizing: border-box; }
+  .tabs { order: 2; flex: 1 1 100%; min-width: 0; max-width: 100%; overflow-x: auto; padding-bottom: 3px; }
+  .nav-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .nav-foot .foot-label { display: none; }
+  .nav-foot .who-picker { width: auto; max-width: 150px; }
+  .nav-foot .who-rename { margin-top: 0; }
+  .stage-tools { flex-wrap: wrap; justify-content: flex-end; }
+}
+@media (max-width: 600px) {
+  .life-now { grid-template-columns: 1fr; }
+  .life-view [data-act="plan-row"] { padding-left: 0; padding-right: 0; }
+}
+
+/* 设备配对在当前页完成；绑定信息和一次性凭据保持可读、可手选。 */
+.pet-devices-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.pet-listener-status { margin: 12px 0; }
+.pet-device-section { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line, rgba(128,128,128,.18)); }
+.pet-device-issue-form { display: grid; grid-template-columns: minmax(160px,1fr) minmax(160px,1fr) auto; align-items: end; gap: 12px; margin: 12px 0; }
+.pet-device-form-field { display: grid; gap: 6px; min-width: 0; }
+.pet-device-form-field .set-input { width: 100%; box-sizing: border-box; }
+.pet-device-credential-box { margin-top: 16px; padding: 14px; border: 1px solid var(--line, rgba(128,128,128,.18)); border-radius: 12px; }
+.pet-device-credential-box > .pet-device-form-field { grid-template-columns: 100px minmax(0,1fr); align-items: center; margin: 10px 0; }
+.pet-device-credential { display: block; width: 100%; box-sizing: border-box; min-height: 74px; margin: 10px 0; font-family: monospace; resize: vertical; }
+.pet-device-copy-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.pet-device-row .row-main { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .pet-device-issue-form { grid-template-columns: 1fr; }
+  .pet-device-issue-form > button { justify-self: start; }
+  .pet-devices-heading { flex-wrap: wrap; }
+}
+
+
+/* ---- 三端整合 P0：实例选择与页面内确认 ----
+   沿用既有 token（--accent / --fg / --bg / --line），不另起一套视觉语言。 */
+
+.scope-picker-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.scope-picker-wrap[hidden] {
+  display: none !important;
+}
+
+/* 页面内确认：受限 iframe 没有 allow-modals，只能自己做一块。
+   侧栏下方的行内提示条——不遮挡内容。 */
+.scope-confirm {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.scope-confirm[hidden] {
+  display: none !important;
+}
+
+.scope-confirm-text {
+  margin: 0 0 6px;
+  color: var(--fg);
+}
+
+.scope-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Core management shares the existing card and colour system. */
+.core-field { display: block; margin: .75rem 0; }
+.core-field > span { display: block; margin-bottom: .35rem; }
+.core-input { box-sizing: border-box; width: 100%; padding: .65rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: .65rem; font: inherit; }
+.core-section { margin-bottom: 1rem; }
+.core-section .btn { padding: 7px 12px; font-size: 13px; margin: 4px; }
+.core-memory { padding: .75rem 0; border-bottom: 1px solid var(--line); }
+.core-history { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }

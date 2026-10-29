@@ -70,6 +70,12 @@
         "default": true,
         "description": "早晚安",
         "hint": "他说早安/晚安时记下来，她自然接话；关了就当普通聊天"
+      },
+      "social": {
+        "type": "bool",
+        "default": true,
+        "description": "群社交",
+        "hint": "登记的群里适度参与、登记 bot 短聊；关了就完全不观察群消息"
       }
     }
   },
@@ -313,10 +319,177 @@
       }
     }
   },
+  "pet_bridge": {
+    "type": "object",
+    "description": "桌宠状态同步",
+    "hint": "只同步当前活动、下一项和情绪。默认关闭；设备凭据在设置页的桌宠设备卡签发，不使用管理面板密码。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "开启设备状态服务"
+      },
+      "host": {
+        "type": "string",
+        "default": "127.0.0.1",
+        "description": "监听 IP",
+        "hint": "127.0.0.1 仅本机；跨设备请明确填写手机局域网 IP 或 0.0.0.0，不会自动开放防火墙。"
+      },
+      "port": {
+        "type": "int",
+        "default": 6196,
+        "description": "状态服务端口",
+        "hint": "1024-65535，须与现有服务端口不同。"
+      },
+      "agent_id": {
+        "type": "string",
+        "default": "yaya",
+        "description": "角色 ID",
+        "hint": "配对后桌宠必须匹配这个角色 ID；更改后原设备失效。"
+      }
+    }
+  },
+  "life": {
+    "type": "object",
+    "description": "今天的生活",
+    "hint": "为角色安排公开日常，按插件时区每天规划一次；独立于主动消息，不会因此发出 QQ 消息",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "自动安排一天",
+        "hint": "关掉后停止生成和推进，保存的安排保留"
+      },
+      "provider_id": {
+        "type": "string",
+        "default": "",
+        "description": "规划使用的文本模型",
+        "hint": "填写宿主已有的提供商 ID；留空使用当前默认文本模型，不填 API 密钥"
+      },
+      "character": {
+        "type": "string",
+        "default": "",
+        "multiline": true,
+        "description": "她的生活偏好",
+        "hint": "可填写公开人设、兴趣和日常目标（最多 1200 字）。留空参考宿主默认人设。内容会交给所选模型，不填写私密聊天"
+      },
+      "timeout_seconds": {
+        "type": "int",
+        "default": 30,
+        "description": "规划超时（秒）",
+        "hint": "5-120；失败保留已有安排或沿用静态作息"
+      },
+      "retry_minutes": {
+        "type": "int",
+        "default": 30,
+        "description": "失败后重试间隔（分钟）",
+        "hint": "5-240；防止模型暂时不可用时连续请求"
+      },
+      "max_attempts": {
+        "type": "int",
+        "default": 3,
+        "description": "每天最多尝试次数",
+        "hint": "1-5；包括失败和手动重试，成功后不会自动重复规划"
+      }
+    }
+  },
+  "imagery": {
+    "type": "object",
+    "description": "状态生图",
+    "hint": "按需把「她现在在做什么、在哪、心情怎样」画成一张图：只给面板按钮用，不自动发消息。默认关闭；启用后由配好的提供方计费，请留意每日上限",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用状态生图",
+        "hint": "默认关。开启后面板「生图」页出现按钮；关闭时不发任何请求"
+      },
+      "provider": {
+        "type": "string",
+        "default": "a1111",
+        "description": "提供方",
+        "hint": "a1111=本机 Stable Diffusion WebUI API；openai=OpenAI 兼容 Images 接口（云端，按张计费）"
+      },
+      "base_url": {
+        "type": "string",
+        "default": "",
+        "description": "服务地址",
+        "hint": "a1111 例：http://127.0.0.1:7860；openai 例：https://api.openai.com/v1。只支持 http/https"
+      },
+      "model": {
+        "type": "string",
+        "default": "",
+        "description": "模型名",
+        "hint": "openai 必填（如 gpt-image-1 / dall-e-3）；a1111 留空＝用服务当前加载的模型"
+      },
+      "api_key_env": {
+        "type": "string",
+        "default": "",
+        "description": "密钥环境变量名",
+        "hint": "只填「变量名」（如 OPENAI_API_KEY），密钥本体配在宿主环境里；不写名字则不带认证头"
+      },
+      "size": {
+        "type": "string",
+        "default": "512x512",
+        "description": "尺寸",
+        "hint": "「宽x高」。a1111 拆成宽高（64~2048）；openai 按服务端枚举传（如 1024x1024），非法值由服务端报错"
+      },
+      "steps": {
+        "type": "int",
+        "default": 20,
+        "description": "步数（仅 a1111）",
+        "hint": "1-50；openai 没有这个参数，不会假装生效"
+      },
+      "seed": {
+        "type": "int",
+        "default": -1,
+        "description": "随机种子（仅 a1111）",
+        "hint": "-1=每次随机；固定值 + 相同提示词会得到相近图。openai 不支持，不会假装生效"
+      },
+      "denoising": {
+        "type": "int",
+        "default": 60,
+        "description": "重绘幅度%（仅 a1111 图生图）",
+        "hint": "10-90；越低越像参考立绘，越高越自由。只在带参考图时生效"
+      },
+      "use_reference": {
+        "type": "bool",
+        "default": true,
+        "description": "带当前立绘做参考（仅 a1111）",
+        "hint": "a1111 走图生图，人物一致性较强；openai 不支持参考图，一致性只能靠文字锚定（较弱）"
+      },
+      "timeout_seconds": {
+        "type": "int",
+        "default": 90,
+        "description": "超时（秒）",
+        "hint": "5-300；超时已计费不返还（云端按请求计费）"
+      },
+      "daily_limit": {
+        "type": "int",
+        "default": 3,
+        "description": "每日上限（次）",
+        "hint": "1-50；按「请求已发出」记账，失败与超时不返还"
+      },
+      "character_hint": {
+        "type": "string",
+        "default": "",
+        "multiline": true,
+        "description": "人物形象锚定",
+        "hint": "外貌、发型、服装等稳定特征（最多 300 字），会进图像提示词。别写私密内容"
+      },
+      "style_hint": {
+        "type": "string",
+        "default": "",
+        "multiline": true,
+        "description": "画风锚定",
+        "hint": "画风、质感、构图倾向（最多 200 字），会进图像提示词"
+      }
+    }
+  },
   "voice": {
     "type": "object",
-    "description": "语音（主动消息开口说）",
-    "hint": "她的主动消息过宿主 TTS 变成语音发出；需要先在宿主配好一个 TTS 提供商。合成失败自动保持文字",
+    "description": "语音（主动消息开口说 + 听懂他的语音）",
+    "hint": "主动消息过宿主 TTS 变成语音（需要宿主配好 TTS 提供商）；收到语音优先用宿主的转写结果。合成失败自动保持文字，能力以面板「语音能力」为准",
     "items": {
       "mode": {
         "type": "string",
@@ -329,6 +502,103 @@
         "default": 100,
         "description": "开口概率（%）",
         "hint": "0-100；情绪不好（valence<0）时会自动上浮一些"
+      },
+      "listen_fallback": {
+        "type": "bool",
+        "default": true,
+        "description": "语音识别兜底",
+        "hint": "宿主转写未开启时，收到语音用宿主的识别提供商兜底转一次（同一段不重复转）。宿主已开转写时本项不参与"
+      },
+      "max_segments": {
+        "type": "int",
+        "default": 3,
+        "description": "单轮语音分段上限",
+        "hint": "1-8 段；超出的文本段保持文字，不合成"
+      },
+      "tts_timeout_seconds": {
+        "type": "int",
+        "default": 20,
+        "description": "单段合成超时（秒）",
+        "hint": "3-120；超时该段保持文字，不卡住整条消息"
+      },
+      "tts_total_seconds": {
+        "type": "int",
+        "default": 60,
+        "description": "整轮合成总预算（秒）",
+        "hint": "10-600；预算用完剩余段全部保持文字"
+      },
+      "audio_retention_hours": {
+        "type": "int",
+        "default": 6,
+        "description": "音频保留时长（小时）",
+        "hint": "1-336；合成的音频到期由巡检清理（10 分钟内的绝不删，防止发送前丢失）"
+      }
+    }
+  },
+  "social": {
+    "type": "object",
+    "description": "群社交（登记与短聊）",
+    "hint": "只对主人登记且启用的群生效；新登记的群默认不开主动发言",
+    "items": {
+      "topic_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "记录群话题",
+        "hint": "只对已登记且启用的群记录近期话题（有界），作为接话与注入素材"
+      },
+      "topic_max_items": {
+        "type": "int",
+        "default": 12,
+        "description": "每群话题条数上限",
+        "hint": "1-50；超过挤掉最旧的，不会无限攒群史"
+      },
+      "topic_max_chars": {
+        "type": "int",
+        "default": 120,
+        "description": "单条话题截断（字）",
+        "hint": "20-400；超长群消息只留摘要"
+      },
+      "topic_ttl_hours": {
+        "type": "int",
+        "default": 24,
+        "description": "话题保鲜期（小时）",
+        "hint": "1-168；过期的话题不再进候选与注入"
+      },
+      "max_rounds": {
+        "type": "int",
+        "default": 3,
+        "description": "bot 短聊轮数上限",
+        "hint": "1-10；1 轮 = bot 一条叫她的消息 + 她的一次回话，到上限自己停下"
+      },
+      "session_window_minutes": {
+        "type": "int",
+        "default": 10,
+        "description": "短聊会话窗口（分钟）",
+        "hint": "1-120；bot 超过这么久没有下文，会话自动结束"
+      },
+      "session_cooldown_minutes": {
+        "type": "int",
+        "default": 30,
+        "description": "短聊冷却（分钟）",
+        "hint": "0-1440；会话结束后同一个群多久内不开新短聊"
+      },
+      "self_names": {
+        "type": "string",
+        "default": "",
+        "description": "她在群里的称呼",
+        "hint": "顿号/逗号分隔，如「小澄、澄澄」；空＝不与登记 bot 短聊"
+      },
+      "max_groups": {
+        "type": "int",
+        "default": 20,
+        "description": "登记群上限",
+        "hint": "1-100"
+      },
+      "seen_max": {
+        "type": "int",
+        "default": 30,
+        "description": "待登记保留条数",
+        "hint": "0-100；只对启用范围内看到的群记「最近看到」，超限挤掉最旧的"
       }
     }
   },
@@ -362,5 +632,29 @@
     "default": {},
     "description": "称呼偏好",
     "hint": "{\"用户id\": \"称呼\"}；只改日记标注的写法"
+  },
+  "bot_isolation": {
+    "type": "object",
+    "description": "多 Bot 隔离",
+    "hint": "开启后日记按真实平台实例 ID 分目录；legacy_platform_id 显式绑定回原数据根（留空＝谁都读不到旧数据）",
+    "items": {
+      "enable": {
+        "type": "bool",
+        "default": false,
+        "description": "开启多 Bot 隔离"
+      },
+      "legacy_platform_id": {
+        "type": "string",
+        "default": "",
+        "description": "绑定到原数据根的平台实例 ID",
+        "hint": "填真实平台实例 ID（不是适配器类型名）；留空＝不绑定，旧数据谁都读不到"
+      }
+    }
+  },
+  "per_instance": {
+    "type": "dict",
+    "default": {},
+    "description": "按实例覆盖",
+    "hint": "{\"平台实例ID\": {\"timezone\": \"Asia/Shanghai\"}}；只允许覆盖业务字段，不允许覆盖数据目录等宿主字段"
   }
 }

@@ -15,6 +15,10 @@
      与 web_api/routes.py 的 ROUTES 双向一一对应。 */
   var ENDPOINTS = {
     status: "status",
+    life: "life",
+    lifeGenerate: "life/generate",
+    lifeReplace: "life/replace",
+    lifeRecord: "life/record",
     diaryList: "diary/list",
     diaryContent: "diary/content",
     diaryRewrite: "diary/rewrite",
@@ -34,20 +38,54 @@
     affinity: "affinity",
     history: "history",
     proactive: "proactive",
+    social: "social",
+    socialGroup: "social/group",
+    socialParticipant: "social/participant",
+    socialPreview: "social/preview",
+    voiceStatus: "voice/status",
     settings: "settings",
     settingsReset: "settings/reset",
+    petDevices: "pet/devices",
+    petDeviceIssue: "pet/devices/issue",
+    petDeviceRevoke: "pet/devices/revoke",
     portrait: "portrait",
     portraitUpload: "portrait/upload",
     portraitSelect: "portrait/select",
     portraitDelete: "portrait/delete",
+    imagery: "imagery",
+    imageryImage: "imagery/image",
+    imageryGenerate: "imagery/generate",
+    /* ---- 三端整合 P0：实例（scope）清单 ----
+       GET instances → {ok, isolation_enabled, legacy_scope_id,
+                        items:[{scope_id,label,legacy}], default_scope_id?} */
+    instances: "instances",
+    /* 隔离模式下立绘上传走这个 JSON 接口（官方 bridge.upload 只收一个文件、
+       且禁止拼 query，所以隔离模式必须换成 data_url 走 POST）。
+       body: {scope_id, name, data_url} */
+    portraitUploadData: "portrait/upload-data",
+    coreSnapshot: "core/snapshot",
+    coreAction: "core/action",
+    petChatDevices: "pet/chat-devices",
+    petChatDeviceIssue: "pet/chat-devices/issue",
+    petChatDeviceRevoke: "pet/chat-devices/revoke",
   };
+
+  /* **不带 scope 的接口**：实例清单本身（拿它才能知道有哪些实例）。
+     宿主级管理动作（bot_isolation / per_instance 原始路由 / 总开关）由后端处理，
+     前端不往这些业务接口里塞 scope_id。 */
+  var HOST_ENDPOINTS = { instances: true };
 
   var TABS = [
     { key: "overview", title: "总览", note: "此刻状态" },
+    { key: "life", title: "今天", note: "她的安排与进展" },
+    { key: "imagery", title: "生图", note: "画一下现在的她（按需）" },
     { key: "diary", title: "日记", note: "改 · 删 · 回收站" },
     { key: "notebook", title: "小本本", note: "事实与约定" },
     { key: "affinity", title: "熟悉度", note: "榜与档位" },
     { key: "proactive", title: "曲线与主动", note: "情绪曲线 + 主动消息" },
+    { key: "social", title: "群社交", note: "登记 · 话题 · bot 短聊" },
+    { key: "core", title: "核心", note: "人设 · 历史 · 长期记忆 · 好感度与观测值" },
+    { key: "devices", title: "桌宠连接", note: "统一聊天 · 设备配对与撤销" },
     { key: "data", title: "数据", note: "坐标 · 数据文件" },
     { key: "settings", title: "设置", note: "全部配置项，改完即生效" },
   ];
@@ -56,26 +94,83 @@
   /* 写回用的键。**全文件只此一处**出现这个路径——控件选哪个档、怎么显示，
      都只看 UI.SCOPE_MODES 和后端给的 editor，不按路径名判断。 */
   var SCOPE_PATH = "scope.mode";
-  var state = { who: "", options: [], current: "overview", view: null, ctx: null, scope: "private" };
+  /* 实例（scope）选择记在这台设备上。 */
+  var SCOPE_KEY = "denia.diary.scope";
+  var state = {
+    who: "", options: [], current: "overview", view: null, ctx: null, scope: "private",
+    /* ---- 三端整合 P0：多实例 ----
+       instances: [{scope_id,label,legacy}]（**只从后端给的 items 里选，不猜适配器类型**）
+       isolationEnabled: 后端说隔离开了没。关着就完全走老行为（不发 scope_id）。
+       scopeId: 当前选中的实例；空串＝还没选（隔离开启时所有实例业务请求都会被拒）。
+       legacyScopeId: 后端指明的旧实例 id。 */
+    instances: [], isolationEnabled: false, legacyScopeId: "", defaultScopeId: "",
+    scopeId: "", scopeEpoch: 0,
+    whoByScope: Object.create(null),
+  };
+  var viewGeneration = 0;
+  var mountedKey = "";
+  var scrollPositions = Object.create(null);
+  /* 每个 scope 一份 ctx（含绑定的 api）。同一 scope 复用同一个 ctx
+     ——视图里的草稿缓存（social 用 ctx 当 WeakMap 键）切 tab 才不丢。 */
+  var ctxCache = Object.create(null);
+  var scopeBuckets = Object.create(null);
+  var scopeEpoch = 0;
 
   function bridge() { return global.AstrBotPluginPage || null; }
 
-  /* ---- api 封装：统一把后端错误变成可读信息，绝不让 view 白屏 ---- */
-  async function apiGet(key, params) {
+  /* ---- api 封装：统一把后端错误变成可读信息，绝不让 view 白屏 ----
+     ⚠️ 三端整合 P0：scope 绑定是**按 ctx** 的，不是按全局当前值。
+        每个 view 拿到的 ctx 在 mount 时冻结了一个 scope_id，
+        之后它发出的每一次 GET/POST/upload 都固定带那一个 scope——
+        切换实例后旧 ctx 再写，必须被拒绝（见 apiPostScoped）。 */
+  function scopeParam(key, scopeId) {
+    if (!state.isolationEnabled) return null;          /* 隔离开关关着＝老行为，一个字段都不加 */
+    if (HOST_ENDPOINTS[key]) return null;               /* 实例清单本身不带 scope */
+    if (!scopeId) return null;                         /* 没选实例＝请求被拒（见下面） */
+    return scopeId;
+  }
+
+  async function apiGetScoped(scopeId, key, params) {
     var b = bridge();
     if (!b) throw new Error("没有 bridge");
+    var p = Object.assign({}, params || {});
+    var epoch = scopeEpoch;
+    var scoped = scopeParam(key, scopeId);
+    if (state.isolationEnabled && !HOST_ENDPOINTS[key]) {
+      if (!scoped) throw new Error("还没选实例：请先在左上角选一个实例");
+      p.scope_id = scoped;
+    }
     try {
-      return await b.apiGet(ENDPOINTS[key], params || {});
+      var result = await b.apiGet(ENDPOINTS[key], p);
+      /* ⚠️ 迟到保护：请求发出后实例被切走了，这份响应**作废**——
+         旧实例的数据不许画到新实例的视图上。 */
+      if (state.isolationEnabled && !HOST_ENDPOINTS[key] && (scopeId !== state.scopeId || epoch !== scopeEpoch)) {
+        throw new Error("实例已切换，这次请求已作废");
+      }
+      return result;
     } catch (error) {
       throw new Error(String((error && error.message) || error || "请求失败"));
     }
   }
 
-  async function apiPost(key, body) {
+  async function apiPostScoped(scopeId, key, body) {
     var b = bridge();
     if (!b) throw new Error("没有 bridge");
+    var payload = Object.assign({}, body || {});
+    var epoch = scopeEpoch;
+    if (state.isolationEnabled && !HOST_ENDPOINTS[key]) {
+      if (!scopeId) throw new Error("还没选实例：请先在左上角选一个实例");
+      /* 旧 ctx（切换实例前的）在新实例下发写请求 → 直接拒绝，
+         绝不把 A 实例的草稿提交给 B。 */
+      if (scopeId !== state.scopeId) throw new Error("实例已切换，这次操作没有提交");
+      payload.scope_id = scopeId;
+    }
     try {
-      return await b.apiPost(ENDPOINTS[key], body || {});
+      var result = await b.apiPost(ENDPOINTS[key], payload);
+      if (state.isolationEnabled && !HOST_ENDPOINTS[key] && (scopeId !== state.scopeId || epoch !== scopeEpoch)) {
+        throw new Error("实例已切换，原实例操作结果不会覆盖当前页面");
+      }
+      return result;
     } catch (error) {
       throw new Error(String((error && error.message) || error || "请求失败"));
     }
@@ -83,16 +178,278 @@
 
   /* 立绘上传。官方 bridge 的 upload() 只发一个文件、字段名固定 file，
      所以这里只能传单个 File；多图靠多次调用。宿主没给 upload 就明说，
-     不要静默失败让用户以为传上去了。 */
-  async function apiUpload(key, file) {
+     不要静默失败让用户以为传上去了。
+     ⚠️ 隔离开启时**不能**用它：官方 bridge 的 endpoint 禁止拼 query，
+        ?scope_id=… 会被拒；upload() 也只收一个 file、没有 body。
+        所以隔离模式改走 JSON 接口 portrait/upload-data：
+        {scope_id, name, data_url}——FileReader 把 ≤8MiB 的图读成 data URL。
+        非隔离模式仍走原 bridge.upload（原行为一字不变）。 */
+  var MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+
+  function readAsDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      if (typeof global.FileReader !== "function") { reject(new Error("这个运行环境不能读取本地文件")); return; }
+      var reader = new global.FileReader();
+      reader.onerror = function () { reject(new Error("读取文件失败")); };
+      reader.onload = function () { resolve(String(reader.result || "")); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function apiUploadScoped(scopeId, key, file) {
     var b = bridge();
     if (!b) throw new Error("没有 bridge");
+    if (!file) throw new Error("没有拿到文件");
+    if (Number(file.size || 0) > MAX_UPLOAD_BYTES) throw new Error("太大了：最多 8 MB");
+    if (state.isolationEnabled) {
+      var dataUrl = await readAsDataUrl(file);
+      return await apiPostScoped(scopeId, "portraitUploadData", {
+        scope_id: scopeId,
+        name: String(file.name || "上传图片"),
+        data_url: dataUrl,
+      });
+    }
     if (typeof b.upload !== "function") throw new Error("这个运行环境不支持上传");
     try {
       return await b.upload(ENDPOINTS[key], file);
     } catch (error) {
       throw new Error(String((error && error.message) || error || "上传失败"));
     }
+  }
+
+  /* ---- 实例（scope）选择 ----
+     三端整合 P0：面板一次只对一个实例说话。所有实例业务请求都带 scope_id，
+     隔离关闭时完全退回老行为（一个字段都不多发）。 */
+  function readScopeFromUrl() {
+    try {
+      var search = String(global.location && global.location.search || "");
+      var match = search.match(/[?&]scope=([^&]*)/);
+      return match ? decodeURIComponent(match[1]) : "";
+    } catch (error) { return ""; }
+  }
+
+  function storedScope() {
+    try { return global.localStorage.getItem(SCOPE_KEY) || ""; } catch (error) { return ""; }
+  }
+
+  function storeScope(value) {
+    try { global.localStorage.setItem(SCOPE_KEY, value || ""); } catch (error) { /* 忽略 */ }
+  }
+
+  function scopeItem(scopeId) {
+    return state.instances.filter(function (one) { return one && one.scope_id === scopeId; })[0] || null;
+  }
+
+  function scopeLabelOf(scopeId) {
+    var item = scopeItem(scopeId);
+    if (!item) return String(scopeId || "");
+    return String(item.label || item.scope_id || scopeId) + (item.legacy ? "（旧实例）" : "");
+  }
+
+  /* 每个 scope 一份 UI 状态：候选人 / 选中的人。切实例时互不串。 */
+  function bucket(scopeId) {
+    var key = String(scopeId || "");
+    if (!scopeBuckets[key]) {
+      scopeBuckets[key] = { options: [], who: "" };
+    }
+    return scopeBuckets[key];
+  }
+
+  /* 把某个 scope 的状态**接管**到当前面板：候选人、选中的人都换成它的。 */
+  function activateScope(scopeId) {
+    var b = bucket(scopeId);
+    state.scopeId = String(scopeId || "");
+    state.options = b.options;
+    state.who = b.who || "";
+  }
+
+  /* 落位顺序：**存储/URL 里仍然有效的 scope → 显式 legacy → 有效默认**。
+     绝不偷偷落到 legacy 上：只有用户明确选了 legacy 才用 legacy。 */
+  function pickInitialScope(payload) {
+    var items = (payload && payload.items) || [];
+    if (!items.length) return "";
+    var wanted = readScopeFromUrl() || storedScope();
+    if (wanted && scopeItem(wanted)) return wanted;
+    var legacyId = String((payload && payload.legacy_scope_id) || "");
+    /* 显式 legacy：URL 里写了 legacy 关键字，或存储的就是 legacy_scope_id。 */
+    if (wanted === "legacy" && legacyId && scopeItem(legacyId)) return legacyId;
+    var def = String((payload && payload.default_scope_id) || "");
+    if (def && scopeItem(def)) return def;
+    /* 只有一条路可走时它就是"有效默认"（含唯一的那条 legacy）。 */
+    if (items.length === 1) return String(items[0].scope_id || "");
+    return "";
+  }
+
+  async function loadInstances() {
+    try {
+      var payload = await bridge().apiGet(ENDPOINTS.instances, {});
+      var items = (payload && payload.items) || [];
+      state.instances = items.filter(function (one) { return one && one.scope_id; }).map(function (one) {
+        return {
+          scope_id: String(one.scope_id),
+          label: String(one.label || one.scope_id || ""),
+          legacy: !!one.legacy,
+        };
+      });
+      state.isolationEnabled = !!(payload && payload.isolation_enabled);
+      state.legacyScopeId = String((payload && payload.legacy_scope_id) || "");
+      state.defaultScopeId = String((payload && payload.default_scope_id) || "");
+      /* 只有真隔离开了才选实例。隔离开关关着＝单实例老行为，一个 scope 都不选。 */
+      var picked = state.isolationEnabled ? pickInitialScope(payload) : "";
+      if (picked) {
+        state.scopeId = picked;
+        storeScope(picked);
+      }
+      return true;
+    } catch (error) {
+      state.instances = [];
+      state.scopeId = "";
+      state.instanceError = String((error && error.message) || error);
+      return false;
+    }
+  }
+
+  /* 实例下拉：只在隔离开启时出现。选项**只来自后端给的 items**，不猜适配器类型。 */
+  function renderScopePicker() {
+    var picker = document.getElementById("scope-picker");
+    var hint = document.getElementById("scope-hint");
+    var wrap = document.getElementById("scope-picker-wrap");
+    if (!picker) return;
+    if (wrap) wrap.hidden = !state.isolationEnabled;
+    if (!state.isolationEnabled) {
+      UI.clear(picker);
+      if (hint) hint.textContent = "";
+      return;
+    }
+    UI.clear(picker);
+    if (!state.instances.length) {
+      picker.appendChild(UI.h("option", { value: "", text: "（没有可用实例）" }));
+    } else {
+      if (!state.scopeId) {
+        picker.appendChild(UI.h("option", { value: "", text: "（请选择实例）", selected: true }));
+      }
+      state.instances.forEach(function (item) {
+        picker.appendChild(UI.h("option", {
+          value: item.scope_id,
+          text: scopeLabelOf(item.scope_id),
+          title: item.scope_id,
+          selected: item.scope_id === state.scopeId,
+        }));
+      });
+    }
+    if (picker.setAttribute) {
+      picker.setAttribute("title", state.scopeId
+        ? "当前实例：" + scopeLabelOf(state.scopeId)
+        : "还没选实例：所有实例操作都要先选");
+    }
+    if (hint) {
+      hint.textContent = state.scopeId
+        ? "实例：" + scopeLabelOf(state.scopeId)
+        : "还没选实例";
+    }
+  }
+
+  /* 切换实例：清掉旧人的候选/统计/立绘/视图，重新按新实例加载。
+     没选实例（隔离开启但没选）时，所有实例业务请求都会被拒——
+     这里明确提示，不偷偷挑一个。 */
+  async function switchInstance(nextId) {
+    var next = String(nextId || "");
+    var prev = state.scopeId;
+    if (!next || next === prev) { renderScopePicker(); return false; }
+    if (!state.isolationEnabled || !scopeItem(next)) { renderScopePicker(); return false; }
+    if (state.view && typeof state.view.hasUnsavedChanges === "function" && state.view.hasUnsavedChanges()) {
+      UI.toast("请先保存或取消当前表单，再切换实例。", true);
+      renderScopePicker();
+      return false;
+    }
+    /* 只有**真有未保存内容**时才问。草稿本身按 scope 存着（旧实例的草稿
+       不会被提交到新实例，也不会丢），所以没有草稿时直接切，不必打断用户。 */
+    if (hasUnsavedWork()) {
+      var ok = await confirmDiscard("当前实例里有没保存的内容。换实例后它仍留在这个实例里，不会提交到新实例。继续？");
+      if (!ok) { renderScopePicker(); return false; }
+    }
+    applyScopeSwitch(prev, next);
+    var selectedEpoch = scopeEpoch;
+    namePref = {};
+    state.scope = "private";
+    try {
+      var settings = await apiGetScoped(next, "settings", {});
+      if (selectedEpoch !== scopeEpoch) return false;
+      loadNamePref(settings && settings.values);
+      applyPanel(settings && settings.values && settings.values.panel);
+      applyScopeMode(settings && settings.values && settings.values.scope && settings.values.scope.mode);
+      var status = await apiGetScoped(next, "status", { who: state.who });
+      if (selectedEpoch !== scopeEpoch) return false;
+      mergeOptions(status && status.who_options);
+    } catch (error) { /* The view displays the current request error. */ }
+    if (selectedEpoch !== scopeEpoch) return false;
+    await show(state.current);
+    return true;
+  }
+
+  /* 切实例：换掉 scope、清掉旧人的候选/统计/立绘/视图，重新加载。 */
+  function applyScopeSwitch(prev, next) {
+    state.scopeId = next;
+    storeScope(next);
+    /* 旧实例的候选/选中的人存进桶里，切回来还在。 */
+    if (prev) { bucket(prev).who = state.who; bucket(prev).options = state.options; }
+    activateScope(next);
+    scopeEpoch += 1;
+    viewGeneration += 1;
+    state.ctx = ctxFor(next);
+    state.diaryDate = "";
+    var image = document.getElementById("portrait-img");
+    if (image) { image.hidden = true; image.src = ""; }
+    var count = document.getElementById("portrait-count");
+    if (count) count.textContent = "";
+    renderScopePicker();
+    renderWhoPicker();
+  }
+
+  /* 未保存内容检查：日记正文草稿 / 留言草稿（都存在共享 state.diaryUI 里）。
+     有未保存内容时，换实例前必须问一句——不能悄悄把内容丢掉。 */
+  function hasUnsavedWork() {
+    var root = (state.diaryUI && typeof state.diaryUI === "object") ? state.diaryUI : null;
+    if (!root) return false;
+    var found = false;
+    Object.keys(root).forEach(function (who) {
+      if (state.isolationEnabled && who.indexOf(state.scopeId + "|") !== 0) return;
+      var box = root[who];
+      if (!box || found) return;
+      ["edits", "comments"].forEach(function (field) {
+        var map = box[field];
+        if (!map || typeof map !== "object") return;
+        Object.keys(map).forEach(function (k) {
+          if (String(map[k] || "").trim()) found = true;
+        });
+      });
+    });
+    return found;
+  }
+
+  /* 页面内确认（不是 window.confirm）：返回 true＝继续，false＝取消。 */
+  function confirmDiscard(message) {
+    if (!message) return Promise.resolve(true);
+    var box = document.getElementById("scope-confirm");
+    if (!box) return Promise.resolve(true);
+    var text = document.getElementById("scope-confirm-text");
+    if (text) text.textContent = message;
+    box.hidden = false;
+    return new Promise(function (resolve) {
+      function done(value) {
+        box.hidden = true;
+        box.__resolve = null;
+        resolve(value);
+      }
+      box.__resolve = done;
+      if (!box.__wired) {
+        box.__wired = true;
+        var ok = document.getElementById("scope-confirm-ok");
+        var cancel = document.getElementById("scope-confirm-cancel");
+        if (ok) ok.addEventListener("click", function () { if (box.__resolve) box.__resolve(true); });
+        if (cancel) cancel.addEventListener("click", function () { if (box.__resolve) box.__resolve(false); });
+      }
+    });
   }
 
   /* ---- "对谁"：URL ?who= 覆盖 localStorage（方便直接分享某一页） ---- */
@@ -105,11 +462,11 @@
   }
 
   function storedWho() {
-    try { return global.localStorage.getItem(WHO_KEY) || ""; } catch (error) { return ""; }
+    try { return global.localStorage.getItem(WHO_KEY + (state.isolationEnabled ? ":" + state.scopeId : "")) || ""; } catch (error) { return ""; }
   }
 
   function storeWho(value) {
-    try { global.localStorage.setItem(WHO_KEY, value || ""); } catch (error) { /* 无痕模式，忽略 */ }
+    try { global.localStorage.setItem(WHO_KEY + (state.isolationEnabled ? ":" + state.scopeId : ""), value || ""); } catch (error) { /* 无痕模式，忽略 */ }
   }
 
   /* 档位外那组。**候选一个都不删**——面板是主人视角、永远可用，
@@ -131,6 +488,9 @@
     });
     state.options.sort(function (a, b) { return a.id < b.id ? -1 : 1; });
     applyWhoDefault();
+    /* 选中的人存回当前 scope 的桶：切实例再切回来还是他。 */
+    bucket(state.scopeId).who = state.who;
+    bucket(state.scopeId).options = state.options;
     /* 候选可能在任意一次 view.refresh() 里才冒出来（/status 只给 love_peers∪contacts，
        完整集要等 /notebook），所以每次合并后都要重绘下拉，否则用户一直看到"没有可选项"。 */
     renderWhoPicker();
@@ -363,14 +723,84 @@
     document.title = (brand || FALLBACK_BRAND) + (sub ? " · " + sub : "");
   }
 
+  /* ---- 视图 ctx：按 scope 绑定 ----
+     **一个 scope 一个 ctx**（缓存复用）：
+       - 同一 scope 切 tab 回来还是同一个 ctx → 视图里的草稿缓存不丢；
+       - 不同 scope 是不同 ctx → 草稿、滚动、候选天然隔开。
+     ctx 里的 api 永远只说这一个 scope 的事（scope_id 在创建时就冻住）。 */
+  function ctxFor(scopeId) {
+    var key = String(scopeId || "");
+    if (!ctxCache[key]) {
+      ctxCache[key] = makeCtx(key);
+    }
+    return ctxCache[key];
+  }
+
+  function makeCtx(scopeId) {
+    var ctx = {
+      UI: UI,
+      state: state,
+      /* 冻结的 scope：这次会话只说这个实例的事 */
+      scopeId: function () { return scopeId; },
+      /* 跨 scope 的草稿键前缀：视图按人存状态时加上它，两个实例的同名用户不串。 */
+      scopeKey: function () { return scopeId ? scopeId + "|" : ""; },
+      /* 只有 legacy 实例支持桌宠设备 v1 */
+      isLegacyScope: function () {
+        if (!state.isolationEnabled) return true;
+        if (!scopeId) return false;
+        if (state.legacyScopeId && scopeId === state.legacyScopeId) return true;
+        var item = scopeItem(scopeId);
+        return !!(item && item.legacy);
+      },
+      apiGet: function (key, params) { return apiGetScoped(scopeId, key, params); },
+      apiPost: function (key, body) { return apiPostScoped(scopeId, key, body); },
+      apiUpload: function (key, file) { return apiUploadScoped(scopeId, key, file); },
+      who: function () { return scopeId === state.scopeId ? state.who : bucket(scopeId).who; },
+      setWho: function (value) {
+        if (scopeId !== state.scopeId) return;
+        if (state.view && state.view.hasUnsavedChanges && state.view.hasUnsavedChanges()) {
+          UI.toast("请先保存或放弃当前表单，再切换用户。", true);
+          renderWhoPicker();
+          return;
+        }
+        state.who = String(value || "");
+        storeWho(state.who);
+        bucket(state.scopeId).who = state.who;
+        renderWhoPicker();
+        show(state.current);
+      },
+      mergeOptions: function (options) { if (scopeId === state.scopeId) mergeOptions(options); },
+      show: show,
+      openDiaryDate: function (date) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) return;
+        state.diaryDate = date;
+        return show("diary");
+      },
+      toast: UI.toast,
+      /* 设置页保存后把新档位推给顶栏，两个入口永远显示同一个值 */
+      setScope: function (value) {
+        applyScopeMode(value);
+        renderWhoPicker();          /* 「当前启用范围：X」那句跟着走 */
+      },
+      /* 设置页保存后把新的面板标题推过来（保存的是同一个 panel 组） */
+      setPanel: function (panel) { applyPanel(panel); },
+    };
+    return ctx;
+  }
+
   /* ---- 视图切换 ---- */
   function factoryFor(key) {
     var makers = {
       overview: global.createOverviewView,
+      life: global.createLifeView,
+      imagery: global.createImageryView,
       diary: global.createDiaryView,
       notebook: global.createNotebookView,
       affinity: global.createAffinityView,
       proactive: global.createProactiveView,
+      social: global.createSocialView,
+      core: global.createCoreView,
+      devices: global.createChatDevicesView,
       data: global.createDataView,
       settings: global.createSettingsView,
     };
@@ -378,12 +808,27 @@
   }
 
   async function show(key) {
+    if (state.view && state.view.hasUnsavedChanges && state.view.hasUnsavedChanges()) {
+      UI.toast("请先保存或放弃当前表单，再离开或刷新。", true);
+      return;
+    }
     var make = factoryFor(key);
     var body = document.getElementById("stage-body");
     var title = document.getElementById("stage-title");
     var note = document.getElementById("stage-note");
     if (!make || !body) return;
+    var generation = ++viewGeneration;
+    if (mountedKey) scrollPositions[mountedKey] = { top: body.scrollTop, left: body.scrollLeft };
+    /* 滚动位置按 scope + 人 + 页三者分开：换实例回到各自读到的位置。 */
+    mountedKey = JSON.stringify([state.scopeId, state.who, key]);
+    var position = scrollPositions[mountedKey] || { top: 0, left: 0 };
+    /* 从曲线明确跳到某天时，从那天的页首看起。 */
+    if (key === "diary" && state.diaryDate) position = { top: 0, left: 0 };
     state.current = key;
+    /* 这次挂载**冻结**的 scope：视图里发出的每个请求都归它。 */
+    var scopeAtMount = state.scopeId;
+    var app = document.getElementById("app");
+    if (app) app.setAttribute("data-view", key);
     /* 立绘只在总览出现（它是 index.html 里的静态节点，见那里的注释）。
        stage-body 每次都被 UI.clear 清空，所以它必须待在 body 外面。 */
     var portraits = document.getElementById("portraits");
@@ -396,15 +841,27 @@
       el.className = el.className.replace(" active", "") + (on ? " active" : "");
       el.setAttribute("aria-selected", on ? "true" : "false");   /* 无障碍：选中态跟着切换走 */
     });
-    UI.clear(body);
     if (state.view && typeof state.view.unmount === "function") {
       try { state.view.unmount(); } catch (error) { /* 忽略卸载异常 */ }
     }
-    state.view = make(state.ctx);
-    state.view.mount(body);
+    UI.clear(body);
+    body.scrollTop = 0;
+    body.scrollLeft = 0;
+    /* 视图拿到的 ctx 绑定**当前 scope**：这次挂载期间的每个请求都归这个实例。 */
+    var view = make(ctxFor(state.scopeId));
+    state.view = view;
+    view.mount(body);
     try {
-      await state.view.refresh();
+      await view.refresh();
+      /* 旧页的请求结束后，既不能改新页，也不能抢走用户刚滚到的位置。
+         ⚠️ 换了实例也一样：迟到的旧 scope 响应**不许**画到新 scope 的视图上。 */
+      if (generation === viewGeneration && state.view === view && scopeAtMount === state.scopeId &&
+          body.scrollTop === 0 && body.scrollLeft === 0) {
+        body.scrollTop = position.top;
+        body.scrollLeft = position.left;
+      }
     } catch (error) {
+      if (generation !== viewGeneration || state.view !== view) return;
       UI.clear(body);
       body.appendChild(UI.errorBox(String((error && error.message) || error)));
     }
@@ -456,44 +913,34 @@ document.addEventListener("error", function (event) {
     document.getElementById("guard").hidden = true;
     document.getElementById("app").hidden = false;
 
-    state.ctx = {
-      UI: UI,
-      apiGet: apiGet,
-      apiPost: apiPost,
-      apiUpload: apiUpload,
-      state: state,
-      who: function () { return state.who; },
-      setWho: function (value) {
-        state.who = String(value || "");
-        storeWho(state.who);
-        renderWhoPicker();
-        show(state.current);
-      },
-      mergeOptions: mergeOptions,
-      show: show,
-      openDiaryDate: function (date) {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) return;
-        state.diaryDate = date;
-        return show("diary");
-      },
-      toast: UI.toast,
-      /* 设置页保存后把新档位推给顶栏，两个入口永远显示同一个值 */
-      setScope: function (value) {
-        applyScopeMode(value);
-        renderWhoPicker();          /* 「当前启用范围：X」那句跟着走 */
-      },
-      /* 设置页保存后把新的面板标题推过来（保存的是同一个 panel 组） */
-      setPanel: function (panel) { applyPanel(panel); },
-    };
+    /* 先拿实例清单：它决定这次面板**对谁说话**（哪个 scope）。
+       拿不到＝后端没这个接口＝没开隔离＝老行为照旧。 */
+    var hasInstances = await loadInstances();
+    if (!hasInstances) {
+      var failedBody = document.getElementById("stage-body");
+      if (failedBody) { UI.clear(failedBody); failedBody.appendChild(UI.errorBox("读取实例列表失败：" + state.instanceError)); }
+      return;
+    }
+    if (hasInstances && state.scopeId) activateScope(state.scopeId);
+
+    state.ctx = ctxFor(state.scopeId);
 
     renderTabs();
     renderWhoPicker();
     renderScopeBar();
+    renderScopePicker();
 
     document.getElementById("refresh").addEventListener("click", function () { show(state.current); });
     document.getElementById("who-picker").addEventListener("change", function (event) {
-      state.ctx.setWho(event.target.value);
+      ctxFor(state.scopeId).setWho(event.target.value);
     });
+    /* 实例下拉：切实例＝清掉旧人的候选/统计/立绘/视图，重新加载。 */
+    var scopePicker = document.getElementById("scope-picker");
+    if (scopePicker) {
+      scopePicker.addEventListener("change", function (event) {
+        switchInstance(String(event.target.value || ""));
+      });
+    }
     document.getElementById("who-rename").addEventListener("click", function () {
       var box = document.getElementById("who-name-edit");
       if (box && !box.hidden) { closeNameEditor(); return; }   /* 再点一下收起 */
@@ -591,5 +1038,9 @@ document.addEventListener("error", function (event) {
     ENDPOINTS: ENDPOINTS, TABS: TABS, PRESETS: PRESETS,
     DEFAULT_PRESET: DEFAULT_PRESET, show: show, setTheme: setTheme,
     applyPanel: applyPanel,
+    /* 三端整合 P0：测试与后续接线用到的入口 */
+    state: state, ctxFor: ctxFor, switchScope: switchInstance,
+    loadInstances: loadInstances, renderScopePicker: renderScopePicker,
+    scopeItem: scopeItem,
   };
 })(window);

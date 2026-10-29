@@ -45,10 +45,14 @@ LOVE_DIARY_JSONL_FILE = "恋爱日记.jsonl"
 NOTEBOOK_FILE = "notebook.json"
 COMMENTS_FILE = "comments.json"
 STATE_FILE = "state.json"
+LIFE_FILE = "life.json"
 STATE_HISTORY_FILE = "state_history.jsonl"
 AFFINITY_FILE = "affinity.json"
 PROACTIVE_FILE = "proactive.json"
 PROACTIVE_LOG_FILE = "proactive-log.jsonl"
+SOCIAL_FILE = "social.json"
+"""群社交登记与有界话题/短聊状态（群社交任务）：登记表是主人数据，话题与短聊状态
+都在写入侧裁剪到配置上限——文件本身不会无限增长。"""
 GREETING_FILE = "greetings.json"
 NAMES_FILE = "names.json"
 DIARY_NUDGE_FILE = "diary-nudge.json"
@@ -57,16 +61,25 @@ PORTRAITS_DIR = "portraits"
 CARD_CACHE_DIR = "card-cache"
 """已渲染日记卡的缓存目录（第 20 步）。**纯派生数据**：删掉只会让下次 ``/看日记`` 重新出图，
 不会丢任何日记内容——所以它不进 :meth:`Layout.files`，备份/导出时也不必当成日记的一部分。"""
+IMAGE_CACHE_DIR = "image-cache"
+"""状态生图的缓存目录（任务 2）。**与日记卡缓存分开**：两者的键语义、失效条件、
+体积量级完全不同，混在一起"清缓存"就说不清清的是什么。同样纯派生数据，不进
+:meth:`Layout.files`。"""
+IMAGERY_QUOTA_FILE = "imagery-quota.json"
+"""状态生图的每日次数记账（任务 2）。带 ``schema_version``。"""
 
 JSON_FILES = (
     NOTEBOOK_FILE,
     COMMENTS_FILE,
     STATE_FILE,
+    LIFE_FILE,
     AFFINITY_FILE,
     PROACTIVE_FILE,
+    SOCIAL_FILE,
     GREETING_FILE,
     NAMES_FILE,
     DIARY_NUDGE_FILE,
+    IMAGERY_QUOTA_FILE,
 )
 """带 ``schema_version`` 的 JSON 文件（日记正文是纯文本、情绪历史与主动消息记录是 JSONL 追加文件，都不带版本头）。"""
 
@@ -115,6 +128,10 @@ class Layout:
         return self.base_dir / STATE_FILE
 
     @property
+    def life(self) -> Path:
+        return self.base_dir / LIFE_FILE
+
+    @property
     def state_history(self) -> Path:
         return self.base_dir / STATE_HISTORY_FILE
 
@@ -129,6 +146,10 @@ class Layout:
     @property
     def proactive_log(self) -> Path:
         return self.base_dir / PROACTIVE_LOG_FILE
+
+    @property
+    def social(self) -> Path:
+        return self.base_dir / SOCIAL_FILE
 
     @property
     def greeting(self) -> Path:
@@ -158,6 +179,14 @@ class Layout:
     def card_cache(self) -> Path:
         return self.base_dir / CARD_CACHE_DIR
 
+    @property
+    def image_cache(self) -> Path:
+        return self.base_dir / IMAGE_CACHE_DIR
+
+    @property
+    def imagery_quota(self) -> Path:
+        return self.base_dir / IMAGERY_QUOTA_FILE
+
     def files(self) -> tuple[Path, ...]:
         """全部数据文件（不含目录）。"""
         return (
@@ -168,20 +197,24 @@ class Layout:
             self.notebook,
             self.comments,
             self.state,
+            self.life,
             self.state_history,
             self.affinity,
             self.proactive,
             self.proactive_log,
+            self.social,
             self.greeting,
             self.names,
             self.diary_nudge,
+            self.imagery_quota,
         )
 
     def ensure(self) -> Layout:
-        """建好目录（含回收站与立绘目录）。返回自身，便于链式调用。"""
+        """建好目录（含回收站、立绘目录与生图缓存目录）。返回自身，便于链式调用。"""
         ensure_dir(self.base_dir)
         ensure_dir(self.trash_dir)
         ensure_dir(self.portraits)
+        ensure_dir(self.image_cache)
         return self
 
 
@@ -258,11 +291,12 @@ class _CacheEntry:
     mtime_ns: int
     size: int
     text: str
+    identity: tuple[int, ...] = ()
 
 
 @dataclass
 class FileCache:
-    """按 ``(mtime_ns, size)`` 判失效的文本缓存。
+    """按修改时间、大小和文件身份判失效的文本缓存。
 
     - 进程内**只**缓存文本，不缓存派生结果；
     - 文件被外部进程原子替换后 ``mtime_ns`` 变化 → 自动重读；
@@ -281,12 +315,12 @@ class FileCache:
             self.misses += 1
             return default
         entry = self._text.get(key)
-        if entry is not None and (entry.mtime_ns, entry.size) == stat:
+        if entry is not None and (entry.mtime_ns, entry.size, *entry.identity) == stat:
             self.hits += 1
             return entry.text
         self.misses += 1
         text = read_text(key, default)
-        self._text[key] = _CacheEntry(mtime_ns=stat[0], size=stat[1], text=text)
+        self._text[key] = _CacheEntry(mtime_ns=stat[0], size=stat[1], text=text, identity=stat[2:])
         return text
 
     def read_json(
@@ -307,12 +341,12 @@ class FileCache:
         self.invalidate(None)
 
 
-def _stat_signature(path: str) -> tuple[int, int] | None:
+def _stat_signature(path: str) -> tuple[int, ...] | None:
     try:
         stat = os.stat(path)
     except OSError:
         return None
-    return (stat.st_mtime_ns, stat.st_size)
+    return (stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns, stat.st_dev, stat.st_ino)
 
 
 shared_cache = FileCache()

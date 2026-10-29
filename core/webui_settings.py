@@ -38,7 +38,7 @@ READ_ONLY: dict[str, str] = {
 """**只读项**（键 → 原因）。出现在字段表里但标 ``editable: false``，
 改它返回结构化错误——数据目录的搬迁与 Layout 的建立都在插件启动期完成。"""
 
-READ_ONLY_ENABLED_NOTE = "关掉总开关后日记、小本本、状态、主动消息、早晚安全部不可用（数据保留）。"
+READ_ONLY_ENABLED_NOTE = "关掉总开关后日记、小本本、状态、生活日程、主动消息、早晚安全部不可用（数据保留）。"
 """总开关可改，但响应里要带上这句提示（§四#4）。"""
 
 _EMPTY_DEFAULT: dict[str, Any] = {
@@ -95,7 +95,7 @@ def _node(path: tuple[str, ...], spec: Mapping[str, Any], fields: list[dict]) ->
 
     node["default"] = copy.deepcopy(spec.get("default", _EMPTY_DEFAULT.get(kind, "")))
     # 作息表这类"默认带换行"的字符串用 textarea：schema 驱动，前端不认字段名。
-    node["multiline"] = isinstance(node["default"], str) and "\n" in node["default"]
+    node["multiline"] = isinstance(node["default"], str) and ("\n" in node["default"] or spec.get("multiline") is True)
     node["editor"] = FIELD_EDITORS.get(node["path"], "")
     # 枚举型字符串：带上可选值，前端据此画下拉框而不是自由文本框（第 15 步）。
     # 当前值不在枚举里时也把它补进列表——配置是从旧版本升上来的，老值不该被下拉框藏起来。
@@ -348,9 +348,15 @@ CONFIG_GROUPS: tuple[tuple[str, str], ...] = (
     ("diary", "日记参数"),
     ("notebook", "小本本参数"),
     ("state", "状态参数（情绪 / 作息 / 熟悉度）"),
+    ("life", "今天的生活"),
+    ("imagery", "状态生图（按需画现在的她）"),
     ("proactive", "主动消息参数"),
+    ("social", "群社交（登记 / 话题 / bot 短聊）"),
     ("greeting", "早晚安（问候识别与记录）"),
     ("voice", "语音（主动消息开口说）"),
+    ("pet_bridge", "桌宠状态同步（设备只读连接）"),
+    ("bot_isolation", "多 Bot 隔离（按实例分目录）"),
+    ("per_instance", "按实例覆盖（业务字段白名单）"),
     ("outbound", "出站文本清洗"),
     ("love_peers", "最亲密名单"),
     ("name_preference", "称呼偏好"),
@@ -363,7 +369,7 @@ CONFIG_SECTIONS: tuple[dict[str, Any], ...] = (
         "key": "basic",
         "label": "基础",
         "description": "总开关、时区、数据目录、面板外观、子系统开关、启用范围与最亲密的人",
-        "groups": ("enabled", "timezone", "data_dir", "panel", "subsystems", "scope", "love_peers", "name_preference"),
+        "groups": ("enabled", "timezone", "data_dir", "panel", "subsystems", "scope", "love_peers", "name_preference", "bot_isolation", "per_instance"),
     },
     {
         "key": "content",
@@ -372,10 +378,16 @@ CONFIG_SECTIONS: tuple[dict[str, Any], ...] = (
         "groups": ("diary", "notebook"),
     },
     {
+        "key": "life",
+        "label": "生活",
+        "description": "角色的公开日常、规划模型与失败重试上限、状态生图",
+        "groups": ("life", "imagery", "pet_bridge"),
+    },
+    {
         "key": "proactive",
         "label": "主动消息",
-        "description": "她的状态（情绪 / 作息）、主动消息的频率与冷却、早晚安的问候记录、语音出口",
-        "groups": ("state", "proactive", "greeting", "voice"),
+        "description": "她的状态（情绪 / 作息）、主动消息的频率与冷却、群社交（登记 / 话题 / bot 短聊）、早晚安的问候记录、语音出口",
+        "groups": ("state", "proactive", "social", "greeting", "voice"),
     },
     {
         "key": "outbound",

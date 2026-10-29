@@ -140,6 +140,14 @@ class FileCacheTest(TmpDirCase):
             self.cache.read_text(self.target)
         self.assertEqual(spy.call_count, 1)
 
+    def test_atomic_replacement_with_identical_size_and_mtime_is_not_cached(self) -> None:
+        self.assertEqual(self.cache.read_text(self.target), "第一条\n")
+        original = self.target.stat()
+        storage.atomic_write_text(self.target, "第二条\n")
+        os.utime(self.target, ns=(original.st_atime_ns, original.st_mtime_ns))
+        self.assertEqual(self.cache.read_text(self.target), "第二条\n")
+        self.assertEqual(self.cache.misses, 2)
+
     def test_missing_file_returns_default_and_drops_entry(self) -> None:
         self.cache.read_text(self.target)
         os.unlink(self.target)
@@ -171,6 +179,7 @@ class LayoutTest(TmpDirCase):
         self.assertTrue(str(layout.affinity).endswith(storage.AFFINITY_FILE))
         self.assertTrue(str(layout.proactive).endswith(storage.PROACTIVE_FILE))
         self.assertTrue(str(layout.proactive_log).endswith(storage.PROACTIVE_LOG_FILE))
+        self.assertTrue(str(layout.social).endswith(storage.SOCIAL_FILE))
         self.assertTrue(str(layout.greeting).endswith(storage.GREETING_FILE))
         self.assertTrue(str(layout.names).endswith(storage.NAMES_FILE))
         self.assertTrue(str(layout.state_history).endswith(storage.STATE_HISTORY_FILE))
@@ -180,7 +189,9 @@ class LayoutTest(TmpDirCase):
         self.assertTrue(str(layout.love_diary_jsonl).endswith(storage.LOVE_DIARY_JSONL_FILE))
         self.assertTrue(str(layout.trash_dir).endswith(storage.TRASH_DIR))
         self.assertEqual(layout.comments.name, "comments.json")
-        self.assertEqual(len(layout.files()), 14)
+        self.assertEqual(layout.life.name, storage.LIFE_FILE)
+        self.assertEqual(layout.imagery_quota.name, storage.IMAGERY_QUOTA_FILE)
+        self.assertEqual(len(layout.files()), 17)
 
     def test_all_files_live_directly_under_base_dir(self) -> None:
         layout = storage.Layout(self.root / "data")
@@ -191,6 +202,12 @@ class LayoutTest(TmpDirCase):
         layout = storage.Layout(self.root / "deep" / "data").ensure()
         self.assertTrue(layout.base_dir.is_dir())
         self.assertTrue(layout.trash_dir.is_dir())
+
+    def test_ensure_creates_image_cache(self) -> None:
+        """生图缓存目录随 ``ensure()`` 建（任务 2：与 card-cache 分开的独立目录）。"""
+        layout = storage.Layout(self.root / "deep" / "data2").ensure()
+        self.assertTrue(layout.image_cache.is_dir())
+        self.assertNotEqual(layout.image_cache, layout.card_cache)
 
     def test_json_files_tuple_matches_layout(self) -> None:
         layout = storage.Layout(self.root)

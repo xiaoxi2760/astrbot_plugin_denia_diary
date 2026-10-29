@@ -83,19 +83,20 @@ def proactive_targets(
     love_peers: Sequence[str],
     sessions: Mapping[str, Any] | None = None,
     known_groups: Sequence[str] = (),
+    extra_groups: Sequence[str] = (),
 ) -> list[tuple[str, str]]:
     """主动消息的目标集合 → ``[(umo, kind)]``，``kind`` ∈ ``{"private", "group"}``。
 
     - ``owner``：只主人的私聊；
     - ``private``：所有**互动过**的私聊（∪ 名单里的人）；
-    - ``all``：上面的 + **互动过的群**。
+    - ``all``：上面的 + **互动过的群**（``known_groups``）∪ **主人登记并启用的群**
+      （``extra_groups``，群社交任务的入口——默认空，行为与之前逐字节一致）。
 
-    **目标来源只有一个：``contacts``**（proactive.json 的联系人表，``note_contact``
-    在每个被动轮记录"谁在哪跟我说话"）——从没互动过的人、没见过的群，在任何档位下
-    都进不来（这条是硬的）。``known_groups`` 是调用方从 ``contacts`` 归并出的
-    ``kind=="group"`` 群 umo 清单（她真在里面说过话的群）；``sessions`` 只参与
-    **稳定排序**（已有主动轨迹的会话排前，延续既有关系优先于新联系人），
-    不扩大目标集合。
+    **目标来源只有两个，都是显式记录**：``contacts``（proactive.json 的联系人表，
+    ``note_contact`` 在每个被动轮记录"谁在哪跟我说话"）与群社交登记表里
+    ``enabled=true`` 的群（主人拍板才进来）。从没互动过的人、没登记的群，
+    在任何档位下都进不来（这条是硬的）。``sessions`` 只参与**稳定排序**
+    （已有主动轨迹的会话排前，延续既有关系优先于新联系人），不扩大目标集合。
     """
     if mode not in MODES:
         mode = DEFAULT_MODE
@@ -133,7 +134,7 @@ def proactive_targets(
 
     groups: list[tuple[str, str]] = []
     group_seen: set[str] = set()
-    for umo in known_groups or ():
+    for umo in list(known_groups or ()) + list(extra_groups or ()):
         umo = str(umo or "")
         if umo and umo not in group_seen and umo not in seen:
             group_seen.add(umo)

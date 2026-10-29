@@ -39,6 +39,18 @@ _WRITE_BRAKE = 3
 """当天写到这么多段，注入提醒就改口「不用再写」——纯提示层的刹车，不拦着写（她
 真想写还是写得进）。反馈「写日记频率偏高」（2026-10-11）后的第一道闸；要硬上限
 另行拍板再加。"""
+RECALL_BUDGET = 180
+"""被动轮「续聊素材」硬预算（字，含标题与换行）。
+
+它和 ``compose.PROMPT_BUDGET``（400）不是一回事：这里只约束日记素材这一段，
+最终仍由 compose 的全局渲染按总预算裁剪。上限写死在入口里，调用方传再大也不放大。
+"""
+_RECALL_HEADER = "【日记·历史素材（以前写的，不是现在）】"
+_RECALL_TAIL = "（全文可 diary_read）"
+_RECALL_ITEMS = 2
+"""最多引两段：一段最近、一段相关/次近。再多就会从"回忆线索"变成"翻旧账"。"""
+_RECALL_RECENT_DAYS = 7
+"""次近条目没有关键词命中时，只在这个天数内补一段；更旧的只认明确词面命中。"""
 
 
 @dataclass
@@ -429,14 +441,34 @@ class Diary:
         if not self._enabled():
             return ""
         moment = now or datetime.now(self._tz())
+        return self._prompt_line_from(
+            self.visible(self._own_entries(self.entries(), session), session),
+            session,
+            moment,
+        )
+
+    def _prompt_line_from(
+        self,
+        entries: list[fmt.Entry],
+        session: Session,
+        moment: datetime,
+        *,
+        include_previous: bool = True,
+    ) -> str:
+        """``prompt_line`` 的纯渲染部分（entries 已按人筛过，避免重复解析）。"""
         limits = self._limits()
+        if not session.is_private:
+            # 群聊连"今天写了几段"都不把恋爱日记算进来（内容与计数同一口径）。
+            entries = [e for e in entries if e.book != fmt.LOVE]
         today = fmt.day_of(moment)
-        # 按人筛（_own_entries）："今天写了没 / 上一条是什么"都是这个人的账，
-        # 别人的段落既不该算数、也不能让开头几句漏进别的话题里。
-        all_entries = self._own_entries(self.entries(), session)   # 只解析一次（第 17 步）
-        mine = [e for e in all_entries if e.date == today]
-        earlier = [e for e in all_entries if e.date != today]
-        previous = earlier[-1] if earlier else None
+        mine = [e for e in entries if e.date == today]
+        earlier = [e for e in entries if e.date != today]
+        # 2026-10-04 起：群聊不再念"上一条"的正文。群里的 sender_id 是发言者，
+        # 按人筛会把他的私聊日记翻出来——同一个群 ≠ 该人在场。
+        # 有完整 recall 素材时也不重复这 40 字（同一段正文只出现一次）。
+        previous = (
+            earlier[-1] if earlier and session.is_private and include_previous else None
+        )
 
         # D8（用户裁定"只改措辞"）：凌晨那句别说成"今天还没写"——那读起来像在怪她
         # 一整天没动笔，可这时候她的一天还没开始（作息行还在说"该睡了"）。
@@ -451,10 +483,9 @@ class Diary:
         if previous is not None:
             first = " ".join(previous.text.split())[:40]
             line += f"；上一条是 {previous.date}「{first}…」"
-        elif mine:
-            line += "；这是本子的开头"
-        else:
+        elif not mine and not earlier:
             line += "；本子上还什么都没有"
+        # 其余情况状态句已经够用：不拿"本子的开头"之类的话占续聊预算。
 
         hour = moment.hour
         soft = int(limits["soft_nudge_after_hour"])
@@ -477,6 +508,145 @@ class Diary:
                 "也没格式要求。一天一两段就很好，鸡毛蒜皮不用记。）"
             )
         return line + tail + "\n\n"
+
+    def recall_line(
+        self,
+        session: Session,
+        *,
+        query: str = "",
+        now: datetime | None = None,
+        budget: int = RECALL_BUDGET,
+    ) -> str:
+        """从**当前私聊归属人自己的日记**里取一小段续聊素材（含当天）。
+
+        与 ``prompt_line`` 的分工：那句是"今天写没写"的状态/提醒，这段是"上次聊到
+        哪了"的历史正文。两者分开注入，compose 才能让素材优先于机械催写。
+
+        边界（都在本入口内判定，调用方绕不过）：
+
+        - 只给**私聊**；群聊一律空（同一个群 ≠ 该人在场）；
+        - 只给 ``_own_entries`` 筛过的段落，再走 ``visible``（恋爱日记权限同源）；
+        - 只**逐字引用**日记正文（压成一行、超长加省略号），不总结、不补写；
+        - 标题明说"以前写的，不是现在"，防止把旧状态当成当下；
+        - 返回长度 ≤ ``budget``，且 **≤ RECALL_BUDGET**（调用方传大也不放大）。
+        """
+        if not self._enabled() or not session.is_private:
+            return ""
+        moment = now or datetime.now(self._tz())
+        return self._recall_line_from(
+            self.visible(self._own_entries(self.entries(), session), session),
+            session,
+            moment,
+            query=query,
+            budget=budget,
+        )
+
+    def prompt_parts(
+        self,
+        session: Session,
+        *,
+        query: str = "",
+        now: datetime | None = None,
+        recall_budget: int = RECALL_BUDGET,
+    ) -> tuple[str, str]:
+        """一次解析同时给出 ``prompt_line`` 与 ``recall_line``（compose 的合并入口）。
+
+        两段都要看同一批条目；分开调会把两本日记各解析两遍。旧调用方仍可单独调
+        ``prompt_line`` / ``recall_line``，这里只是给 compose 省一次 IO。
+        """
+        if not self._enabled():
+            return "", ""
+        moment = now or datetime.now(self._tz())
+        entries = self.visible(self._own_entries(self.entries(), session), session)
+        recall = self._recall_line_from(
+            entries, session, moment, query=query, budget=recall_budget
+        )
+        return (
+            self._prompt_line_from(
+                entries, session, moment, include_previous=not recall
+            ),
+            recall,
+        )
+
+    def _recall_line_from(
+        self,
+        entries: list[fmt.Entry],
+        session: Session,
+        moment: datetime,
+        *,
+        query: str = "",
+        budget: int = RECALL_BUDGET,
+    ) -> str:
+        """``recall_line`` 的纯渲染部分；entries 已按人筛过。"""
+        if not session.is_private:
+            return ""
+        try:
+            limit = min(max(int(budget), 0), RECALL_BUDGET)
+        except (TypeError, ValueError):
+            limit = RECALL_BUDGET
+        if limit <= len(_RECALL_HEADER) + 8:
+            return ""
+        rows = [e for e in entries if (e.text or "").strip()]
+        if not rows:
+            return ""
+        rows.sort(key=lambda e: e.stamp)
+        latest = rows[-1]
+        chosen = [latest]
+
+        # 次近/相关的一段：先看词面命中（最长公共片段 ≥2 字），没有命中就只在
+        # 最近 7 天里补一段。这样"昨晚面试→今天问还记得吗"能同时拿到两段，
+        # 又不会为了凑数把几个月前无关的旧段落翻出来。
+        candidates: list[tuple[int, float, fmt.Entry]] = []
+        for entry in rows:
+            if entry is latest:
+                continue
+            score = _recall_score(query, entry.text)
+            age = _recall_age_days(entry, moment, self._tz())
+            candidates.append((score, age, entry))
+        candidates.sort(key=lambda item: (item[0], -item[1], item[2].stamp), reverse=True)
+        for score, age, entry in candidates:
+            if score >= 2 or age <= _RECALL_RECENT_DAYS:
+                chosen.append(entry)
+                break
+        chosen = chosen[:_RECALL_ITEMS]
+        chosen.sort(key=lambda e: e.stamp)
+        prefix = {id(entry): f"{entry.date} {entry.time}｜" for entry in chosen}
+        header_cost = len(_RECALL_HEADER) + 1
+        prefix_cost = sum(len(prefix[id(entry)]) + 1 for entry in chosen)
+        body_total = limit - header_cost - prefix_cost
+        # 极端小预算先保最新一条；不要为了凑两段把正文挤成 0 字。
+        while len(chosen) > 1 and body_total < 12:
+            chosen = chosen[-1:]
+            prefix = {id(entry): f"{entry.date} {entry.time}｜" for entry in chosen}
+            prefix_cost = sum(len(prefix[id(entry)]) + 1 for entry in chosen)
+            body_total = limit - header_cost - prefix_cost
+        if body_total <= 0:
+            return ""
+
+        # 先给最新一条分额度，再给较早/相关的一条：长旧日记不能把当天结果挤掉。
+        # 每条先拿均分；短的那条用不完的额度自然留给另一条。
+        ordered = sorted(chosen, key=lambda e: e.stamp, reverse=True)
+        bodies: dict[int, str] = {}
+        remaining = body_total
+        for index, entry in enumerate(ordered):
+            left = len(ordered) - index
+            share = remaining if left == 1 else max(8, remaining // left)
+            body = _recall_clip(entry.text, min(share, remaining), query)
+            if body:
+                bodies[id(entry)] = body
+                remaining -= len(body)
+
+        lines = [_RECALL_HEADER]
+        for entry in chosen:
+            body = bodies.get(id(entry))
+            if not body:
+                continue
+            lines.append(prefix[id(entry)] + body)
+        if len(lines) == 1:
+            return ""  # 只有标题没有正文＝没素材
+        if len("\n".join(lines)) + 1 + len(_RECALL_TAIL) <= limit:
+            lines.append(_RECALL_TAIL)
+        return "\n".join(lines)
 
     def event_hint(
         self,
@@ -541,6 +711,89 @@ def _clamp(value: object, low: int, high: int) -> int:
     return min(max(number, low), high)
 
 
+def _recall_match_span(query: object, text: object) -> tuple[int, int] | None:
+    """query 与正文的最长公共片段在 text 里的 ``(start, end)``；不足 2 字返回 None。"""
+    q = "".join(str(query or "").split()).lower()[:60]
+    raw = str(text or "")
+    # 匹配时忽略空白，但窗口要切原文。保留坐标映射，避免英文空格、段落换行
+    # 把命中位置向前挪；lower() 展开的字符也映回原字符。
+    chars, offsets = [], []
+    for index, char in enumerate(raw):
+        if not char.isspace():
+            lowered = char.lower()
+            chars.extend(lowered)
+            offsets.extend([index] * len(lowered))
+    t = "".join(chars)
+    if len(q) < 2 or not t:
+        return None
+    best = (0, 0)
+    for start in range(len(q)):
+        end = start + 2
+        while end <= len(q) and q[start:end] in t:
+            if end - start > best[1] - best[0]:
+                at = t.find(q[start:end])
+                if at >= 0:
+                    best = (at, at + end - start)
+            end += 1
+    return (offsets[best[0]], offsets[best[1] - 1] + 1) if best[1] > best[0] else None
+
+
+def _recall_score(query: object, text: object) -> int:
+    """query 与日记正文的最长公共片段长度（只用于挑素材，不做语义推断）。
+
+    用最长公共片段而不是关键词表：至少 2 字连续命中才算相关，单字噪声不参与；
+    真正的"差不多/还记得吗"这类无词面线索，则由"最近 7 天"兜底。
+    """
+    q = "".join(str(query or "").split()).lower()[:60]
+    t = "".join(str(text or "").split()).lower()
+    if len(q) < 2 or not t:
+        return 0
+    # 便宜的前置过滤：连一个 2 字片段都没有，就不做后面的公共子串计算。
+    if not any(q[i : i + 2] in t for i in range(len(q) - 1)):
+        return 0
+    span = _recall_match_span(q, t)
+    return 0 if span is None else span[1] - span[0]
+
+
+def _recall_age_days(entry: fmt.Entry, moment: datetime, tz) -> float:
+    """条目距现在多少天；时间戳坏了就当"很旧"（只有词面命中才可能被选中）。"""
+    when = fmt.parse_stamp(entry.date, entry.time, tz)
+    if when is None:
+        return float("inf")
+    return max(0.0, (moment - when).total_seconds() / 86400)
+
+
+def _recall_clip(text: object, limit: int, query: object = "") -> str:
+    """压成一行并截到 limit 字（含省略号）；有词面命中时优先展示命中附近。
+
+    长日记的结尾可能才是当前话题（"……小猫团子下周一要去复查"）。只取开头会把
+    真正相关的原文切掉，所以这里以最长公共片段为中心开窗；窗口两侧确有截断时
+    才加省略号，保证返回长度 ≤ limit。
+    """
+    flat = " ".join(str(text or "").split())
+    if limit <= 0:
+        return ""
+    if len(flat) <= limit:
+        return flat
+    span = _recall_match_span(query, flat)
+    if span is None:
+        return flat[: limit - 1] + "…"
+    start, end = span
+    if end - start >= limit:
+        return flat[start : start + limit]
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(flat) else ""
+    room = limit - len(prefix) - len(suffix)
+    if room < end - start:
+        prefix = suffix = ""
+        room = limit
+    left = min(start, max(0, (room - (end - start)) // 2))
+    right = min(len(flat) - end, room - (end - start) - left)
+    left = min(start, room - (end - start) - right)
+    window = flat[start - left : end + right]
+    return prefix + window + suffix
+
+
 def _is_day(value: object) -> bool:
     text = str(value or "")
     if len(text) != 10 or text[4] != "-" or text[7] != "-":
@@ -582,4 +835,4 @@ def _scope_note(scope: str, before: int, after: int) -> str:
     )
 
 
-__all__ = ["ALL_TEXT_LIMIT", "DISABLED", "Diary"]
+__all__ = ["ALL_TEXT_LIMIT", "DISABLED", "RECALL_BUDGET", "Diary"]

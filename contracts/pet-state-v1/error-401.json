@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "error": {
+    "code": "unauthorized",
+    "message": "无法读取角色状态"
+  }
+}

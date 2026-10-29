@@ -27,7 +27,17 @@ RouteSpec = tuple[str, str, tuple[str, ...], str]
 """``(endpoint, handler 名, 方法, 描述)``——``endpoint`` 是不带前缀、不带前导斜杠的。"""
 
 ROUTES: tuple[RouteSpec, ...] = (
+    ("pet/chat-devices", "pet_chat_devices", ("GET",), "统一聊天 v2 设备与已有核心用户（管理鉴权）"),
+    ("pet/chat-devices/issue", "pet_chat_device_issue", ("POST",), "为当前实例已有核心用户签发 v2 聊天设备绑定"),
+    ("pet/chat-devices/revoke", "pet_chat_device_revoke", ("POST",), "撤销当前实例的 v2 设备凭据"),
+    ("core/snapshot", "core_snapshot", ("GET",), "核心管理：预设、历史、记忆、好感度与观测值（宿主管理鉴权）"),
+    ("core/action", "core_action", ("POST",), "核心管理操作（由核心服务校验并保存）"),
+    ("instances", "instances", ("GET",), "管理面板可选择的 Bot 实例"),
     ("status", "status", ("GET",), "总览：情绪、作息、今日主动计数与文件体检"),
+    ("life", "life", ("GET",), "今天的公开日常：计划、当前活动与进展"),
+    ("life/generate", "life_generate", ("POST",), "尝试规划今天的未来活动"),
+    ("life/replace", "life_replace", ("POST",), "调整未来活动，保留已经开始的安排"),
+    ("life/record", "life_record", ("POST",), "确认当前或过去活动的公开结果"),
     ("diary/list", "diary_list", ("GET",), "两本日记的篇数、字数与最近更新"),
     ("diary/comments", "diary_comments", ("GET",), "查看一段日记的留言"),
     ("diary/comments/save", "diary_comment_save", ("POST",), "保存留言草稿，不通知她"),
@@ -47,13 +57,25 @@ ROUTES: tuple[RouteSpec, ...] = (
     ("affinity", "affinity", ("GET",), "熟悉度榜、档位与当前 love_peers"),
     ("history", "history", ("GET",), "情绪曲线数据点"),
     ("proactive", "proactive", ("GET",), "主动消息计数与发送记录"),
+    ("social", "social_get", ("GET",), "群社交：登记的群与参与者、待登记、话题概览与最近决策"),
+    ("social/group", "social_group", ("POST",), "登记/更新/删除群（body: action=save|delete；默认不开主动发言）"),
+    ("social/participant", "social_participant", ("POST",), "登记/更新/删除参与者（body: action=save|delete，真实 id，人或 bot 由主人标注）"),
+    ("social/preview", "social_preview", ("POST",), "测试桩：生成候选/短聊判定预览，绝不发送真实消息"),
+    ("voice/status", "voice_status", ("GET",), "语音能力与诊断：识别 / 合成 / 文件服务 / 最近事件"),
+    ("pet/devices", "pet_devices", ("GET",), "桌宠设备与状态监听器（管理面板）"),
+    ("pet/devices/issue", "pet_device_issue", ("POST",), "为主人签发一次显示的设备凭据"),
+    ("pet/devices/revoke", "pet_device_revoke", ("POST",), "撤销桌宠设备凭据"),
     ("settings", "settings_get", ("GET",), "设置页字段表、当前值与默认值"),
     ("settings", "settings_post", ("POST",), "保存设置（校验 → 备份 → 落盘 → 热生效）"),
     ("settings/reset", "settings_reset", ("POST",), "恢复默认设置"),
     ("portrait", "portrait_get", ("GET",), "立绘：当前图（含 data_url）与列表；?id= 取单张"),
     ("portrait/upload", "portrait_upload", ("POST",), "上传立绘（multipart 字段 file，png/jpeg/webp/gif，≤8 MB / ≤20 张）"),
+    ("portrait/upload-data", "portrait_upload_data", ("POST",), "按实例上传立绘（JSON data URL，净化与配额沿用立绘服务）"),
     ("portrait/select", "portrait_select", ("POST",), "切换当前立绘"),
     ("portrait/delete", "portrait_delete", ("POST",), "删除一张立绘（连文件）"),
+    ("imagery", "imagery_status", ("GET",), "状态生图：开关、能力、配置、今日用量与最近一张的元信息"),
+    ("imagery/image", "imagery_image", ("GET",), "最近一张生图（回 data:image/png;base64,…；无图回 ok:false）"),
+    ("imagery/generate", "imagery_generate", ("POST",), "画一下现在的她（按需；受开关、每日上限与缓存约束，不自动发消息）"),
 )
 
 ENDPOINTS: tuple[str, ...] = tuple(spec[0] for spec in ROUTES)

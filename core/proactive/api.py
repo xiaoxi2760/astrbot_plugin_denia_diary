@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .. import compose, scope, storage
@@ -38,6 +38,9 @@ PACK_MAX = 100
 「类目 + 指令 + 素材」。note 经宿主 ``json.dumps`` 进 system prompt，换行会转义成
 ``\\n``（每个多 1 字符）——预算按转义后算，所以 pack 里不放换行。"""
 
+PENDING_TTL = timedelta(minutes=10)
+"""主动轮等待发送确认的最长保留时间；过期只清内存暂存，不退已扣配额。"""
+
 SLOT_LABELS: dict[str, str] = {
     "signal": "心情暗号",
     "promise": "约定跟进",
@@ -47,6 +50,9 @@ SLOT_LABELS: dict[str, str] = {
     "morning": "早安",
     "goodnight": "晚安",
     "diary": "日记",
+    "group_topic": "群聊接话",
+    "group_share": "分享日程",
+    "group_chat": "群聊短聊",
 }
 
 
@@ -62,6 +68,10 @@ class Proactive:
     notebook: object = None
     state: object = None
     affinity: object = None
+    life: object = None
+    social: object = None
+    """群社交门面（群社交任务，可注入）：群触发器从它取料、目标集合扩入登记群。
+    不注入（None）时一切行为与本步之前逐字节一致。"""
     _pending_log: dict[str, dict[str, str]] = field(default_factory=dict)
     """两段式的决策暂存（umo → slot/fragment）：确认发出后转成 proactive-log 记录。
 
@@ -171,12 +181,7 @@ class Proactive:
         signal = self._signal_candidate(doc, cfg, moment)
         if signal is not None:
             decision = self._build_decision(signal, cfg, moment)
-            if await self._commit(decision, cfg, moment):
-                self._pending_speak.pop(str(decision["umo"]), None)  # 暗号是直发字符，不转语音
-                self._pending_log[str(decision["umo"])] = {
-                    "slot": str(decision["slot"]),
-                    "fragment": str(decision["fragment"]),
-                }
+            if await self._reserve_decision(decision, cfg, moment):
                 return decision
 
         # 全局闸：免打扰时段常规内容一条都不发
@@ -194,15 +199,176 @@ class Proactive:
             if not candidates:
                 continue
             decision = self._build_decision(candidates[0], cfg, moment)
-            if await self._commit(decision, cfg, moment):
-                self._pending_log[str(decision["umo"])] = {
-                    "slot": str(decision["slot"]),
-                    "fragment": str(decision["fragment"]),
-                }
-                self._pending_speak[str(decision["umo"])] = bool(decision.get("speak"))
+            if await self._reserve_decision(decision, cfg, moment):
                 return decision
             return None  # 闸门复核没过（竞态）：本 tick 放弃，不往下问
         return None
+
+    async def group_chat_decision(
+        self, session: Session, text: str, now: datetime
+    ) -> dict[str, Any]:
+        """短聊消息的最终出站判定：社交资格、主动闸门、短聊轮数、配额提交。
+
+        同一群的短聊串行处理；与 patrol 共用每会话预留锁，避免两条路径覆盖
+        pending_log / pending_speak。拒绝发生在 ``social.chat_decision`` 之前时，
+        不会消耗短聊轮数或消息指纹。决策只预留配额，不提前写 ``last_sent_at``。
+        """
+        umo = str(getattr(session, "umo", "") or "")
+        if not umo:
+            return {"action": "ignore", "reason": "会话没有 umo"}
+        moment = now or datetime.now(self.settings.zone())
+        chat_key = self._session_lock_key("group-chat", umo)
+        reserve_key = self._session_lock_key("pending", umo)
+        async with self.locks.acquire(chat_key):
+            async with self.locks.acquire(reserve_key):
+                social = getattr(self, "social", None)
+                if social is None or not social.manages_message(session, text):
+                    return {"action": "ignore", "reason": "消息不符合已登记 bot 短聊条件"}
+                if not self.settings.subsystem("proactive"):
+                    await social.record_decision(
+                        session, action="ignore", reason="主动消息未启用",
+                        slot="group_chat", now=moment,
+                    )
+                    return {"action": "ignore", "reason": "主动消息未启用"}
+                self._expire_pending_locked(umo, moment)
+                if umo in self._pending_log:
+                    reason = "该会话已有待确认的主动消息"
+                    await social.record_decision(
+                        session, action="ignore", reason=reason,
+                        slot="group_chat", now=moment,
+                    )
+                    return {"action": "ignore", "reason": reason}
+
+                cfg = dict(self.settings.proactive)
+                late_night = bool(
+                    self.state is not None and self.state.is_late_night(now=moment)
+                )
+                reason = gate.gate_check(
+                    entry=gate.entry_of(self.store.read(), umo),
+                    kind="group",
+                    cfg=cfg,
+                    late_night=late_night,
+                    now=moment,
+                )
+                if reason:
+                    await social.record_decision(
+                        session, action="ignore", reason=reason,
+                        slot="group_chat", now=moment,
+                    )
+                    return {"action": "ignore", "reason": reason}
+
+                chat = await social.chat_decision(
+                    session, text=text, now=moment, late_night=late_night
+                )
+                if chat.get("action") != "wake":
+                    return {**chat, "action": "ignore"}
+
+                bot_id = str(chat.get("bot_id") or session.person_id() or "")
+                fragment = str(chat.get("fragment") or "")
+                candidate = triggers.Candidate(
+                    slot="group_chat",
+                    umo=umo,
+                    session=session,
+                    fragment=fragment,
+                    instruction=(
+                        f"登记 bot 的真实 ID 是 {bot_id}。它在叫你，自然地回它一句，"
+                        "先 @ 这个 bot，说完这轮就停"
+                    ),
+                    priority=0,
+                )
+                decision = self._build_decision(candidate, cfg, moment)
+                if not await self._commit(decision, cfg, moment):
+                    reason = "主动闸门复核未通过，本轮没有唤醒"
+                    await social.record_decision(
+                        session, action="ignore", reason=reason,
+                        slot="group_chat", now=moment,
+                    )
+                    return {
+                        "action": "ignore",
+                        "reason": reason,
+                    }
+                self._set_pending(decision, moment)
+                return {
+                    "action": "wake",
+                    "reason": str(chat.get("reason") or "短聊放行"),
+                    "slot": "group_chat",
+                    "umo": umo,
+                    "round": int(chat.get("round") or 0),
+                    "bot_id": bot_id,
+                    "bot_name": str(chat.get("bot_name") or ""),
+                    "fragment": fragment,
+                    "note": str(decision.get("note") or ""),
+                    "speak": bool(decision.get("speak")),
+                }
+
+    def _session_lock_key(self, purpose: str, umo: str) -> str:
+        return f"{self.layout.proactive}::denia-proactive::{purpose}::{umo}"
+
+    async def _reserve_decision(
+        self, decision: dict[str, Any], cfg: dict[str, Any], moment: datetime
+    ) -> bool:
+        """串行预留一个会话的主动轮，并在同一锁内登记待确认回执。"""
+        umo = str(decision.get("umo") or "")
+        if not umo:
+            return False
+        async with self.locks.acquire(self._session_lock_key("pending", umo)):
+            self._expire_pending_locked(umo, moment)
+            pending = self._pending_log.get(umo)
+            retrying_signal = (
+                str(decision.get("slot") or "") == "signal"
+                and isinstance(pending, dict)
+                and str(pending.get("slot") or "") == "signal"
+            )
+            if pending is not None and not retrying_signal:
+                return False
+            if not await self._commit(decision, cfg, moment):
+                return False
+            self._set_pending(decision, moment)
+            return True
+
+    def _set_pending(self, decision: dict[str, Any], moment: datetime) -> None:
+        umo = str(decision["umo"])
+        self._pending_log[umo] = {
+            "slot": str(decision["slot"]),
+            "fragment": str(decision.get("fragment") or ""),
+            "reserved_at": moment.isoformat(timespec="seconds"),
+        }
+        if decision.get("kind") == "direct":
+            self._pending_speak.pop(umo, None)  # 暗号是直发字符，不转语音
+        else:
+            self._pending_speak[umo] = bool(decision.get("speak"))
+
+    def _expire_pending_locked(self, umo: str, now: datetime) -> bool:
+        """惰性清理过期或没有有效时间戳的 pending；调用方须持会话预留锁。"""
+        if umo not in self._pending_log:
+            return self._pending_speak.pop(umo, None) is not None
+        pending = self._pending_log.get(umo)
+        raw = pending.get("reserved_at") if isinstance(pending, dict) else None
+        try:
+            reserved_at = datetime.fromisoformat(str(raw or ""))
+        except ValueError:
+            reserved_at = None
+        expired = (
+            reserved_at is None
+            or reserved_at.tzinfo is None
+            or now.tzinfo is None
+            or now - reserved_at >= PENDING_TTL
+        )
+        if not expired:
+            return False
+        self._pending_log.pop(umo, None)
+        self._pending_speak.pop(umo, None)
+        return True
+
+    async def reject_pending(self, umo: str) -> bool:
+        """发送或派发明确失败时清理暂存；配额不回滚，也不写 last_sent_at。"""
+        key = str(umo or "")
+        if not key:
+            return False
+        async with self.locks.acquire(self._session_lock_key("pending", key)):
+            pending = self._pending_log.pop(key, None)
+            speak = self._pending_speak.pop(key, None)
+            return pending is not None or speak is not None
 
     def _scope_mode(self) -> str:
         """当前启用范围档位（未配置时由 scope 按默认档兜底）。"""
@@ -228,6 +394,13 @@ class Proactive:
             if umo and umo not in seen_groups:
                 seen_groups.add(umo)
                 known_groups.append(umo)
+        extra_groups: list[str] = []
+        social = getattr(self, "social", None)
+        if social is not None:
+            try:
+                extra_groups = list(social.enabled_group_umos())
+            except Exception as error:  # noqa: BLE001 - 登记表坏了不连累私聊目标
+                logger.warning("[proactive] 群社交登记读取失败（群目标按无处理）：%s", error)
         sessions = doc.get("sessions")
         targets = scope.proactive_targets(
             mode,
@@ -235,6 +408,7 @@ class Proactive:
             love_peers=tuple(self.settings.love_peers or ()),
             sessions=sessions if isinstance(sessions, dict) else {},
             known_groups=known_groups,
+            extra_groups=extra_groups,
         )
         allowed: dict[str, str] = {}
         for umo, kind in targets:
@@ -264,38 +438,39 @@ class Proactive:
         if not umo:
             return False
         moment = now or datetime.now(self.settings.zone())
-        pending = self._pending_log.pop(str(umo), None)
-        self._pending_speak.pop(str(umo), None)
-        # slot 先算出来：下面"要不要补记暗号冷却"和发送记录都要它。
-        slot = str((pending or {}).get("slot") or "") or str(
-            gate.entry_of(self.store.read(), umo).get("last_slot") or ""
-        )
+        async with self.locks.acquire(self._session_lock_key("pending", str(umo))):
+            pending = self._pending_log.pop(str(umo), None)
+            self._pending_speak.pop(str(umo), None)
+            # slot 先算出来：下面"要不要补记暗号冷却"和发送记录都要它。
+            slot = str((pending or {}).get("slot") or "") or str(
+                gate.entry_of(self.store.read(), umo).get("last_slot") or ""
+            )
 
-        def update(doc: dict[str, Any]) -> dict[str, Any]:
-            sessions = dict(doc.get("sessions") or {})
-            entry = dict(sessions.get(umo) or {})
-            entry["last_sent_at"] = moment.isoformat(timespec="seconds")
-            if slot == "signal":
-                entry["signal_date"] = moment.date().isoformat()
-                entry["signal_last_at"] = moment.isoformat(timespec="seconds")
-            sessions[umo] = entry
-            doc["sessions"] = sessions
-            return doc
+            def update(doc: dict[str, Any]) -> dict[str, Any]:
+                sessions = dict(doc.get("sessions") or {})
+                entry = dict(sessions.get(umo) or {})
+                entry["last_sent_at"] = moment.isoformat(timespec="seconds")
+                if slot == "signal":
+                    entry["signal_date"] = moment.date().isoformat()
+                    entry["signal_last_at"] = moment.isoformat(timespec="seconds")
+                sessions[umo] = entry
+                doc["sessions"] = sessions
+                return doc
 
-        await self.store.update(update)
-        fragment = str((pending or {}).get("fragment") or "")
-        await self.store.append_log(
-            [
-                {
-                    "ts": moment.isoformat(timespec="seconds"),
-                    "umo": umo,
-                    "slot": slot,
-                    "fragment": fragment,
-                }
-            ],
-            now=moment,
-        )
-        return True
+            await self.store.update(update)
+            fragment = str((pending or {}).get("fragment") or "")
+            await self.store.append_log(
+                [
+                    {
+                        "ts": moment.isoformat(timespec="seconds"),
+                        "umo": umo,
+                        "slot": slot,
+                        "fragment": fragment,
+                    }
+                ],
+                now=moment,
+            )
+            return True
 
     # ---- 内部：暗号候选 ----------------------------------------------------------
 
@@ -382,14 +557,45 @@ class Proactive:
                 notebook=self.notebook,
                 state=self.state,
                 affinity=self.affinity,
+                life=self.life,
+                social=getattr(self, "social", None),
                 now=now,
                 strong_text=candidate.fragment,
             )
         label = SLOT_LABELS.get(candidate.slot, candidate.slot)
-        at_rule = "" if candidate.session.is_private else "（群聊：开口必须先 @ TA，别裸发）"
+        if candidate.session.is_private:
+            at_rule = ""
+        elif candidate.slot in {"group_topic", "group_share"}:
+            at_rule = "（群聊公开分享：不猜测收件人，不 @ 全体）"
+        else:
+            at_rule = "（群聊：开口必须先 @ TA，别裸发）"
         pack = f"【{label}】{at_rule}{candidate.instruction}素材：{candidate.fragment}"
         pack = " ".join(pack.split())[:PACK_MAX]  # 压掉换行（json.dumps 转义预算）+ 截 100
         return f"{inject}\n{pack}" if inject else pack
+
+    def group_note(
+        self,
+        *,
+        slot: str,
+        umo: str,
+        fragment: str,
+        instruction: str,
+        now: datetime,
+    ) -> str:
+        """给群社交用的 note 组装（bot 短聊唤醒 / 面板测试桩走同一条渲染链）。
+
+        与 ``_build_note`` 唯一的区别是入口：调用方手里是散参数不是 ``Candidate``
+        （候选不经过巡检的触发器队列）。注入、@ 护栏、100 字包的规则**原样生效**。
+        """
+        candidate = triggers.Candidate(
+            slot=slot,
+            umo=umo,
+            session=Session.from_umo(umo),
+            fragment=str(fragment or ""),
+            instruction=str(instruction or ""),
+            priority=0,
+        )
+        return self._build_note(candidate, now=now)
 
     def _decide_speak(self, *, now: datetime) -> bool:
         """这条唤醒要不要转语音（F1）：配置 + 开口概率 + 情绪倾向，**决策时掷定**。
@@ -437,9 +643,19 @@ class Proactive:
         def update(doc: dict[str, Any]) -> dict[str, Any] | None:
             entry = gate.entry_of(doc, umo)
             kind = "group" if (Session.from_umo(umo).is_group) else "private"
-            limit = int(cfg.get("daily_limit_group" if kind == "group" else "daily_limit_private") or 0)
-            if slot != "signal" and gate.today_count(entry, today) >= limit:
-                return None  # 配额刚满（竞态）：放弃，什么都不写（暗号不在此列）
+            if slot != "signal":
+                late_night = bool(
+                    self.state is not None and self.state.is_late_night(now=moment)
+                )
+                reason = gate.gate_check(
+                    entry=entry,
+                    kind=kind,
+                    cfg=cfg,
+                    late_night=late_night,
+                    now=moment,
+                )
+                if reason:
+                    return None  # 配额/免打扰/最小间隔刚变化：竞态下放弃
             sessions = dict(doc.get("sessions") or {})
             entry = dict(entry)
             entry["today_date"] = today

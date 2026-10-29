@@ -363,12 +363,12 @@ class TestPortraitHandlers(TmpDirCase):
         portrait_routes = [spec for spec in routes.ROUTES if spec[0].startswith("portrait")]
         self.assertEqual(
             [spec[0] for spec in portrait_routes],
-            ["portrait", "portrait/upload", "portrait/select", "portrait/delete"],
+            ["portrait", "portrait/upload", "portrait/upload-data", "portrait/select", "portrait/delete"],
         )
-        self.assertEqual([spec[2] for spec in portrait_routes], [("GET",), ("POST",), ("POST",), ("POST",)])
+        self.assertEqual([spec[2] for spec in portrait_routes], [("GET",), ("POST",), ("POST",), ("POST",), ("POST",)])
         self.assertEqual(
-            len(routes.ROUTES), 27,
-            "12 条既有 + 立绘 4 条 + 日记改删/回收站 4 条 + 日记本预览 1 条 + 导出图片 1 条",
+            len(routes.ROUTES), 49,
+            "既有42条 + 实例列表、按实例图片上传和核心管理两条",
         )
 
 

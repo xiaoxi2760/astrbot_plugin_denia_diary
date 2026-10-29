@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "error": {
+    "code": "unavailable",
+    "message": "状态同步暂不可用"
+  }
+}

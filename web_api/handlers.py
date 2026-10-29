@@ -18,6 +18,9 @@
 from __future__ import annotations
 
 import base64
+import copy
+from contextvars import ContextVar
+from functools import wraps
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
@@ -30,6 +33,7 @@ try:  # 包内上下文（AstrBot 加载插件 / 测试用 plugin_under_test 别
     from ..core.diary import card as card_mod
     from ..core.diary import card_cache
     from ..core.diary import format as fmt
+    from ..core.session import Session
 except ImportError:  # 顶层上下文（离线单测直接把插件目录放进 sys.path）
     from core import webui_data  # type: ignore[no-redef]
     from core import webui_portrait  # type: ignore[no-redef]
@@ -38,6 +42,7 @@ except ImportError:  # 顶层上下文（离线单测直接把插件目录放进
     from core.diary import card as card_mod  # type: ignore[no-redef]
     from core.diary import card_cache  # type: ignore[no-redef]
     from core.diary import format as fmt  # type: ignore[no-redef]
+    from core.session import Session  # type: ignore[no-redef]
 
 from ._web import error_response, json_response, request
 
@@ -47,12 +52,119 @@ MAX_TAIL = 200
 MAX_HISTORY_DAYS = webui_data.HISTORY_DAYS_MAX
 MAX_AFFINITY_LIMIT = 200
 MAX_LOG_LIMIT = 500
+_request_runtime: ContextVar[Any] = ContextVar("diary_web_runtime", default=None)
+_POST_HANDLERS = {
+    "pet_chat_device_issue", "pet_chat_device_revoke",
+    "core_action",
+    "life_generate", "life_replace", "life_record", "diary_comment_save",
+    "diary_comment_publish", "diary_comment_withdraw", "diary_comment_delete",
+    "diary_rewrite", "diary_delete", "diary_restore", "notebook_complete", "notebook_delete",
+    "social_group", "social_participant", "social_preview", "pet_device_issue", "pet_device_revoke",
+    "settings_post", "settings_reset", "portrait_upload", "portrait_upload_data",
+    "portrait_select", "portrait_delete", "imagery_generate",
+}
+
+
+def _manager_of(deps: Any) -> Any:
+    return getattr(deps, "manager", None) or getattr(deps, "_manager", None)
+
+
+def _selected_runtime(deps: Any) -> Any:
+    value = _request_runtime.get()
+    if value is not None and value[0] is deps and getattr(_manager_of(deps), "isolation_on", False):
+        return value[1]
+    return None
+
+
+def _settings_fields(deps: Any, fields: list[dict]) -> list[dict]:
+    if _selected_runtime(deps) is None:
+        return fields
+    allowed = set(webui_settings.settings_mod.PER_INSTANCE_ALLOWED_KEYS)
+    result = []
+    for field in fields:
+        item = dict(field)
+        if str(item.get("path", "")).split(".", 1)[0] not in allowed:
+            item["editable"] = False
+            item["note"] = "宿主级配置，请从 AstrBot 插件配置管理；不会随实例切换。"
+        result.append(item)
+    return result
+
+
+def _instance_payload(deps: Any) -> dict:
+    manager = _manager_of(deps)
+    items = [{"scope_id": item["scope_id"], "label": item["scope_id"], "legacy": bool(item.get("legacy"))}
+             for item in manager.list_instances()]
+    # Explicit per-instance configuration is an administrator declaration too.
+    known = {item["scope_id"] for item in items}
+    for scope in manager.settings.per_instance:
+        if scope not in known:
+            items.append({"scope_id": scope, "label": scope, "legacy": scope == manager.legacy_platform_id})
+            known.add(scope)
+    return {"ok": True, "isolation_enabled": manager.isolation_on,
+            "legacy_scope_id": manager.legacy_platform_id,
+            "default_scope_id": manager.legacy_platform_id if manager.isolation_on else "",
+            "items": items}
+
+
+def _scoped_handler(deps: Any, name: str, handler: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(handler)
+    async def scoped() -> Any:
+        manager = _manager_of(deps)
+        scope = ""
+        if manager.isolation_on:
+            if name == "portrait_upload":
+                return error_response("多实例上传请使用 portrait/upload-data", 400)
+            query_scope = _query_str(request, "scope_id", "")
+            body = None
+            if name in _POST_HANDLERS:
+                if name == "portrait_upload_data":
+                    length = getattr(request, "content_length", None)
+                    if isinstance(length, int) and length > 12 * 1024 * 1024:
+                        return error_response("上传请求过大", 400)
+                    try:
+                        request.max_content_length = 12 * 1024 * 1024
+                    except Exception:
+                        pass
+                body = await _read_body(request)
+                if body is None:
+                    return error_response("请求体必须是 JSON 对象", 400)
+            body_scope = body.get("scope_id", "") if body else ""
+            if not isinstance(body_scope, str):
+                return error_response("scope_id 必须是实例 ID 字符串", 400)
+            if query_scope and body_scope and query_scope != body_scope:
+                return error_response("请求的实例参数不一致", 400)
+            scope = body_scope or query_scope
+            known = {item["scope_id"] for item in _instance_payload(deps)["items"]}
+            if not scope or scope not in known:
+                return error_response("请选择已登记的实例", 400)
+        runtime = deps.resolve_runtime(scope)
+        if runtime is None:
+            return error_response("实例归属不可用，请保留数据并检查配置", 400)
+        if manager.isolation_on and name.startswith("pet_device") and not runtime.legacy:
+            return error_response("现有 v1 桌宠设备仅绑定原有实例", 400)
+        binding = _request_runtime.set((deps, runtime))
+        try:
+            binder = getattr(deps, "bind_runtime", None) or getattr(deps, "_bind_runtime")
+            with binder(runtime):
+                return await handler()
+        finally:
+            _request_runtime.reset(binding)
+    return scoped
 
 
 def build_handlers(deps: Any) -> dict[str, Callable[..., Any]]:
     """按 ``routes.ROUTES`` 的 handler 名产出闭包。``deps`` 就是插件实例。"""
-    return {
+    handlers = {
+        "pet_chat_devices": _make_pet_chat_devices(deps),
+        "pet_chat_device_issue": _make_pet_chat_devices(deps, "issue"),
+        "pet_chat_device_revoke": _make_pet_chat_devices(deps, "revoke"),
+        "core_snapshot": _make_core_admin(deps),
+        "core_action": _make_core_admin(deps, mutation=True),
         "status": _make_status(deps),
+        "life": _make_life(deps),
+        "life_generate": _make_life(deps, "generate"),
+        "life_replace": _make_life(deps, "replace"),
+        "life_record": _make_life(deps, "record"),
         "diary_list": _make_diary_list(deps),
         "diary_comments": _make_comments(deps),
         "diary_comment_save": _make_comments(deps, "save"),
@@ -72,24 +184,102 @@ def build_handlers(deps: Any) -> dict[str, Callable[..., Any]]:
         "affinity": _make_affinity(deps),
         "history": _make_history(deps),
         "proactive": _make_proactive(deps),
+        "social_get": _make_social_get(deps),
+        "social_group": _make_social_group(deps),
+        "social_participant": _make_social_participant(deps),
+        "social_preview": _make_social_preview(deps),
+        "voice_status": _make_voice_status(deps),
+        "pet_devices": _make_pet_devices(deps),
+        "pet_device_issue": _make_pet_devices(deps, "issue"),
+        "pet_device_revoke": _make_pet_devices(deps, "revoke"),
         "settings_get": _make_settings_get(deps),
         "settings_post": _make_settings_post(deps),
         "settings_reset": _make_settings_reset(deps),
         "portrait_get": _make_portrait_get(deps),
         "portrait_upload": _make_portrait_upload(deps),
+        "portrait_upload_data": _make_portrait_upload_data(deps),
         "portrait_select": _make_portrait_select(deps),
         "portrait_delete": _make_portrait_delete(deps),
+        "imagery_status": _make_imagery_status(deps),
+        "imagery_image": _make_imagery_image(deps),
+        "imagery_generate": _make_imagery_generate(deps),
     }
+    if callable(getattr(deps, "resolve_runtime", None)) and _manager_of(deps) is not None:
+        handlers = {name: _scoped_handler(deps, name, handler) for name, handler in handlers.items()}
+
+        async def instances() -> Any:
+            return json_response(_instance_payload(deps))
+
+        handlers["instances"] = instances
+    else:
+        async def instances() -> Any:
+            return json_response({"ok": True, "isolation_enabled": False, "legacy_scope_id": "", "items": []})
+        handlers["instances"] = instances
+    return handlers
+
+
+def _make_pet_chat_devices(deps: Any, action: str = "") -> Callable[..., Any]:
+    async def handler() -> Any:
+        if not action:
+            return json_response(deps.pet_chat_devices())
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400)
+        method = deps.pet_chat_device_issue if action == "issue" else deps.pet_chat_device_revoke
+        return json_response(await method(body))
+    return handler
+
+
+def _make_core_admin(deps: Any, mutation: bool = False) -> Callable[..., Any]:
+    async def handler() -> Any:
+        getter = getattr(getattr(deps, "context", None), "get_registered_star", None)
+        meta = getter("astrbot_plugin_denia_core") if callable(getter) else None
+        service = getattr(getattr(meta, "star_cls", None), "admin_service_v1", None)
+        if getattr(service, "protocol_version", None) != 1 or getattr(service, "closed", True):
+            return json_response({"ok": False, "available": False, "error": "核心管理服务未就绪，请启用支持 v1 管理接口的达妮娅核心插件。"})
+        selected = _selected_runtime(deps)
+        scope = selected.scope if selected is not None else ""
+        try:
+            if mutation:
+                body = await _read_body(request)
+                if body is None:
+                    return error_response("请求体必须是 JSON 对象", 400)
+                result = await service.mutate(scope, body)
+            else:
+                result = service.snapshot(scope, _query_str(request, "who", ""), offset=_query_int(request, "offset", 0, low=0, high=100000))
+            return json_response(result)
+        except ValueError as error:
+            return json_response({"ok": False, "available": True, "error": str(error)[:200]})
+        except Exception as error:
+            logger.warning("[core-admin] 核心管理操作失败：%s", type(error).__name__)
+            return json_response({"ok": False, "available": True, "error": "核心管理操作未成功，请刷新并检查服务日志。"})
+    return handler
 
 
 # ---- 读 ----------------------------------------------------------------------
 
 
+def _make_life(deps: Any, action: str = "") -> Callable[..., Any]:
+    async def handler() -> Any:
+        if not action:
+            return json_response(deps.life_snapshot())
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400)
+        if not isinstance(body.get("date"), str) or not isinstance(body.get("timezone"), str) or body.get("expected_revision") is None:
+            return error_response("缺少 date / timezone / expected_revision，请先读取今天的安排", 400)
+        if action == "replace" and not isinstance(body.get("activities"), list):
+            return error_response("activities 必须是活动数组", 400)
+        if action == "record" and (not isinstance(body.get("activity_id"), str) or not isinstance(body.get("outcome", ""), str) or body.get("status") not in ("done", "skipped")):
+            return error_response("缺少有效的 activity_id / status / outcome", 400)
+        return json_response(await deps.life_action(action, body, trusted=True))
+    return handler
+
+
 def _make_status(deps: Any) -> Callable[..., Any]:
     async def handler() -> Any:
         who = _query_str(request, "who", "")
-        return json_response(
-            webui_data.status_payload(
+        payload = webui_data.status_payload(
                 settings=deps.settings,
                 layout=deps.layout,
                 state_store=deps.state.store,
@@ -98,7 +288,12 @@ def _make_status(deps: Any) -> Callable[..., Any]:
                 now=None,
                 who=who,
             )
-        )
+        if callable(getattr(deps, "life_snapshot", None)):
+            life = deps.life_snapshot()
+            current = life.get("current") or {}
+            if life.get("enabled") and current.get("title"):
+                payload["rhythm"] = {**payload.get("rhythm", {}), "word": current["title"]}
+        return json_response(payload)
 
     return handler
 
@@ -431,6 +626,157 @@ def _make_proactive(deps: Any) -> Callable[..., Any]:
     return handler
 
 
+# ---- 群社交（群社交任务） -------------------------------------------------------
+#
+# 薄壳照旧：判定与数据形状都在 core.social，这里只取参、调门面、包 JSON。
+# preview 是**测试桩**：候选/判定只算不发（chat 走 dry_run），绝不发真实群消息。
+
+
+def _make_social_get(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        return json_response(deps.social.panel_payload(now=deps._now()))
+
+    return handler
+
+
+def _make_social_group(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400, endpoint="social/group")
+        action = str(body.get("action") or "").strip()
+        if action == "save":
+            return json_response(await deps.social.save_group(body, now=deps._now()))
+        if action == "delete":
+            umo = str(body.get("umo") or "").strip()
+            if not umo:
+                return error_response("缺少参数 umo", 400, endpoint="social/group")
+            return json_response(await deps.social.delete_group(umo, now=deps._now()))
+        return error_response("action 必须是 save 或 delete", 400, endpoint="social/group")
+
+    return handler
+
+
+def _make_social_participant(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400, endpoint="social/participant")
+        action = str(body.get("action") or "").strip()
+        umo = str(body.get("group") or "").strip()
+        if not umo:
+            return error_response("缺少参数 group（群的 umo）", 400, endpoint="social/participant")
+        if action == "save":
+            return json_response(await deps.social.save_participant(umo, body, now=deps._now()))
+        if action == "delete":
+            pid = str(body.get("id") or "").strip()
+            if not pid:
+                return error_response("缺少参数 id", 400, endpoint="social/participant")
+            return json_response(
+                await deps.social.delete_participant(umo, pid, now=deps._now())
+            )
+        return error_response("action 必须是 save 或 delete", 400, endpoint="social/participant")
+
+    return handler
+
+
+def _make_social_preview(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400, endpoint="social/preview")
+        kind = str(body.get("kind") or "").strip()
+        umo = str(body.get("group") or "").strip()
+        if not umo:
+            return error_response("缺少参数 group（群的 umo）", 400, endpoint="social/preview")
+        now = deps._now()
+        if kind in ("topic", "share"):
+            material = (
+                deps.social.topic_material(umo, now=now)
+                if kind == "topic"
+                else deps.social.share_material(umo, now=now)
+            )
+            if not material:
+                return json_response(
+                    {"ok": False, "kind": kind, "reason": "现在没有可用的素材（群没启用 / 话题过期 / 日程没有进行中的活动）"}
+                )
+            slot = "group_topic" if kind == "topic" else "group_share"
+            note = deps.proactive.group_note(
+                slot=slot, umo=umo,
+                fragment=str(material.get("fragment") or ""),
+                instruction=str(material.get("instruction") or ""),
+                now=now,
+            )
+            return json_response(
+                {"ok": True, "kind": kind, "slot": slot,
+                 "fragment": material.get("fragment") or "", "note": note,
+                 "stub": "这是测试桩生成的候选预览，没有发送任何真实消息"}
+            )
+        if kind == "chat":
+            session = Session.from_umo(umo)
+            names = [
+                str(n) for n in (deps.social._self_names() or ())
+            ]
+            stub_text = (
+                f"{names[0]}，在忙什么呀"
+                if names
+                else "（测试桩）在忙什么呀"
+            )
+            decision = await deps.social.chat_decision(
+                session, text=stub_text, now=now,
+                late_night=deps.state.is_late_night(now=now), dry_run=True,
+            )
+            payload = {
+                "ok": True, "kind": "chat", "stub_text": stub_text,
+                "stub": "这是测试桩：文本是编的、dry_run 不落盘，也没有发送任何真实消息",
+                **decision,
+            }
+            if decision.get("action") == "wake":
+                payload["note"] = deps.proactive.group_note(
+                    slot="group_chat", umo=umo,
+                    fragment=str(decision.get("fragment") or ""),
+                    instruction="群里登记的 bot 在叫你，自然地回它一句（先 @ TA），说完这轮就停",
+                    now=now,
+                )
+            return json_response(payload)
+        return error_response("kind 必须是 topic / share / chat", 400, endpoint="social/preview")
+
+    return handler
+
+
+def _make_pet_devices(deps: Any, action: str = "") -> Callable[..., Any]:
+    async def handler() -> Any:
+        # 此处仍经宿主 Dashboard 鉴权；设备凭据不能访问此管理入口。
+        if not action:
+            builder = getattr(deps, "pet_devices", None)
+            response = json_response(builder() if callable(builder) else {"ok": False, "error": "设备管理不可用"})
+        else:
+            body = await _read_body(request)
+            if body is None:
+                return error_response("请求体必须是 JSON 对象", 400)
+            builder = getattr(deps, "pet_device_" + action, None)
+            if not callable(builder):
+                return error_response("设备管理不可用", 404)
+            response = json_response(await builder(body))
+        # 一次性凭据与设备列表均不可由浏览器或中间代理缓存。
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            headers["Cache-Control"] = "no-store"
+        return response
+    return handler
+
+
+def _make_voice_status(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        # 探测=解析提供方实例（不合成、不调远程）；没有 voice_status（旧副本）按 404 语义回结构化错误
+        builder = getattr(deps, "voice_status", None)
+        if not callable(builder):
+            return json_response({"ok": False, "error": "本副本没有语音能力面板"})
+        return json_response(await builder())
+
+    return handler
+
+
 # ---- 写（二期）---------------------------------------------------------------
 
 
@@ -477,6 +823,7 @@ def _make_settings_get(deps: Any) -> Callable[..., Any]:
     async def handler() -> Any:
         schema = _plugin_schema(deps)
         groups, fields = webui_settings.describe_schema(schema)
+        fields = _settings_fields(deps, fields)
         return json_response(
             {
                 "ok": True,
@@ -506,6 +853,7 @@ def _make_settings_post(deps: Any) -> Callable[..., Any]:
 
         schema = _plugin_schema(deps)
         _, fields = webui_settings.describe_schema(schema)
+        fields = _settings_fields(deps, fields)
 
         # 逐项 coerce：**收集全部**错误（每个坏字段都能在自己位置看到原因），整单拒绝
         clean, errors = webui_settings.review_changes(fields, changes)
@@ -536,7 +884,11 @@ def _make_settings_post(deps: Any) -> Callable[..., Any]:
                 problems=fresh,
             )
 
-        result = await deps.apply_settings(updated, applied=applied)
+        selected = _selected_runtime(deps)
+        if selected is not None:
+            result = await deps.apply_scope_settings(selected.scope, updated, applied=applied)
+        else:
+            result = await deps.apply_settings(updated, applied=applied)
         result.setdefault("warnings", list(resolved.warnings))
         result.setdefault("errors", [])
         result["changed"] = list(result.get("applied") or [])
@@ -553,6 +905,7 @@ def _make_settings_reset(deps: Any) -> Callable[..., Any]:
     async def handler() -> Any:
         schema = _plugin_schema(deps)
         _, fields = webui_settings.describe_schema(schema)
+        fields = _settings_fields(deps, fields)
         editable = set(webui_settings.editable_paths(fields))
         current = webui_settings.flatten_values(
             webui_settings.values_from_settings(deps.settings, schema)
@@ -592,7 +945,11 @@ def _make_settings_reset(deps: Any) -> Callable[..., Any]:
                 problems=fresh,
             )
 
-        result = await deps.apply_settings(updated, applied=applied)
+        selected = _selected_runtime(deps)
+        if selected is not None:
+            result = await deps.apply_scope_settings(selected.scope, updated, applied=applied)
+        else:
+            result = await deps.apply_settings(updated, applied=applied)
         result.setdefault("warnings", list(resolved.warnings))
         result.setdefault("errors", [])
         result["changed"] = list(result.get("applied") or [])
@@ -609,7 +966,12 @@ def _raw_config(deps: Any) -> dict[str, Any]:
     """插件手里的**活配置对象**（``AstrBotConfig`` 是 dict 子类，直接当 dict 用）。"""
     config = getattr(deps, "config", None)
     try:
-        return dict(config) if config else {}
+        base = copy.deepcopy(dict(config)) if config else {}
+        selected = _selected_runtime(deps)
+        if selected is not None:
+            override = dict(base.get("per_instance") or {}).get(selected.scope) or {}
+            return webui_settings.settings_mod._deep_merge(base, override)
+        return base
     except Exception:  # noqa: BLE001 - 配置对象异常不该让面板 500
         return {}
 
@@ -689,6 +1051,39 @@ def _make_portrait_upload(deps: Any) -> Callable[..., Any]:
     return handler
 
 
+def _make_portrait_upload_data(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        length = getattr(request, "content_length", None)
+        if isinstance(length, int) and length > 12 * 1024 * 1024:
+            return error_response("上传请求过大", 400)
+        try:
+            request.max_content_length = 12 * 1024 * 1024
+        except Exception:
+            pass
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400)
+        value, name = body.get("data_url"), body.get("name", "")
+        if not isinstance(value, str) or not isinstance(name, str) or len(name) > 256:
+            return error_response("缺少有效的图片与文件名", 400)
+        maximum = webui_portrait.MAX_PORTRAIT_BYTES
+        if len(value) > ((maximum + 2) // 3) * 4 + 64:
+            return error_response("单张不能超过 8 MB", 400)
+        header, separator, encoded = value.partition(",")
+        if not separator or header not in {"data:image/png;base64", "data:image/jpeg;base64",
+                                          "data:image/webp;base64", "data:image/gif;base64"}:
+            return error_response("仅支持 PNG/JPEG/WebP/GIF 图片", 400)
+        try:
+            data = base64.b64decode(encoded, validate=True)
+            if not data or len(data) > maximum:
+                return error_response("图片为空或超过 8 MB", 400)
+            result = await deps.portraits.upload(data, name, now=deps._now())
+        except (ValueError, webui_portrait.PortraitError) as error:
+            return error_response(str(error) if isinstance(error, webui_portrait.PortraitError) else "图片编码无效", 400)
+        return json_response(result)
+    return handler
+
+
 def _portrait_body_action(deps: Any, *, endpoint: str, action: Any) -> Callable[..., Any]:
     """``select`` / ``delete`` 共用的壳：body ``{"id": ...}`` → core → 200 / 400。"""
 
@@ -722,6 +1117,39 @@ def _make_portrait_delete(deps: Any) -> Callable[..., Any]:
         endpoint="portrait/delete",
         action=lambda store, portrait_id: store.delete(portrait_id),
     )
+
+
+# ---- 状态生图（任务 2）---------------------------------------------------------
+#
+# 依旧薄壳：闸门、提示词、缓存、配额、适配器全在 ``core.imagery``；这里只接线。
+# 全部走 ``{ok, error}``（HTTP 200）——生图失败是业务结果（关着 / 次数用完 / 超时），
+# 不是请求形状错误，前端要拿错误文案展示并保留旧图。
+
+
+def _make_imagery_status(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        return json_response(deps.imagery.status_payload(now=deps._now()))
+
+    return handler
+
+
+def _make_imagery_image(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        return json_response(deps.imagery.image_payload())
+
+    return handler
+
+
+def _make_imagery_generate(deps: Any) -> Callable[..., Any]:
+    async def handler() -> Any:
+        # 面板是主人视角：trusted=True（与 life 写操作同一口径）。
+        # body 可以是空对象——本路由没有参数，读取只为报「body 必须是 JSON 对象」。
+        body = await _read_body(request)
+        if body is None:
+            return error_response("请求体必须是 JSON 对象", 400, endpoint="imagery/generate")
+        return json_response(await deps.imagery.generate(now=deps._now(), trusted=True))
+
+    return handler
 
 
 # ---- 统一包装 ----------------------------------------------------------------

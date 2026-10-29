@@ -187,7 +187,7 @@ astrbot_plugin_denia_diary/
 
 她的主动消息过宿主 TTS 变成语音发出。**她组织语言的方式完全不变**（还是 `send_message_to_user` 发文字）——插件在 `on_using_llm_tool` 钩子里（出站清洗之后）把主动轮的文本**就地转成 record 组件**，判定全在 `core/voice/`（纯函数，app-ready：S1 壳将来接自己的 TTS 复用同一决策层）。
 
-**上游 API 核对（源码出处见 `调研-F1语音.md`）**：`context.get_using_tts_provider_async()` → `TTSProvider.get_audio(text)` **只有文本参数**（音色/语速在 provider 配置里）→ 音频落 AstrBot temp 目录；`send_message_to_user` 原生认 `{"type": "record", "path": ...}`，且 temp 目录在它的本地文件白名单里——链路天然通。
+**上游 API 核对（源码出处见 `调研-F1语音.md`）**：`context.get_using_tts_provider_async()` → `TTSProvider.get_audio(text)` **只有文本参数**（音色/语速在 provider 配置里）→ 音频落 AstrBot temp 目录；`send_message_to_user` 原生认 `{"type": "record", "path": ...}`，temp 目录在它的本地文件白名单里。插件发送前复制到该目录的专属子目录，实际协议端读取和播放仍待实机验证。
 
 **她在写之前就知道自己在发语音**（用户 2026-10-11 定稿）：转不转是**巡检决策时掷定的**（`Proactive._decide_speak`：mode + `voice.probability` + 情绪倾向 + roll，测试可注入 `_voice_roll`），结论做两件事——①写进唤醒 note 的 `VOICE_NOTE` 告知句（"像说话一样讲——口语、短句；别用 emoji、颜文字、换行"），她按说话的口吻组织语言、还可能自然说出"我给你发条语音"；②暂存 `_pending_speak[umo]`，钩子按暂存**执行**不再掷——"她被告知"与"实际转语音"永远一致。暂存与 `_pending_log` 同生命周期：确认发出（`confirm_sent`）即清，重启丢失回落 False（不发语音，无害）。
 
@@ -200,7 +200,17 @@ astrbot_plugin_denia_diary/
 | 降级红线 | 没配 provider（`get_using_tts_provider*` 拿不到就 None）/ 合成抛异常 / 文本超长 → 原文字照发，**语音坏了不能连累她说话** |
 | 不受影响 | 暗号直发走 `StarTools.send_message`（不经工具）；确认点照常（原地改的是发送内容，`send_message_to_user` 工具名不变） |
 
-**明确不做（第一步）**：音色/语速随情绪——宿主标准接口做不到，要自带 OpenAI 兼容 TTS 客户端（tts_emotion_router 的做法）+ 用户配 API key，挂待拍板；跨机部署的文件服务 URL（宿主与 NapCat 不同机时本地路径发不出，需要 `use_file_service`）。
+**F2/F3/F4（2026-10-26 语音可靠性轮）**：
+
+| 环节 | 口径 |
+| :--- | :--- |
+| 收听（F2，`core/voice/listen.py`） | 宿主 `preprocess_stage` 开 STT 时**就地**把 Record 换成转写 Plain 并追加 `message_str`（4.28.1 实证）——插件零动作；宿主转写关闭且链里**剩 Record**时才用宿主会话识别提供方兜底转一次（宿主已开但失败时不重复计费）（`get_using_stt_provider_async(umo).get_text(音频路径)`），文本追加进 `message_str` 和已经构造的请求 `req.prompt`；无残留直接语音且无引用时清除重复音频附件，下游 compose / 小本本 / 日记续聊拿到同一段文字。去重两层：换 Plain（重放看到的是 Plain）+ `ListenState` 按 (umo, message_id, 音频指纹) 记账（LRU 256 / TTL 600s）；`voice.listen_fallback` 关掉即完全不兜底 |
+| 有界合成（F3，`core/voice/speak.py`） | 单段超时 `tts_timeout_seconds`（默认 20s）+ 整轮预算 `tts_total_seconds`（默认 60s）+ 分段上限 `max_segments`（默认 3）；超出的段保持原文，**部分成功也照发**（失败的段原文保留）；`asyncio.CancelledError` 原样上抛（宿主取消钩子时合成跟着死）；合成产物过"存在且非空"校验（宿主 TTS test 同款）才进消息 |
+| 文件服务（F3） | 宿主 `provider_tts_settings.use_file_service` + `callback_api_base` 都在时，Record 走 `file_token_service.register_file` 的限时下载 URL（令牌 300s、一次性）——宿主与协议端（手机 chroot 里的 NapCat）不同文件系统时唯一能通的形；任一条件缺失回本地路径直发（面板写明原因） |
+| 音频台账（F3，`core/voice/artifacts.py`） | 宿主 TTS 源把成品写在 `data/temp/` 且**从不清理**（4.28.1 edge_tts 实证）——插件按台账（`voice-audio-ledger.json`）保留/清理复制到宿主 temp 下专属目录的发送副本：至少保留 10 分钟、保留 `audio_retention_hours`（默认 6h）、超容先删最老，巡检每期清一轮。删除前复核安全根目录和直接子文件，不删除提供方原文件 |
+| 能力面板（F4，`core/voice/status.py`） | `GET voice/status` + 设置页「语音能力」卡：识别 / 合成 / 文件服务的真实可用性与失败原因、最近 20 条语音事件。**只写真话**：`TTSProvider.get_audio` 只有文本参 → "情绪音色控制"恒为不支持；探测不到写"未知"；带"未实机验证"标注 |
+
+**明确不做（第一步 + 本轮）**：音色/语速随情绪——宿主标准接口做不到，要自带 OpenAI 兼容 TTS 客户端（tts_emotion_router 的做法）+ 用户配 API key，挂待拍板；实时通话 / 流式打断 / 双工——本任务不承诺。
 
 ## 早晚安（问候记录，第 19 步）
 

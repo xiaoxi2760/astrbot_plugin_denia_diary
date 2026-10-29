@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "agent_id": "yaya",
+  "device_id": "device-fixture",
+  "server_time": "2026-10-27T14:30:00+08:00",
+  "timezone": "Asia/Shanghai",
+  "ttl_seconds": 60,
+  "valid_until": "2026-10-27T14:31:00+08:00",
+  "refresh_after_seconds": 15,
+  "life": {
+    "enabled": true,
+    "status": "ready",
+    "date": "2026-10-27",
+    "revision": 3,
+    "current": {
+      "id": "reading",
+      "title": "看书",
+      "location": "窗边",
+      "start_at": "2026-10-27T14:00:00+08:00",
+      "end_at": "2026-10-27T15:00:00+08:00",
+      "status": "current"
+    },
+    "next": {
+      "id": "walk",
+      "title": "散步",
+      "location": null,
+      "start_at": "2026-10-27T15:00:00+08:00",
+      "end_at": "2026-10-27T16:00:00+08:00",
+      "status": "planned"
+    }
+  },
+  "mood": {
+    "status": "fresh",
+    "word": "开心",
+    "observed_at": "2026-10-27T13:00:00+08:00",
+    "valid_until": "2026-10-27T19:00:00+08:00"
+  },
+  "presentation": {
+    "expression": "neutral"
+  }
+}

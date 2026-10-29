@@ -14,9 +14,11 @@
 from __future__ import annotations
 
 import re
+import ipaddress
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ._log import logger
@@ -26,6 +28,7 @@ from .greeting.api import (
     NIGHT_PATTERNS_DEFAULT,
     PATTERN_FLAGS,
 )
+from .imagery.providers import PROVIDER_CHOICES
 from .outbound import DEFAULT_MARKER_PATTERN
 from .scope import DEFAULT_MODE, normalize_mode
 from .voice import VOICE_MODES, VOICE_MODE_DEFAULT
@@ -33,10 +36,11 @@ from .voice import VOICE_MODES, VOICE_MODE_DEFAULT
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 """默认时区。禁止裸 ``datetime.now()``：云端多为 UTC，会整体错 8 小时。"""
 
-SUBSYSTEMS: tuple[str, ...] = ("diary", "notebook", "state", "proactive", "greeting")
-"""子系统开关名（调试期可只关一块）。"""
+SUBSYSTEMS: tuple[str, ...] = ("diary", "notebook", "state", "proactive", "greeting", "social")
+"""子系统开关名（调试期可只关一块）。``social`` 是群社交（登记 / 话题 / bot 短聊）。"""
 
 INT_LIMITS: dict[str, tuple[int, int]] = {
+    "pet_bridge.port": (1024, 65535),
     "diary.edit_within_days": (1, 60),
     "diary.max_chars": (200, 20000),
     "diary.nudge_after_hour": (0, 23),
@@ -53,8 +57,28 @@ INT_LIMITS: dict[str, tuple[int, int]] = {
     "proactive.signal_cooldown_days": (1, 30),
     "proactive.pending_window_hours": (1, 48),
     "proactive.quiet_days": (1, 30),
+    "social.topic_max_items": (1, 50),
+    "social.topic_max_chars": (20, 400),
+    "social.topic_ttl_hours": (1, 168),
+    "social.max_rounds": (1, 10),
+    "social.session_window_minutes": (1, 120),
+    "social.session_cooldown_minutes": (0, 1440),
+    "social.max_groups": (1, 100),
+    "social.seen_max": (0, 100),
     "greeting.duplicate_minutes": (0, 24 * 60),
     "voice.probability": (0, 100),
+    "voice.max_segments": (1, 8),
+    "voice.tts_timeout_seconds": (3, 120),
+    "voice.tts_total_seconds": (10, 600),
+    "voice.audio_retention_hours": (1, 336),
+    "life.timeout_seconds": (5, 120),
+    "life.retry_minutes": (5, 240),
+    "life.max_attempts": (1, 5),
+    "imagery.steps": (1, 50),
+    "imagery.seed": (-1, 4294967295),
+    "imagery.denoising": (10, 90),
+    "imagery.timeout_seconds": (5, 300),
+    "imagery.daily_limit": (1, 50),
 }
 
 _DIARY_DEFAULTS: dict[str, int] = {
@@ -133,6 +157,7 @@ FIELD_CHOICES: dict[str, tuple[str, ...]] = {
     "diary.card_render": CARD_RENDER_CHOICES,
     "diary.card_style": CARD_STYLE_CHOICES,
     "diary.card_engine": CARD_ENGINE_CHOICES,
+    "imagery.provider": PROVIDER_CHOICES,
 }
 """**枚举型**字符串字段 → 可选值。面板据此把自由文本框换成下拉框（第 15 步）。
 
@@ -207,6 +232,19 @@ _PROACTIVE_DEFAULTS: dict[str, Any] = {
     "signal_char": "。",  # 暗号字符（1~4 个字符）
 }
 
+_SOCIAL_DEFAULTS: dict[str, Any] = {
+    "topic_enabled": True,  # 群话题素材记录（只对已登记且启用的群生效）
+    "topic_max_items": 12,  # 每群话题条数上限（有界：挤掉最旧的）
+    "topic_max_chars": 120,  # 单条话题截断（超长群消息只留摘要）
+    "topic_ttl_hours": 24,  # 话题保鲜期（小时）：过期即视为没有
+    "max_rounds": 3,  # bot 短聊轮数上限（1 轮 = bot 一条叫她的消息 + 她的一次回话）
+    "session_window_minutes": 10,  # 会话窗口：bot 超过这么久没下文，会话自动结束
+    "session_cooldown_minutes": 30,  # 会话结束后的冷却（分钟），期间同群不开新会话
+    "self_names": "",  # 她在群里的称呼（顿号/逗号分隔）；空＝bot 短聊整体停用
+    "max_groups": 20,  # 登记群上限
+    "seen_max": 30,  # "最近看到"（待登记）保留条数
+}
+
 
 def _greeting_defaults() -> dict[str, Any]:
     """早晚安组默认值（每次新表，防止共享可变的列表默认值）。
@@ -220,13 +258,81 @@ def _greeting_defaults() -> dict[str, Any]:
         "night_patterns": list(NIGHT_PATTERNS_DEFAULT),
     }
 
+_LIFE_DEFAULTS: dict[str, Any] = {
+    "enabled": True,
+    "provider_id": "",
+    "character": "",
+    "timeout_seconds": 30,
+    "retry_minutes": 30,
+    "max_attempts": 3,
+}
+
+_IMAGERY_DEFAULTS: dict[str, Any] = {
+    "enabled": False,       # **默认关**（任务 2 硬性要求：装完不会在不知情时调云端模型花钱）
+    "provider": "a1111",    # a1111=本机 SD WebUI API；openai=OpenAI 兼容 Images（枚举来源 core.imagery.providers）
+    "base_url": "",         # a1111 例：http://127.0.0.1:7860；openai 例：https://api.openai.com/v1
+    "model": "",            # openai 必填（如 gpt-image-1 / dall-e-3）；a1111 留空用当前 checkpoint
+    "api_key_env": "",      # **只存环境变量名**，密钥本体永远不进配置
+    "size": "512x512",      # a1111 解析成宽高；openai 原样传（服务端枚举校验）
+    "steps": 20,            # 仅 a1111
+    "seed": -1,             # 仅 a1111；-1=随机
+    "denoising": 60,        # 仅 a1111 图生图重绘幅度（百分比 10-90）
+    "use_reference": True,  # 仅 a1111 生效；openai 无参考图能力，如实显示不支持
+    "timeout_seconds": 90,
+    "daily_limit": 3,
+    "character_hint": "",   # 人物形象锚定（进图像提示词，最多 300 字）
+    "style_hint": "",       # 画风锚定（最多 200 字）
+}
+
 _VOICE_DEFAULTS: dict[str, Any] = {
     "mode": VOICE_MODE_DEFAULT,  # off=不发语音（默认）；voice=纯语音；dual=语音+文字
     "probability": 100,  # 开口概率（0-100）
+    "listen_fallback": True,  # 宿主没转写时，用宿主的识别提供方兜底转一次（去重）
+    "max_segments": 3,  # 一轮主动消息最多转几段语音，多余段保持文字
+    "tts_timeout_seconds": 20,  # 单段合成的最长等待（秒）
+    "tts_total_seconds": 60,  # 整轮合成的总预算（秒），超时剩余段保持文字
+    "audio_retention_hours": 6,  # 合成音频的保留时长（小时），到期由巡检清理
 }
 """语音出口组（F1 第一步）：模式枚举的唯一来源在 ``core.voice``。
 宿主 ``TTSProvider.get_audio(text)`` 只有文本参，音色/语速在 provider 配置里——
-这里的开关只决定"说不说"，情绪倾向（valence<0 上浮）是 core.voice 的常量。"""
+这里的开关只决定"说不说"，情绪倾向（valence<0 上浮）是 core.voice 的常量；
+超时 / 分段 / 保留期的边界值解释权在 ``core.voice.speak`` 与 ``core.voice.artifacts``。"""
+
+
+_PET_BRIDGE_DEFAULTS: dict[str, Any] = {
+    "enabled": False, "host": "127.0.0.1", "port": 6196, "agent_id": "yaya",
+}
+
+_BOT_ISOLATION_DEFAULTS: dict[str, Any] = {
+    "enable": False, "legacy_platform_id": "",
+}
+"""多 Bot 隔离组（默认关＝保持老部署行为不变）。
+
+- ``enable``：开启后日记按**真实平台实例 ID** 分目录；
+- ``legacy_platform_id``：显式绑定回原数据根的实例 ID。**空＝没人绑**，
+  谁都读不到旧数据（不猜、不自动认领）。
+"""
+
+PER_INSTANCE_ALLOWED_KEYS: tuple[str, ...] = (
+    "timezone", "scope", "panel", "subsystems", "diary", "notebook", "state",
+    "life", "imagery", "proactive", "social", "greeting", "voice", "outbound",
+    "love_peers", "name_preference",
+)
+"""``per_instance`` 里**允许**按 scope 覆盖的业务键（白名单）。
+
+只放**业务语义**的键：主人名单、称呼偏好、时区、面板文案、各子系统的参数。
+不放 ``data_dir``（数据搬家是宿主级操作）、``pet_bridge``（设备连接是宿主级）、
+``bot_isolation`` / ``per_instance``（隔离路由本身不能被局部改写）。
+"""
+
+PER_INSTANCE_FORBIDDEN_KEYS: tuple[str, ...] = (
+    "data_dir", "pet_bridge", "bot_isolation", "per_instance", "enabled",
+)
+"""``per_instance`` 里**禁止**覆盖的宿主级键。
+
+⚠️ ``enabled`` 在这里：总开关关掉时，**任何 scope 都不能被局部打开**
+（"全局关闭"必须真的关）。
+"""
 
 
 def default_config() -> dict[str, Any]:
@@ -249,9 +355,15 @@ def default_config() -> dict[str, Any]:
         },
         "notebook": dict(_NOTEBOOK_DEFAULTS),
         "state": dict(_STATE_DEFAULTS),
+        "life": dict(_LIFE_DEFAULTS),
+        "imagery": dict(_IMAGERY_DEFAULTS),
         "proactive": dict(_PROACTIVE_DEFAULTS),
+        "social": dict(_SOCIAL_DEFAULTS),
         "greeting": _greeting_defaults(),
         "voice": dict(_VOICE_DEFAULTS),
+        "pet_bridge": dict(_PET_BRIDGE_DEFAULTS),
+        "bot_isolation": dict(_BOT_ISOLATION_DEFAULTS),
+        "per_instance": {},
         "outbound": dict(_OUTBOUND_DEFAULTS),
         "love_peers": [],
         "name_preference": {},
@@ -279,9 +391,15 @@ class Settings:
     })
     notebook: Mapping[str, int] = field(default_factory=lambda: dict(_NOTEBOOK_DEFAULTS))
     state: Mapping[str, str] = field(default_factory=lambda: dict(_STATE_DEFAULTS))
+    life: Mapping[str, Any] = field(default_factory=lambda: dict(_LIFE_DEFAULTS))
+    imagery: Mapping[str, Any] = field(default_factory=lambda: dict(_IMAGERY_DEFAULTS))
     proactive: Mapping[str, Any] = field(default_factory=lambda: dict(_PROACTIVE_DEFAULTS))
+    social: Mapping[str, Any] = field(default_factory=lambda: dict(_SOCIAL_DEFAULTS))
     greeting: Mapping[str, Any] = field(default_factory=_greeting_defaults)
     voice: Mapping[str, Any] = field(default_factory=lambda: dict(_VOICE_DEFAULTS))
+    pet_bridge: Mapping[str, Any] = field(default_factory=lambda: dict(_PET_BRIDGE_DEFAULTS))
+    bot_isolation: Mapping[str, Any] = field(default_factory=lambda: dict(_BOT_ISOLATION_DEFAULTS))
+    per_instance: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     outbound: Mapping[str, Any] = field(default_factory=lambda: dict(_OUTBOUND_DEFAULTS))
     love_peers: tuple[str, ...] = ()
     name_preference: Mapping[str, str] = field(default_factory=dict)
@@ -395,15 +513,37 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
 
     state = _as_state(src.get("state"), warnings)
 
+    raw_life = src.get("life")
+    if raw_life is not None and not isinstance(raw_life, Mapping):
+        warnings.append("life 不是对象，全部使用默认值")
+    life_src = raw_life if isinstance(raw_life, Mapping) else {}
+    life = {
+        "enabled": _as_bool(life_src.get("enabled"), True, "life.enabled", warnings),
+    }
+    for key, limit in (("provider_id", 200), ("character", 1200)):
+        value = life_src.get(key)
+        if value is not None and (not isinstance(value, str) or len(value) > limit):
+            warnings.append(f"life.{key} 必须是 {limit} 字以内的字符串")
+        life[key] = _as_text(value)[:limit]
+    for key in ("timeout_seconds", "retry_minutes", "max_attempts"):
+        life[key] = _as_int(life_src.get(key), _LIFE_DEFAULTS[key], f"life.{key}", warnings)
+
+    imagery = _as_imagery(src.get("imagery"), warnings)
+
     scope = _as_scope(src.get("scope"), warnings)
 
     panel = _as_panel(src.get("panel"), warnings)
 
     proactive = _as_proactive(src.get("proactive"), warnings)
 
+    social = _as_social(src.get("social"), warnings)
+
     greeting = _as_greeting(src.get("greeting"), warnings)
 
     voice = _as_voice(src.get("voice"), warnings)
+    pet_bridge = _as_pet_bridge(src.get("pet_bridge"), warnings)
+    bot_isolation = _as_bot_isolation(src.get("bot_isolation"), warnings)
+    per_instance = _as_per_instance(src.get("per_instance"), warnings)
 
     outbound = _as_outbound(src.get("outbound"), warnings)
 
@@ -423,9 +563,15 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
         diary=dict(diary),
         notebook=dict(notebook),
         state=dict(state),
+        life=dict(life),
+        imagery=dict(imagery),
         proactive=dict(proactive),
+        social=dict(social),
         greeting=dict(greeting),
         voice=dict(voice),
+        pet_bridge=dict(pet_bridge),
+        bot_isolation=dict(bot_isolation),
+        per_instance={scope: dict(item) for scope, item in per_instance.items()},
         outbound=dict(outbound),
         love_peers=love_peers,
         name_preference=dict(name_preference),
@@ -434,6 +580,117 @@ def load_settings(raw: Mapping[str, Any] | None) -> Settings:
 
 
 # ---- 单项处理 ----------------------------------------------------------------
+
+
+def _as_pet_bridge(value: Any, warnings: list[str]) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    valid = value is None or isinstance(value, Mapping)
+    enabled = _as_bool(raw.get("enabled"), False, "pet_bridge.enabled", warnings)
+    host = _as_text(raw.get("host")) or "127.0.0.1"
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        host, valid = "127.0.0.1", False
+    port = raw.get("port", 6196)
+    if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
+        port, valid = 6196, False
+    agent_id = _as_text(raw.get("agent_id")) or "yaya"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", agent_id):
+        agent_id, valid = "yaya", False
+    if not valid:
+        warnings.append("pet_bridge 配置无效，已关闭设备监听并回落安全默认值")
+        enabled = False
+    return {"enabled": enabled, "host": host, "port": port, "agent_id": agent_id}
+
+
+def _as_bot_isolation(value: Any, warnings: list[str]) -> dict[str, Any]:
+    """多 Bot 隔离组：``enable`` 是布尔总开关，``legacy_platform_id`` 是字符串。
+
+    ``legacy_platform_id`` **只认显式绑定**：空串＝没人绑，谁都读不到旧数据。
+    """
+    raw = value if isinstance(value, Mapping) else {}
+    if value is not None and not isinstance(value, Mapping):
+        warnings.append("bot_isolation 不是对象，全部使用默认值")
+    enable = _as_bool(raw.get("enable"), False, "bot_isolation.enable", warnings)
+    legacy = _as_text(raw.get("legacy_platform_id")).strip()[:200]
+    return {"enable": enable, "legacy_platform_id": legacy}
+
+
+def _as_per_instance(value: Any, warnings: list[str]) -> dict[str, dict[str, Any]]:
+    """``per_instance``：``{scope_id: {业务覆盖}}``。
+
+    - 顶层不是对象 → 整组丢弃（记 warning）；
+    - 每个 scope 的覆盖不是对象 → 该 scope 丢弃；
+    - 覆盖里的键必须是 :data:`PER_INSTANCE_ALLOWED_KEYS` 里的**业务键**；
+      宿主级键（``data_dir`` / ``pet_bridge`` / ``bot_isolation`` / ``per_instance``）
+      与 ``enabled`` 一律丢弃并记 warning——
+      **总开关关掉时，任何 scope 都不能被局部打开**。
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        warnings.append("per_instance 不是对象，整组忽略")
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for scope, override in value.items():
+        scope_id = str(scope or "").strip()
+        if not scope_id:
+            warnings.append("per_instance 里有空的 scope 键，已忽略")
+            continue
+        if not isinstance(override, Mapping):
+            warnings.append(f"per_instance.{scope_id} 不是对象，已忽略")
+            continue
+        clean: dict[str, Any] = {}
+        for key, item in override.items():
+            name = str(key)
+            if name in PER_INSTANCE_FORBIDDEN_KEYS:
+                warnings.append(
+                    f"per_instance.{scope_id}.{name} 是宿主级字段，不允许按实例覆盖，已忽略"
+                )
+                continue
+            if name not in PER_INSTANCE_ALLOWED_KEYS:
+                warnings.append(
+                    f"per_instance.{scope_id}.{name} 不在允许覆盖的业务字段里，已忽略"
+                )
+                continue
+            clean[name] = item
+        out[scope_id] = clean
+    return out
+
+
+def build_scope_settings(raw: Mapping[str, Any] | None, scope: str) -> Settings:
+    """某个 scope 实际生效的配置 = 全局配置 + 该 scope 的白名单覆盖。
+
+    覆盖是**深合并**（只覆盖到叶子，业务组内部可以只改一个键）。
+    宿主级字段与总开关**不参与**覆盖（``enabled`` 只由全局决定）。
+    """
+    base: dict[str, Any] = dict(raw or {})
+    scope_id = str(scope or "").strip()
+    overrides = base.get("per_instance")
+    override: Mapping[str, Any] = {}
+    if isinstance(overrides, Mapping) and scope_id:
+        candidate = overrides.get(scope_id)
+        if isinstance(candidate, Mapping):
+            override = candidate
+    if not override:
+        return load_settings(base)
+    merged = _deep_merge(base, {
+        key: value for key, value in override.items()
+        if key in PER_INSTANCE_ALLOWED_KEYS
+    })
+    return load_settings(merged)
+
+
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """深合并两个配置映射（``override`` 覆盖 ``base``；两边都是对象时递归合并）。"""
+    out = dict(base)
+    for key, value in override.items():
+        current = out.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            out[key] = _deep_merge(current, value)
+        else:
+            out[key] = value
+    return out
 
 
 def _as_text(value: Any) -> str:
@@ -578,6 +835,32 @@ def _as_proactive(value: Any, warnings: list[str]) -> dict[str, Any]:
     return out
 
 
+def _as_social(value: Any, warnings: list[str]) -> dict[str, Any]:
+    """群社交组：整数项夹紧、``topic_enabled`` 是布尔、``self_names`` 是自由短文本。
+
+    ``self_names`` 不限 4 字（她在不同群可能有不同称呼，顿号分隔一次写多个），
+    只截到 200 字——它是"叫她什么"的匹配词表，超长只会拖慢一次 ``in`` 判断。
+    """
+    if value is not None and not isinstance(value, Mapping):
+        warnings.append("social 不是对象，全部使用默认值")
+    out: dict[str, Any] = {}
+    for key, default in _SOCIAL_DEFAULTS.items():
+        raw = value.get(key) if isinstance(value, Mapping) else None
+        if raw is None:
+            out[key] = default
+        elif isinstance(default, bool):
+            out[key] = _as_bool(raw, default, f"social.{key}", warnings)
+        elif isinstance(default, str):
+            if not isinstance(raw, str):
+                warnings.append(f"social.{key} 不是字符串（{raw!r}），使用默认")
+                out[key] = default
+            else:
+                out[key] = raw.strip()[:200]
+        else:
+            out[key] = _as_int(raw, default, f"social.{key}", warnings)
+    return out
+
+
 def _as_greeting(value: Any, warnings: list[str]) -> dict[str, Any]:
     """早晚安组（问候识别与记录）：一个整数 + 两张正则词表。
 
@@ -637,10 +920,12 @@ def _as_patterns(
 
 
 def _as_voice(value: Any, warnings: list[str]) -> dict[str, Any]:
-    """语音出口组（F1）：模式枚举 + 开口概率。
+    """语音出口组（F1 + F2/F3）：模式枚举 + 开口概率 + 可靠性边界。
 
     与 ``diary.card_render`` 同款分权：枚举合法性在这里（``_as_choice``），
-    「转不转」的决策（含情绪倾向）在 ``core.voice.speak_plan``。
+    「转不转」的决策（含情绪倾向）在 ``core.voice.speak_plan``；超时 / 分段 /
+    保留期的**语义**在 ``core.voice.speak`` / ``core.voice.artifacts``（这里只做
+    类型与范围校验，范围与那些模块的夹紧边界一致）。
     """
     if value is not None and not isinstance(value, Mapping):
         warnings.append("voice 不是对象，全部使用默认值")
@@ -659,7 +944,96 @@ def _as_voice(value: Any, warnings: list[str]) -> dict[str, Any]:
             "voice.probability",
             warnings,
         ),
+        "listen_fallback": _as_bool(
+            raw.get("listen_fallback"),
+            _VOICE_DEFAULTS["listen_fallback"],
+            "voice.listen_fallback",
+            warnings,
+        ),
+        "max_segments": _as_int(
+            raw.get("max_segments"),
+            _VOICE_DEFAULTS["max_segments"],
+            "voice.max_segments",
+            warnings,
+        ),
+        "tts_timeout_seconds": _as_int(
+            raw.get("tts_timeout_seconds"),
+            _VOICE_DEFAULTS["tts_timeout_seconds"],
+            "voice.tts_timeout_seconds",
+            warnings,
+        ),
+        "tts_total_seconds": _as_int(
+            raw.get("tts_total_seconds"),
+            _VOICE_DEFAULTS["tts_total_seconds"],
+            "voice.tts_total_seconds",
+            warnings,
+        ),
+        "audio_retention_hours": _as_int(
+            raw.get("audio_retention_hours"),
+            _VOICE_DEFAULTS["audio_retention_hours"],
+            "voice.audio_retention_hours",
+            warnings,
+        ),
     }
+
+
+def _as_imagery(value: Any, warnings: list[str]) -> dict[str, Any]:
+    """状态生图组（任务 2）：开关（默认**关**）、提供方枚举、数字项夹紧、文本项截断。
+
+    ``api_key_env`` 只接受可移植的环境变量名，拒绝误粘贴的密钥；服务地址不接受
+    内嵌账号密码、查询串或片段，避免把凭据保存到配置或带进界面。
+    """
+    if value is not None and not isinstance(value, Mapping):
+        warnings.append("imagery 不是对象，全部使用默认值")
+    raw = value if isinstance(value, Mapping) else {}
+    out: dict[str, Any] = {
+        "enabled": _as_bool(
+            raw.get("enabled"), _IMAGERY_DEFAULTS["enabled"], "imagery.enabled", warnings
+        ),
+        "provider": _as_choice(
+            raw.get("provider"),
+            PROVIDER_CHOICES,
+            _IMAGERY_DEFAULTS["provider"],
+            "imagery.provider",
+            warnings,
+        ),
+    }
+    for key in ("base_url", "model", "api_key_env"):
+        out[key] = _as_text(raw.get(key) if isinstance(raw, Mapping) else None)[:300 if key == "base_url" else 100]
+    if out["api_key_env"] and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", out["api_key_env"]):
+        warnings.append("imagery.api_key_env 只填写环境变量名（如 DENIA_IMAGE_API_KEY），不要填写密钥本身")
+        out["api_key_env"] = ""
+    if out["base_url"]:
+        try:
+            parts = urlsplit(out["base_url"])
+            valid_url = (parts.scheme in {"http", "https"} and bool(parts.hostname)
+                         and not parts.username and not parts.password and not parts.query and not parts.fragment)
+            _ = parts.port
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            warnings.append("imagery.base_url 需要 http/https 服务地址，不能包含账号密码、查询串或片段")
+            out["base_url"] = ""
+    for key in ("steps", "seed", "denoising", "timeout_seconds", "daily_limit"):
+        out[key] = _as_int(
+            raw.get(key) if isinstance(raw, Mapping) else None,
+            _IMAGERY_DEFAULTS[key],
+            f"imagery.{key}",
+            warnings,
+        )
+    out["size"] = _as_text(raw.get("size") if isinstance(raw, Mapping) else None)[:20] or _IMAGERY_DEFAULTS["size"]
+    out["use_reference"] = _as_bool(
+        raw.get("use_reference") if isinstance(raw, Mapping) else None,
+        _IMAGERY_DEFAULTS["use_reference"],
+        "imagery.use_reference",
+        warnings,
+    )
+    for key, limit in (("character_hint", 300), ("style_hint", 200)):
+        text = raw.get(key) if isinstance(raw, Mapping) else None
+        if text is not None and (not isinstance(text, str) or len(text) > limit):
+            warnings.append(f"imagery.{key} 必须是 {limit} 字以内的字符串")
+        out[key] = _as_text(text)[:limit]
+    return out
 
 
 def _as_outbound(value: Any, warnings: list[str]) -> dict[str, Any]:
@@ -740,6 +1114,8 @@ __all__ = [
     "INT_LIMITS",
     "MAX_PANEL_TEXT",
     "OUTBOUND_DEFAULTS",
+    "PER_INSTANCE_ALLOWED_KEYS",
+    "PER_INSTANCE_FORBIDDEN_KEYS",
     "SUBSYSTEMS",
     "Settings",
     "default_config",

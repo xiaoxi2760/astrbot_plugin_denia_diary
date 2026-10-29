@@ -12,11 +12,13 @@ import importlib.util
 import json
 import re
 import sys
+import tempfile
 import types
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
@@ -385,7 +387,7 @@ class PluginCase(TmpDirCase):
 
 
 class RegistrationTest(PluginCase):
-    def test_ten_tools_are_registered(self) -> None:
+    def test_diary_and_life_tools_are_registered(self) -> None:
         self.assertEqual(
             set(self.registry["tools"]),
             {
@@ -399,6 +401,9 @@ class RegistrationTest(PluginCase):
                 "note_forget",
                 "mood_report",
                 "sleep_check",
+                "life_today",
+                "life_replan",
+                "life_progress",
             },
         )
 
@@ -924,18 +929,33 @@ class GreetingWiringTest(PluginCase):
 
 
 class _FakeTTSProvider:
-    """宿主 TTS provider 替身：``get_audio(text) -> 路径``，可指路可报错。"""
+    """宿主 TTS provider 替身：``get_audio(text) -> 真实临时文件路径``，可报错可空手。
+
+    F3 起合成产物要过**落地校验**（存在且非空才算数——宿主 TTS test 同款标准），
+    所以替身必须像真 provider 一样真的写出文件：命中的文本写一个非空占位文件，
+    返回它的真实路径；没命中的文本返回空串（= 没合成出来）。
+    """
 
     def __init__(self, mapping: dict[str, str] | None = None, error: bool = False) -> None:
         self.mapping = mapping or {}
         self.calls: list[str] = []
         self.error = error
+        self.paths: list[str] = []
+        self._tmp = tempfile.TemporaryDirectory()
 
     async def get_audio(self, text: str) -> str:
         self.calls.append(text)
         if self.error:
             raise RuntimeError("tts down")
-        return self.mapping.get(text, "")
+        if text not in self.mapping:
+            return ""
+        path = Path(self._tmp.name) / f"voice-{len(self.paths)}.mp3"
+        path.write_bytes(b"RIFF....")  # 非空占位：过存在与非空校验
+        self.paths.append(str(path))
+        return str(path)
+
+    def cleanup(self) -> None:
+        self._tmp.cleanup()
 
 
 class SpeechWiringTest(PluginCase):
@@ -964,8 +984,8 @@ class SpeechWiringTest(PluginCase):
         return _FakeEvent(extras={"cron_job": {"slot": "morning"}})
 
     def test_voice_mode_replaces_plain_with_record(self) -> None:
-        async def scenario() -> tuple[object, dict]:
-            provider = _FakeTTSProvider({"早呀，今天也元气满满": "/tmp/voice/a.mp3"})
+        async def scenario() -> tuple[object, dict, _FakeTTSProvider]:
+            provider = _FakeTTSProvider({"早呀，今天也元气满满": "→真实临时文件"})
             plugin = self.make_plugin({"voice": {"mode": "voice"}})
             plugin.context = self._context(provider)
             umo = "aiocqhttp:FriendMessage:10001"
@@ -977,30 +997,31 @@ class SpeechWiringTest(PluginCase):
             # 宿主真的把这条语音送出去了 → 确认点这时才写 last_sent_at
             await self._run_confirm(plugin, event, tool_args)
             doc = json.loads((plugin.layout.proactive).read_text(encoding="utf-8"))
-            return messages, doc
+            return messages, doc, provider
 
-        messages, doc = asyncio.run(scenario())
-        self.assertEqual(
-            messages, [{"type": "record", "path": "/tmp/voice/a.mp3"}], "纯语音档：文字被替换"
-        )
+        messages, doc, provider = asyncio.run(scenario())
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["type"], "record")
+        self.assertNotEqual(messages[0]["path"], provider.paths[0])
+        self.assertEqual(Path(messages[0]["path"]).read_bytes(), Path(provider.paths[0]).read_bytes())
         self.assertIn("last_sent_at", doc["sessions"]["aiocqhttp:FriendMessage:10001"],
                       "确认点照常生效（语音不改变两段式）")
 
     def test_dual_mode_appends_record_after_plain(self) -> None:
-        async def scenario() -> list:
-            provider = _FakeTTSProvider({"早安": "/tmp/voice/a.mp3"})
+        async def scenario() -> tuple[list, _FakeTTSProvider]:
+            provider = _FakeTTSProvider({"早安": "→真实临时文件"})
             plugin = self.make_plugin({"voice": {"mode": "dual"}})
             plugin.context = self._context(provider)
             plugin.proactive._pending_speak["aiocqhttp:FriendMessage:10001"] = True
             tool_args = {"messages": [{"type": "plain", "text": "早安"}]}
             await self._run_hook(plugin, self._proactive_event(), tool_args)
-            return tool_args["messages"]
+            return tool_args["messages"], provider
 
-        self.assertEqual(
-            asyncio.run(scenario()),
-            [{"type": "plain", "text": "早安"}, {"type": "record", "path": "/tmp/voice/a.mp3"}],
-            "dual 档：语音在前文字在后（对齐宿主 dual_output 惯例）",
-        )
+        messages, provider = asyncio.run(scenario())
+        self.assertEqual(messages[0], {"type": "plain", "text": "早安"})
+        self.assertEqual(messages[1]["type"], "record")
+        self.assertNotEqual(messages[1]["path"], provider.paths[0])
+        self.assertEqual(Path(messages[1]["path"]).read_bytes(), Path(provider.paths[0]).read_bytes())
 
     def test_off_mode_and_passive_turn_never_touch_messages(self) -> None:
         async def scenario() -> tuple[list, list, list]:
@@ -1089,6 +1110,282 @@ class SpeechWiringTest(PluginCase):
         )
         self.assertFalse(decision["speak"])
         self.assertNotIn("语音", decision["note"])
+
+
+class _VoiceRecord:
+    """宿主 Record 组件的鸭子替身（被动链里剩 Record = 宿主没转写）。"""
+
+    def __init__(self, path: str = "") -> None:
+        self.type = "Record"
+        self.file = ""
+        self.url = ""
+        self.path = path
+
+
+class _FakeSTTProvider:
+    """宿主 STT provider 替身：``get_text(audio_url) -> 文本``。"""
+
+    def __init__(self, mapping: dict[str, str] | None = None, error: bool = False) -> None:
+        self.mapping = mapping or {}
+        self.calls: list[str] = []
+        self.error = error
+
+    async def get_text(self, audio_url: str) -> str:
+        self.calls.append(str(audio_url))
+        if self.error:
+            raise RuntimeError("stt down")
+        return self.mapping.get(str(audio_url), "")
+
+
+class VoiceReliabilityTest(PluginCase):
+    """F2/F3/F4 接线：有界合成降级、文件服务交接、被动转写去重、能力面板。"""
+
+    def _fast_bounds(self, per_call: float = 0.1, total: float = 5.0, segments: int = 3) -> None:
+        """把超时/预算调小让测试够快（真实 wait_for 语义不变，只是数字小）。"""
+        saved = self.module.voice_speak_mod.clamp_config
+        self.addCleanup(setattr, self.module.voice_speak_mod, "clamp_config", saved)
+        self.module.voice_speak_mod.clamp_config = lambda cfg: {
+            "max_segments": segments,
+            "per_call_timeout": per_call,
+            "total_budget": total,
+        }
+
+    def _stt_context(self, provider, host_stt_enable: bool = False) -> SimpleNamespace:
+        config = {"provider_stt_settings": {"enable": host_stt_enable, "provider_id": "x"}}
+
+        async def getter(umo=None):
+            return provider
+
+        return SimpleNamespace(get_config=lambda: config, get_using_stt_provider_async=getter)
+
+    def test_never_returning_tts_degrades_to_text(self) -> None:
+        """TTS 永不返回：单段超时 → 整条保持文字，钩子按时返回（不卡死发送）。"""
+        provider = _NeverTTS()
+        self._fast_bounds(per_call=0.1)
+        plugin = self.make_plugin({"voice": {"mode": "voice"}})
+        plugin.context = SimpleNamespace(get_using_tts_provider_async=self._async_getter(provider))
+        plugin.proactive._pending_speak["aiocqhttp:FriendMessage:10001"] = True
+        args = {"messages": [{"type": "plain", "text": "早安"}]}
+        asyncio.run(plugin.note_proactive_sent(
+            _FakeEvent(extras={"cron_job": {"slot": "morning"}}),
+            SimpleNamespace(name="send_message_to_user"), args,
+        ))
+        self.assertEqual(args["messages"], [{"type": "plain", "text": "早安"}])
+        events = plugin._voice_events.tail()
+        self.assertTrue(events and not events[0]["ok"])
+
+    def test_segment_cap_degrades_extra_segments(self) -> None:
+        """分段上限：3 段只转 1 段，其余保持原文（部分成功也是部分语音）。"""
+        provider = _FakeTTSProvider({"一": "→ok", "二": "→ok", "三": "→ok"})
+        self._fast_bounds(segments=1)
+        plugin = self.make_plugin({"voice": {"mode": "dual"}})
+        plugin.context = SimpleNamespace(get_using_tts_provider_async=self._async_getter(provider))
+        plugin.proactive._pending_speak["aiocqhttp:FriendMessage:10001"] = True
+        args = {"messages": [
+            {"type": "plain", "text": "一"},
+            {"type": "plain", "text": "二"},
+            {"type": "plain", "text": "三"},
+        ]}
+        asyncio.run(plugin.note_proactive_sent(
+            _FakeEvent(extras={"cron_job": {"slot": "morning"}}),
+            SimpleNamespace(name="send_message_to_user"), args,
+        ))
+        kinds = [(m["type"], m.get("text")) for m in args["messages"]]
+        self.assertEqual(
+            kinds,
+            [("plain", "一"), ("record", None), ("plain", "二"), ("plain", "三")],
+            "dual 档：第一段语音在前，超上限的段保持原文",
+        )
+        self.assertEqual(len(provider.paths), 1)
+
+    def test_missing_audio_file_degrades_to_text(self) -> None:
+        """合成产物不存在/为空 = 没合成出来：该段保持原文，不发给协议端一个坏路径。"""
+        plugin = self.make_plugin({"voice": {"mode": "voice"}})
+        plugin.context = SimpleNamespace(get_using_tts_provider_async=self._async_getter(_GhostTTS()))
+        self._fast_bounds()
+        plugin.proactive._pending_speak["aiocqhttp:FriendMessage:10001"] = True
+        args = {"messages": [{"type": "plain", "text": "早安"}]}
+        asyncio.run(plugin.note_proactive_sent(
+            _FakeEvent(extras={"cron_job": {"slot": "morning"}}),
+            SimpleNamespace(name="send_message_to_user"), args,
+        ))
+        self.assertEqual(args["messages"], [{"type": "plain", "text": "早安"}])
+
+    def test_file_service_url_mode(self) -> None:
+        """宿主文件服务开启：record 走限时 URL（协议端跨文件系统时唯一能通的形）。"""
+        registered: list[str] = []
+
+        class _FakeFileService:
+            async def register_file(self, path, timeout=None) -> str:
+                registered.append(str(path))
+                return "tok-1"
+
+        token_module = types.ModuleType("astrbot.core.file_token_service")
+        token_module.file_token_service = _FakeFileService()
+        sys.modules["astrbot.core.file_token_service"] = token_module
+        self.addCleanup(sys.modules.pop, "astrbot.core.file_token_service", None)
+
+        provider = _FakeTTSProvider({"早安": "→ok"})
+        plugin = self.make_plugin({"voice": {"mode": "voice"}})
+        host_cfg = {
+            "provider_tts_settings": {"enable": True, "use_file_service": True},
+            "callback_api_base": "http://127.0.0.1:6185",
+        }
+        plugin.context = SimpleNamespace(
+            get_using_tts_provider_async=self._async_getter(provider),
+            get_config=lambda: host_cfg,
+        )
+        self._fast_bounds()
+        plugin.proactive._pending_speak["aiocqhttp:FriendMessage:10001"] = True
+        args = {"messages": [{"type": "plain", "text": "早安"}]}
+        asyncio.run(plugin.note_proactive_sent(
+            _FakeEvent(extras={"cron_job": {"slot": "morning"}}),
+            SimpleNamespace(name="send_message_to_user"), args,
+        ))
+        self.assertEqual(args["messages"], [{"type": "record", "url": "http://127.0.0.1:6185/api/file/tok-1"}])
+        self.assertEqual(len(registered), 1)
+        self.assertNotEqual(registered, provider.paths, "只注册插件持有的副本，提供方缓存不可删除")
+        self.assertEqual(Path(registered[0]).read_bytes(), Path(provider.paths[0]).read_bytes())
+        self.assertEqual(Path(registered[0]).parent, plugin._voice_cache_dir())
+
+    def test_passive_transcription_fallback_once_and_replay_deduped(self) -> None:
+        """宿主没转写 → 插件用宿主提供方兜底转**一次**；同事件重放不再转。"""
+        provider = _FakeSTTProvider({"/tmp/voice/a.wav": "今晚想吃火锅"})
+        plugin = self.make_plugin({"voice": {"listen_fallback": True}})
+        plugin.context = self._stt_context(provider)
+
+        def fresh_event() -> _FakeEvent:
+            event = _FakeEvent(message_str="")
+            event.message_obj.message_id = "msg-1"
+            event.message_obj.message = [_VoiceRecord(path="/tmp/voice/a.wav")]
+            return event
+
+        event = fresh_event()
+        asyncio.run(plugin._transcribe_incoming(event))
+        self.assertEqual(provider.calls, ["/tmp/voice/a.wav"], "兜底转写调了一次")
+        self.assertIsInstance(event.message_obj.message[0], self.module.Plain, "Record 已换 Plain")
+        self.assertIn("今晚想吃火锅", event.message_str, "文本进 message_str（compose 拿得到）")
+        self.assertIn("今晚想吃火锅", event.message_obj.message_str)
+
+        # 同事件重放：链已换 Plain → 不再调 provider
+        asyncio.run(plugin._transcribe_incoming(event))
+        self.assertEqual(provider.calls, ["/tmp/voice/a.wav"])
+
+        # 新事件对象、同一 (message_id, 音频)：账本去重，也不调
+        asyncio.run(plugin._transcribe_incoming(fresh_event()))
+        self.assertEqual(provider.calls, ["/tmp/voice/a.wav"], "重放不重复处理")
+
+    def test_passive_transcription_skipped_when_host_transcribed(self) -> None:
+        """宿主已转写（链里是 Plain）：插件零动作、零 provider 调用——不做第二次 ASR。"""
+        provider = _FakeSTTProvider()
+        plugin = self.make_plugin({"voice": {"listen_fallback": True}})
+        plugin.context = self._stt_context(provider)
+        event = _FakeEvent(message_str="宿主转好的文字")
+        event.message_obj.message = [self.module.Plain("宿主转好的文字")]
+        asyncio.run(plugin._transcribe_incoming(event))
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(event.message_str, "宿主转好的文字")
+
+    def test_passive_transcription_stt_failure_degrades_readable(self) -> None:
+        """识别提供方抛错：本段按无文字处理，事件环记下可读原因，钩子不抛。"""
+        provider = _FakeSTTProvider(error=True)
+        plugin = self.make_plugin({"voice": {"listen_fallback": True}})
+        plugin.context = self._stt_context(provider)
+        event = _FakeEvent()
+        event.message_obj.message = [_VoiceRecord(path="/tmp/voice/a.wav")]
+        asyncio.run(plugin._transcribe_incoming(event))
+        self.assertEqual(provider.calls, ["/tmp/voice/a.wav"])
+        events = plugin._voice_events.tail()
+        self.assertTrue(events and not events[0]["ok"])
+        self.assertIn("转写失败", events[0]["detail"])
+
+    def test_voice_status_reports_capabilities_honestly(self) -> None:
+        """面板报告：没配 provider 写"不可用"；情绪音色永远"不支持"；带未实机标注。"""
+        plugin = self.make_plugin({"voice": {"mode": "voice"}})
+        plugin.context = SimpleNamespace()  # 宿主什么都没有
+        payload = asyncio.run(plugin.voice_status())
+        self.assertFalse(payload["active"]["tts"]["available"])
+        self.assertFalse(payload["active"]["emotion_voice"]["supported"])
+        self.assertIn("只有文本参数", payload["active"]["emotion_voice"]["reason"])
+        self.assertFalse(payload["device_verified"])
+        self.assertEqual(payload["active"]["mode"], "voice")
+
+    def test_transcript_reaches_already_created_request_and_resolves_record(self) -> None:
+        provider = _FakeSTTProvider({"/host/resolved.wav": "接着今天的散步聊"})
+        plugin = self.make_plugin({"voice": {"listen_fallback": True}})
+        plugin.context = self._stt_context(provider)
+        calls = []
+        record = _VoiceRecord(path="/wrong/raw.amr")
+        async def resolve():
+            calls.append("resolve")
+            return "/host/resolved.wav"
+        record.convert_to_file_path = resolve
+        event = _FakeEvent(message_str="我想说：")
+        event.message_obj.message = [record]
+        req = sys.modules["astrbot.api.provider"].ProviderRequest()
+        req.prompt = "我想说："
+        req.audio_urls = ["/host/resolved.wav"]
+        asyncio.run(plugin.inject_diary_hint(event, req))
+        self.assertEqual(calls, ["resolve"])
+        self.assertEqual(provider.calls, ["/host/resolved.wav"])
+        self.assertIn("接着今天的散步聊", req.prompt)
+        self.assertEqual(req.audio_urls, [], "成功转写后不让模型再处理同一段语音")
+
+    def test_audio_cleanup_only_deletes_owned_copy(self) -> None:
+        plugin = self.make_plugin()
+        plugin._now = lambda: NOON_TEST
+        shared = self.root / "provider-shared.wav"
+        shared.write_bytes(b"provider cache")
+        owned = Path(plugin._owned_voice_copy(str(shared)))
+        plugin._remember_voice_artifact(str(owned))
+        plugin._voice_artifacts[str(shared)] = NOON_TEST.isoformat()
+        plugin._now = lambda: NOON_TEST + timedelta(hours=7)
+        asyncio.run(plugin._sweep_voice_artifacts())
+        self.assertTrue(shared.exists(), "提供方返回的共享缓存不属于插件")
+        self.assertFalse(owned.exists())
+        self.assertEqual(plugin._voice_artifacts, {})
+
+    def test_owned_copy_uses_host_temp_send_allowlist(self) -> None:
+        host_temp = self.root / "host-temp"
+        path_module = types.ModuleType("astrbot.core.utils.astrbot_path")
+        path_module.get_astrbot_temp_path = lambda: str(host_temp)
+        module_name = path_module.__name__
+        previous = sys.modules.get(module_name)
+        sys.modules[module_name] = path_module
+        def restore():
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+        self.addCleanup(restore)
+        plugin = self.make_plugin()
+        source = self.root / "provider.wav"
+        source.write_bytes(b"wav audio")
+        owned = Path(plugin._owned_voice_copy(str(source)))
+        self.assertTrue(owned.is_relative_to(host_temp))
+        self.assertEqual(owned.read_bytes(), source.read_bytes())
+
+    @staticmethod
+    def _async_getter(provider):
+        async def getter(umo=None):
+            return provider
+
+        return getter
+
+
+class _NeverTTS:
+    """永不返回的 TTS 替身（网络挂死）。"""
+
+    async def get_audio(self, text: str) -> str:
+        await asyncio.sleep(30)
+        return "/tmp/fake/never.mp3"  # pragma: no cover - 到不了
+
+
+class _GhostTTS:
+    """返回不存在路径的 TTS 替身（产物落地前被清理的忠实替身）。"""
+
+    async def get_audio(self, text: str) -> str:
+        return "/tmp/definitely-not-here/ghost.mp3"
 
 
 class MoodToolFlowTest(PluginCase):
@@ -2045,6 +2342,116 @@ class LegacyBackfillWiringTest(PluginCase):
 
         plugin.proactive.store = Boom()
         self.assertEqual(plugin._legacy_person_id("和希"), "10001")
+
+
+NOON_TEST = datetime(2026, 10, 26, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+"""群社交观察测试的假时钟：真机会跑到深夜档（免打扰会拦下短聊），不跟时钟走。"""
+
+
+class SocialObserveTest(PluginCase):
+    """群消息观察钩子（群社交任务）：main.py 的薄壳接线。
+
+    判定细节在 ``test_social.py`` 的 core 层；这里钉三件事——范围外不动作、
+    合成事件（cron 唤醒）不观察、短聊唤醒走 ``add_active_job`` 并接管事件。
+    """
+
+    GROUP = "aiocqhttp:GroupMessage:555"
+
+    def _setup_enabled_group(self, plugin) -> None:
+        # 冻结假时钟：真机会跑到深夜档（免打扰会把短聊判死），测试不跟时钟走
+        plugin._now = lambda: NOON_TEST
+        async def seed() -> None:
+            await plugin.social.save_group(
+                {"platform": "aiocqhttp", "group_id": "555", "name": "测试群"},
+                now=plugin._now(),
+            )
+            await plugin.social.save_group({"umo": self.GROUP, "enabled": True}, now=plugin._now())
+            await plugin.social.save_participant(
+                self.GROUP,
+                {"id": "bot1", "name": "小助手", "is_bot": True, "allow_interaction": True},
+                now=plugin._now(),
+            )
+
+        asyncio.run(seed())
+
+    def test_private_scope_ignores_group_messages_entirely(self) -> None:
+        plugin = self.make_plugin()  # 默认 scope=private
+        plugin._now = lambda: NOON_TEST
+        manager = _FakeCronManager()
+        plugin.context = SimpleNamespace(cron_manager=manager)
+        event = _FakeEvent(
+            umo=self.GROUP, type="GroupMessage", group_id="555",
+            sender_id="bot1", sender_name="小助手", message_str="小澄，在吗",
+        )
+        stopped = []
+        event.stop_event = lambda: stopped.append(1)
+        asyncio.run(plugin._social_observe(event))
+        self.assertEqual(stopped, [])
+        self.assertEqual(manager.active, [])
+        self.assertFalse(plugin.layout.social.exists())  # 一个字节不写
+
+    def test_cron_synthetic_group_event_is_not_observed(self) -> None:
+        plugin = self.make_plugin({"scope": {"mode": "all"}})
+        plugin._now = lambda: NOON_TEST
+        event = _FakeEvent(
+            umo=self.GROUP, type="GroupMessage", group_id="555",
+            sender_id="555", sender_name="Scheduler", message_str="（系统注入）",
+            extras={"cron_job": {"name": "wake"}},
+        )
+        asyncio.run(plugin._social_observe(event))
+        self.assertFalse(plugin.layout.social.exists())  # 主动唤醒的合成事件不是群友说话
+
+    def test_registered_bot_addressing_her_wakes_and_takes_over(self) -> None:
+        plugin = self.make_plugin({
+            "scope": {"mode": "all"},
+            "social": {"self_names": "小澄"},
+        })
+        self._setup_enabled_group(plugin)
+        manager = _FakeCronManager()
+        plugin.context = SimpleNamespace(cron_manager=manager)
+        event = _FakeEvent(
+            umo=self.GROUP, type="GroupMessage", group_id="555",
+            sender_id="bot1", sender_name="小助手", message_str="小澄，在吗",
+        )
+        stopped = []
+        event.stop_event = lambda: stopped.append(1)
+        asyncio.run(plugin._social_observe(event))
+        self.assertEqual(stopped, [1])  # 接管事件：宿主管线不再为同一个 @ 起一轮
+        self.assertEqual(len(manager.active), 1)  # 走既有唤醒通道
+        payload = manager.active[0]["payload"]
+        self.assertEqual(payload["session"], self.GROUP)
+        self.assertIn("小助手说", payload["note"])
+        pending = plugin.proactive._pending_log.get(self.GROUP)
+        self.assertEqual(pending["slot"], "group_chat")  # 回执两段式第一步已暂存
+        # 重放同一条：不再唤醒，仍接管以阻止宿主绕过防环。
+        stopped.clear()
+        event2 = _FakeEvent(
+            umo=self.GROUP, type="GroupMessage", group_id="555",
+            sender_id="bot1", sender_name="小助手", message_str="小澄，在吗",
+        )
+        event2.stop_event = lambda: stopped.append(1)
+        asyncio.run(plugin._social_observe(event2))
+        self.assertEqual(stopped, [1], "重复短聊也必须接管，防宿主默认回复绕过防环")
+        self.assertEqual(len(manager.active), 1)
+
+    def test_quota_denial_still_stops_host_reply_without_waking_or_consuming_round(self) -> None:
+        plugin = self.make_plugin({
+            "scope": {"mode": "all"}, "social": {"self_names": "小澄"},
+            "proactive": {"daily_limit_group": 0},
+        })
+        self._setup_enabled_group(plugin)
+        manager = _FakeCronManager()
+        plugin.context = SimpleNamespace(cron_manager=manager)
+        event = _FakeEvent(umo=self.GROUP, type="GroupMessage", group_id="555",
+                           sender_id="bot1", message_str="小澄，在吗")
+        stops = []
+        event.stop_event = lambda: stops.append(1)
+        asyncio.run(plugin._social_observe(event))
+        self.assertEqual(stops, [1])
+        self.assertEqual(manager.active, [])
+        doc = plugin.social.store.read()
+        self.assertFalse(doc.get("chats"))
+        self.assertTrue(any("配额" in str(item.get("reason")) for item in doc.get("decisions", [])))
 
 
 if __name__ == "__main__":

@@ -82,12 +82,14 @@ def speakable_indices(messages: Any) -> list[int]:
 
 
 def apply_audio(
-    messages: list[Any], audio: dict[int, str], *, mode: str
+    messages: list[Any], audio: dict[int, str], *, mode: str, url_mode: bool = False
 ) -> list[Any] | None:
-    """把合成好的音频（``{plain 下标: 音频路径}``）变换进消息列表。
+    """把合成好的音频（``{plain 下标: 音频路径或 URL}``）变换进消息列表。
 
     - ``voice`` 档：plain **替换**为 ``{"type": "record", "path": ...}``；
     - ``dual`` 档：plain 保留，record 插在它**后面**（宿主 dual_output 同序）；
+    - ``url_mode=True``：record 改带 ``url`` 键——宿主文件服务的交接契约
+      （``callback_api_base/api/file/<token>``，协议端与宿主不同文件系统时唯一能通的形）；
     - **没有任何一处成功 → 返回 None**（调用方保持原对象，不发半截语音）；
     - 非 plain 组件一个字节不碰。
 
@@ -106,7 +108,8 @@ def apply_audio(
         if not is_plain or not path:
             out.append(item)
             continue
-        record = {"type": "record", "path": str(path)}
+        record: dict[str, str] = {"type": "record"}
+        record["url" if url_mode else "path"] = str(path)
         if mode == "dual":
             out.append(item)
             out.append(record)

@@ -28,6 +28,8 @@
   "use strict";
 
   global.createSettingsView = function createSettingsView(ctx) {
+    var petDevices = global.DiaryViews && global.DiaryViews.PetDevices
+      ? global.DiaryViews.PetDevices(ctx) : null;
     var holder = null;
     var schema = null;       /* GET settings 的响应 */
     var baseline = null;     /* path → 已保存的值。**只读基线**，永远拿它比对"改过没有" */
@@ -634,13 +636,79 @@
       return details;
     }
 
+    /* ---- 语音能力卡（F4）：数据来自 GET voice/status，只显示查证过的事实。
+       与设置保存完全无关（不可编辑）；宿主能力缺失时给可读原因，绝不摆假开关。 */
+    function fillVoiceStatus(card) {
+      var UI = ctx.UI;
+      ctx.apiGet("voiceStatus", {}).then(function (data) {
+        if (!card.isConnected) return;  /* 重画后旧卡已丢弃 */
+        UI.clear(card);
+        card.appendChild(UI.h("h3", { text: "语音能力" }));
+        if (!data || data.error) {
+          card.appendChild(UI.errorBox("语音能力：" + String((data && data.error) || "查询失败")));
+          return;
+        }
+        var active = data.active || {};
+        var tts = active.tts || {};
+        var listen = data.listen || {};
+        var file = data.file_service || {};
+        var yesno = function (v) {
+          if (v === true) return "可用";
+          if (v === false) return "不可用";
+          return "未知";
+        };
+        var row = function (title, value, sub) {
+          var box = UI.h("div", { class: "row" }, [UI.h("div", { class: "row-main" }, [
+            UI.h("div", { class: "row-title", text: title }),
+            sub ? UI.h("div", { class: "row-sub", text: sub }) : null,
+          ]), UI.h("div", { class: "row-actions" }, [UI.h("span", { class: "tag", text: value })])]);
+          return box;
+        };
+        card.appendChild(row("语音合成（主动开口）", yesno(tts.available),
+          tts.detail || (tts.available ? "她的主动消息可转语音发出" : "")));
+        card.appendChild(row("情绪音色控制", "不支持", "宿主 TTS 只接受文本参数，音色/语速在提供方配置里"));
+        card.appendChild(row("语音识别（听懂他的语音）",
+          listen.effective === "host" ? "宿主转写" :
+          listen.effective === "plugin-fallback" ? "插件兜底" : "不可用",
+          listen.detail || ""));
+        card.appendChild(row("音频文件服务", file.mode === "url" ? "URL 交接" : "本地路径", file.detail || ""));
+        var bounds = "分段上限 " + (active.max_segments === undefined ? "—" : active.max_segments)
+          + " · 单段超时 " + (active.tts_timeout_seconds === undefined ? "—" : active.tts_timeout_seconds) + "s"
+          + " · 总预算 " + (active.tts_total_seconds === undefined ? "—" : active.tts_total_seconds) + "s";
+        card.appendChild(row("可靠性边界", "已生效", bounds));
+        var artifacts = data.artifacts || {};
+        card.appendChild(row("音频台账", (artifacts.tracked === undefined ? "—" : artifacts.tracked) + " 个在册",
+          "保留 " + (artifacts.retention_hours === undefined ? "—" : artifacts.retention_hours) + " 小时，到期自动清理"));
+        var events = data.events || [];
+        if (events.length) {
+          var eBox = UI.h("div", { class: "card panel" }, [UI.h("h3", { text: "最近语音事件" })]);
+          events.slice(0, 5).forEach(function (item) {
+            eBox.appendChild(UI.h("div", { class: "row" }, [
+              UI.h("div", { class: "row-main" }, [
+                UI.h("div", { class: "row-title", text: (item.ok ? "✓ " : "✗ ") + (item.detail || item.kind) }),
+                UI.h("div", { class: "row-sub", text: UI.shortTime(item.ts) + " · " + (item.kind === "active-tts" ? "主动合成" : item.kind === "passive-stt" ? "被动转写" : item.kind === "cleanup" ? "音频清理" : item.kind) }),
+              ]),
+            ]));
+          });
+          card.appendChild(eBox);
+        }
+        if (!data.device_verified) {
+          card.appendChild(UI.h("div", { class: "sub", text: data.untested_note || "" }));
+        }
+      }).catch(function (error) {
+        if (!card.isConnected) return;
+        UI.clear(card);
+        card.appendChild(UI.h("h3", { text: "语音能力" }));
+        card.appendChild(UI.errorBox("语音能力：" + String((error && error.message) || error)));
+      });
+    }
+
     function render() {
       var UI = ctx.UI;
       disarmReset();          /* 重画前先解除确认态：旧按钮马上被丢弃，别让 armed 状态漏到新按钮上 */
       UI.clear(holder);
       controls = {};
       groups = {};
-
       /* ---- 顶部固定区：未保存计数 + 按钮 + problems 黄条 ---- */
       els.dirty = UI.h("span", { class: "set-dirty", id: "set-dirty" });
       els.problems = UI.h("div", { class: "set-problems", id: "set-problems", hidden: true });
@@ -687,6 +755,21 @@
 
       /* ---- 分组 ---- */
       (schema.groups || []).forEach(function (node) { holder.appendChild(renderGroup(node)); });
+
+      /* 桌宠状态同步设备管理独立于配置草稿；设置重画时复用同一组件实例，
+         避免保存其他设置时丢掉刚签发的一次性凭据。 */
+      var petDeviceHost = UI.h("div", { class: "pet-device-mount" });
+      holder.appendChild(petDeviceHost);
+      if (petDevices) petDevices.mount(petDeviceHost);
+      else petDeviceHost.appendChild(UI.h("div", { class: "card panel", text: "桌宠设备管理组件未加载。请刷新面板后重试。" }));
+
+      /* ---- 语音能力卡（F4）：只显示查证过的事实，不参与设置保存 ---- */
+      var voiceCard = UI.h("div", { class: "card panel", id: "voice-capability" }, [
+        UI.h("h3", { text: "语音能力" }),
+        UI.h("div", { class: "sub", text: "正在查询宿主能力…" }),
+      ]);
+      holder.appendChild(voiceCard);
+      fillVoiceStatus(voiceCard);
 
       if (schema.notices && schema.notices.length) {
         var noteBox = UI.h("div", { class: "set-notice sub" });
@@ -981,12 +1064,21 @@
       schema = await ctx.apiGet("settings", {});
       baseline = clone(schema.values);
       render();
+      if (petDevices) await petDevices.refresh();
     }
 
     return {
       mount: function (target) { holder = target; },
       refresh: refresh,
-      unmount: function () { disarmReset(); holder = null; },
+      hasUnsavedChanges: function () {
+        var pending = computeState();
+        return pending.dirtyPaths.length > 0 || pending.problems.length > 0;
+      },
+      unmount: function () {
+        disarmReset();
+        if (petDevices) petDevices.unmount();
+        holder = null;
+      },
     };
   };
 })(window);

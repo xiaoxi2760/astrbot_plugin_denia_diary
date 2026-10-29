@@ -552,10 +552,11 @@ class DiaryApiTest(TmpDirCase):
                 self.assertNotIn("今天还没写", line, f"{hour}:30 不该出现「今天还没写」")
 
     def test_prompt_line_shows_previous_entry(self) -> None:
+        """私聊才念"上一条"：群聊里 sender 的私聊日记正文不外泄（同见 continuity 用例）。"""
         diary = make_diary(self.root)
         yesterday = datetime(2026, 10, 3, 21, 0, tzinfo=TZ)
-        run(diary.write_async(group_session(), text="昨天写的开头一句", now=yesterday))
-        line = diary.prompt_line(group_session(), now=NOW)
+        run(diary.write_async(private_session(), text="昨天写的开头一句", now=yesterday))
+        line = diary.prompt_line(private_session(), now=NOW)
         self.assertIn("上一条是 2026-10-03", line)
 
     def test_event_hint_needs_a_trigger_and_cools_down(self) -> None:

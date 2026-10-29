@@ -1,0 +1,260 @@
+{
+  "type": "object",
+  "required": [
+    "schema_version",
+    "agent_id",
+    "device_id",
+    "server_time",
+    "timezone",
+    "ttl_seconds",
+    "valid_until",
+    "refresh_after_seconds",
+    "life",
+    "mood",
+    "presentation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "server_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "ttl_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 60
+    },
+    "valid_until": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "refresh_after_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 60
+    },
+    "life": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "status",
+        "date",
+        "revision",
+        "current",
+        "next"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "planning",
+            "empty",
+            "disabled",
+            "unavailable"
+          ]
+        },
+        "date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "current": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "id",
+                "title",
+                "location",
+                "start_at",
+                "end_at",
+                "status"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 60
+                },
+                "location": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 60
+                },
+                "start_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "end_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "status": {
+                  "enum": [
+                    "current",
+                    "planned"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "id",
+                "title",
+                "location",
+                "start_at",
+                "end_at",
+                "status"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 60
+                },
+                "location": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 60
+                },
+                "start_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "end_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "status": {
+                  "enum": [
+                    "current",
+                    "planned"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "mood": {
+      "type": "object",
+      "required": [
+        "status",
+        "word",
+        "observed_at",
+        "valid_until"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "fresh",
+            "stale",
+            "empty",
+            "disabled",
+            "unavailable"
+          ]
+        },
+        "word": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 60
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "required": [
+        "expression"
+      ],
+      "properties": {
+        "expression": {
+          "enum": [
+            "neutral",
+            "happy"
+          ]
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Denia pet state snapshot v1"
+}

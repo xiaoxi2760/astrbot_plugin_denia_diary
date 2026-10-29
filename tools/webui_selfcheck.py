@@ -34,11 +34,19 @@ NEW_FILES = (
     "core/webui_data.py",
     "core/webui_settings.py",
     "core/webui_portrait.py",
+    "core/social/__init__.py",
+    "core/social/api.py",
+    "core/social/chat.py",
+    "core/social/registry.py",
+    "core/social/store.py",
+    "core/social/topics.py",
     "web_api/__init__.py",
     "web_api/_web.py",
     "web_api/routes.py",
     "web_api/handlers.py",
     "test/test_scope.py",
+    "test/test_social.py",
+    "test/test_web_api_social.py",
     "test/test_webui_data.py",
     "test/test_webui_settings.py",
     "test/test_webui_portrait.py",
@@ -47,13 +55,29 @@ NEW_FILES = (
     "pages/diary/ui.js",
     "pages/diary/style.css",
     "pages/diary/preview-bridge.js",
+    "test/frontend/test_social_view.cjs",
     "pages/diary/views/overview.js",
     "pages/diary/views/diary.js",
     "pages/diary/views/notebook.js",
     "pages/diary/views/affinity.js",
     "pages/diary/views/proactive.js",
+    "pages/diary/views/social.js",
     "pages/diary/views/settings.js",
     "pages/diary/views/data.js",
+    "pages/diary/views/imagery.js",
+    "core/imagery/__init__.py",
+    "core/imagery/api.py",
+    "core/imagery/cache.py",
+    "core/imagery/prompt.py",
+    "core/imagery/providers.py",
+    "core/imagery/quota.py",
+    "core/imagery/transport.py",
+    "test/test_imagery_prompt.py",
+    "test/test_imagery_cache_quota.py",
+    "test/test_imagery_providers.py",
+    "test/test_imagery_api.py",
+    "test/test_web_api_imagery.py",
+    "test/frontend/test_imagery_view.cjs",
 )
 
 failures: list[str] = []
@@ -171,6 +195,11 @@ def referenced_keys(endpoints: dict[str, str]) -> set[str]:
         for key in endpoints:
             if key not in found and re.search(rf"\b{re.escape(key)}\b", source):
                 found.add(key)
+    # Scope-aware upload is implemented inside app.js, beyond the endpoint table.
+    source = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
+    for key in re.findall(r'api(?:Get|Post)Scoped\(\s*scopeId\s*,\s*["\x27]([^"\x27]+)["\x27]', source):
+        if key in endpoints:
+            found.add(key)
     return found
 
 
@@ -180,12 +209,24 @@ def handler_names() -> set[str]:
         if not isinstance(node, ast.FunctionDef) or node.name != "build_handlers":
             continue
         for inner in ast.walk(node):
-            if not isinstance(inner, ast.Return) or not isinstance(inner.value, ast.Dict):
+            # build_handlers may wrap the named table before returning it.
+            value = None
+            if isinstance(inner, ast.Return):
+                value = inner.value
+            elif isinstance(inner, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "handlers" for target in inner.targets):
+                value = inner.value
+            if not isinstance(value, ast.Dict):
                 continue
             names: set[str] = set()
-            for key in inner.value.keys:
+            for key in value.keys:
                 if isinstance(key, ast.Constant) and isinstance(key.value, str):
                     names.add(key.value)
+            for assignment in ast.walk(node):
+                if not isinstance(assignment, ast.Assign):
+                    continue
+                for target in assignment.targets:
+                    if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == "handlers" and isinstance(target.slice, ast.Constant) and isinstance(target.slice.value, str):
+                        names.add(target.slice.value)
             return names
     raise AssertionError("handlers.py 里找不到 build_handlers 的返回表")
 
@@ -219,7 +260,7 @@ def main() -> int:
 
     for name in ("app.js", "ui.js", "style.css", "preview-bridge.js"):
         check((PAGE_DIR / name).is_file(), f"页面目录里少文件：{name}")
-    for view in ("overview", "diary", "notebook", "affinity", "proactive", "settings"):
+    for view in ("overview", "life", "imagery", "diary", "notebook", "affinity", "proactive", "settings"):
         check((PAGE_DIR / "views" / f"{view}.js").is_file(), f"少了视图：views/{view}.js")
     for name in re.findall(r'src="\./views/([^"]+)"', html):
         check((PAGE_DIR / "views" / name.split("?")[0]).is_file(), f"index.html 引的视图不存在：{name}")
